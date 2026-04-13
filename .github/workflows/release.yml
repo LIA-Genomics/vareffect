@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,27 +21,41 @@ jobs:
   # ── Library crate first (CLI depends on it) ──
   publish-lib:
     runs-on: ubuntu-24.04
+    environment: release
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
       - name: Publish vareffect lib
         run: |
-          cargo publish -p vareffect --token ${{ secrets.CRATES_IO_TOKEN }} || {
+          cargo publish -p vareffect || {
             echo "::warning::Publish failed — version may already exist on crates.io"
           }
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   # ── CLI crate after lib is indexed ──
   publish-cli:
     needs: publish-lib
     runs-on: ubuntu-24.04
+    environment: release
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
       - name: Publish CLI (retry until lib is indexed)
         run: |
           for attempt in 1 2 3 4 5; do
             echo "Attempt $attempt: publishing vareffect-cli..."
-            if cargo publish -p vareffect-cli --token ${{ secrets.CRATES_IO_TOKEN }}; then
+            if cargo publish -p vareffect-cli; then
               echo "Published successfully on attempt $attempt"
               exit 0
             fi
@@ -48,6 +63,8 @@ jobs:
             sleep 30
           done
           echo "::warning::All 5 attempts failed — version may already exist on crates.io"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   # ── Prebuilt binaries for users without Rust ──
   build-binaries:
