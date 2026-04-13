@@ -2,10 +2,11 @@
 name = "vareffect-cli"
 version.workspace = true
 edition.workspace = true
-description = "Build tooling for vareffect runtime data (reference genome binary, transcript models)."
+description = "CLI for vareffect — annotate genomic variants without Ensembl VEP"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/LIA-Genomics/vareffect"
+homepage = "https://lia-genomics.com"
 keywords = ["bioinformatics", "genomics", "vep", "hgvs", "variant"]
 categories = ["command-line-utilities", "science::bioinformatics"]
 

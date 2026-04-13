@@ -6,6 +6,8 @@ description = "Variant consequence prediction and HGVS notation, concordant with
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/LIA-Genomics/vareffect"
+homepage = "https://lia-genomics.com"
+documentation = "https://docs.rs/vareffect"
 keywords = ["bioinformatics", "genomics", "vep", "hgvs", "variant"]
 categories = ["science::bioinformatics"]
 
