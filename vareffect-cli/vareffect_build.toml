@@ -1,0 +1,53 @@
+# vareffect-cli build configuration.
+#
+# This file configures `vareffect setup` -- the one-command provisioner
+# for all vareffect runtime data. It can also be pointed at via
+# `--config` when running individual subcommands.
+#
+# The parser silently ignores unknown top-level sections, so this file can
+# be shared with other build tools that add their own sections without
+# requiring changes here.
+
+[paths]
+raw_dir = "data/raw"
+
+# Optional [mane] section. When present, the `input` field overrides the
+# default GFF3 cache filename so a downstream pipeline can pre-stage the
+# MANE GFF3 and have `vareffect setup` reuse it instead of re-downloading.
+[mane]
+input = "mane_grch38.gff.gz"
+
+[vareffect]
+# Reference genome -- NCBI RefSeq GRCh38.p14 full assembly (includes every
+# `NC_*` primary chromosome plus all `NW_*`/`NT_*` patch scaffolds).
+# Contig naming aligns with the MANE GFF3 column 1, so patch transcripts
+# in `transcript_models.bin` can be resolved directly against the genome.
+#
+# The source is plain gzip; `vareffect-cli setup` decompresses it to a
+# transient staging file, then converts it to a flat binary (`GRCh38.bin`)
+# with a sibling `.bin.idx` MessagePack index for memory-mapped random
+# access at runtime. The transient decompress + convert step requires
+# ~7 GB free across `raw_dir` + `output_dir` during setup.
+fasta_url      = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
+fasta_filename = "GRCh38.bin"
+fasta_build    = "GRCh38"
+
+# Transcript models -- MANE v1.5 GFF3 + summary TSV for cross-validation.
+# The summary is required (not optional), because `vareffect-cli setup` is
+# the production build path and mismatches between the GFF3 and summary are
+# a build-blocking signal.
+gff_url                   = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+summary_url               = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.summary.txt.gz"
+summary_input             = "mane_transcript_models_v1.5.summary.tsv.gz"
+transcript_models_version = "1.5"
+
+# NCBI assembly report. Parsed by `vareffect-cli setup` into
+# `data/vareffect/patch_chrom_aliases.csv`, which feeds cross-validation of
+# patch-contig transcripts in the MANE summary TSV. The report is a small
+# (~2 MB) plain-text TSV; NCBI publishes a fresh one with every patch bump.
+assembly_report_url       = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_report.txt"
+assembly_report_input     = "GCF_000001405.40_GRCh38.p14_assembly_report.txt"
+
+# Output directory for the final runtime files (GRCh38.bin, GRCh38.bin.idx,
+# transcript_models.bin, .sha256, manifest.json).
+output_dir = "data/vareffect"

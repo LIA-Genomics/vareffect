@@ -1,0 +1,102 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # Library crate first (CLI depends on it)
+  publish-lib:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish -p vareffect --token ${{ secrets.CRATES_IO_TOKEN }}
+
+  # CLI crate after lib is indexed
+  publish-cli:
+    needs: publish-lib
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish CLI (retry until lib is indexed)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt: publishing vareffect-cli..."
+            if cargo publish -p vareffect-cli --token ${{ secrets.CRATES_IO_TOKEN }}; then
+              echo "Published successfully on attempt $attempt"
+              exit 0
+            fi
+            echo "Attempt $attempt failed, waiting 30s..."
+            sleep 30
+          done
+          echo "All 5 attempts failed"
+          exit 1
+
+  # Prebuilt binaries for users without Rust
+  build-binaries:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build -p vareffect-cli --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build -p vareffect-cli --release --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../vareffect-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz vareffect
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../vareffect-${{ env.RELEASE_TAG }}-${{ matrix.target }}.zip vareffect.exe
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            vareffect-*.tar.gz
+            vareffect-*.zip

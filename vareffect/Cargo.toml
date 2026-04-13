@@ -1,0 +1,22 @@
+[package]
+name = "vareffect"
+version.workspace = true
+edition.workspace = true
+description = "Variant consequence prediction and HGVS notation, concordant with Ensembl VEP."
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/LIA-Genomics/vareffect"
+keywords = ["bioinformatics", "genomics", "vep", "hgvs", "variant"]
+categories = ["science::bioinformatics"]
+
+[dependencies]
+coitrees      = { workspace = true }
+memmap2       = { workspace = true }
+rmp-serde     = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+rayon    = { workspace = true }
+tempfile = { workspace = true }

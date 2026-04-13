@@ -1,0 +1,10 @@
+/target
+.claude
+*.swp
+*.swo
+.DS_Store
+.idea/
+data/
+# large concordance harness — per-run mismatch dump, never committed.
+# The ground-truth TSV in the same directory IS committed.
+*.log

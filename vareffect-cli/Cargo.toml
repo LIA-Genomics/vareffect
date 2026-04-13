@@ -1,0 +1,62 @@
+[package]
+name = "vareffect-cli"
+version.workspace = true
+edition.workspace = true
+description = "Build tooling for vareffect runtime data (reference genome binary, transcript models)."
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/LIA-Genomics/vareffect"
+keywords = ["bioinformatics", "genomics", "vep", "hgvs", "variant"]
+categories = ["command-line-utilities", "science::bioinformatics"]
+
+[[bin]]
+name = "vareffect"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+vareffect.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde.workspace = true
+toml.workspace = true
+
+# Hashing
+sha2.workspace = true
+hex.workspace = true
+
+# I/O
+flate2.workspace = true
+
+# Parallelism
+rayon.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Progress
+indicatif.workspace = true
+
+# HTTP (blocking only -- no async runtime)
+reqwest = { workspace = true, features = ["blocking"] }
+
+# Terminal formatting
+console.workspace = true
+
+# Platform directories
+dirs.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Structured logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

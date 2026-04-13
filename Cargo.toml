@@ -1,0 +1,35 @@
+[workspace]
+members = ["vareffect", "vareffect-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+rust-version = "1.94.1"
+edition = "2024"
+
+[workspace.dependencies]
+# Internal crate
+vareffect = { path = "vareffect", version = "0.1.0" }
+
+# External crates: pinned versions shared across workspace members
+anyhow             = "1"
+chrono             = { version = "0.4", features = ["serde"] }
+clap               = { version = "4", features = ["derive"] }
+coitrees           = "0.4"
+console            = "0.16.3"
+dirs               = "6"
+flate2             = "1"
+hex                = "0.4"
+indicatif          = "0.18"
+memmap2            = "0.9"
+rayon              = "1"
+reqwest            = { version = "0.13.2", default-features = false, features = ["json", "native-tls"] }
+rmp-serde          = "1"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+sha2               = "0.11"
+tempfile           = "3"
+thiserror          = "2"
+toml               = "1.1.0"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
