@@ -1,5 +1,13 @@
 # vareffect
 
+
+[![CI](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml)
+[![vareffect](https://img.shields.io/crates/v/vareffect.svg?label=vareffect)](https://crates.io/crates/vareffect)
+[![vareffect-cli](https://img.shields.io/crates/v/vareffect-cli.svg?label=vareffect-cli)](https://crates.io/crates/vareffect-cli)
+[![docs.rs](https://docs.rs/vareffect/badge.svg)](https://docs.rs/vareffect)
+[![Apache-2.0](https://img.shields.io/crates/l/vareffect)](#license)
+
+
 Variant consequence prediction and HGVS notation in Rust, concordant with [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/).
 
 vareffect takes a variant (chromosome, position, ref, alt) and returns Sequence Ontology consequence terms, HGVS c./p. notation, and NMD prediction for every overlapping transcript -- the same questions VEP answers, at 100--400x the speed, with zero runtime dependencies. The engine is thread-safe (`Send + Sync`), memory-mapped, and designed to embed directly into Rust pipelines.

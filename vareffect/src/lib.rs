@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! `vareffect` — Variant consequence prediction and HGVS notation, targeting
 //! near-100% concordance with Ensembl VEP (release 115/116).
 //!

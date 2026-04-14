@@ -1,5 +1,8 @@
 # vareffect-cli
 
+[![crates.io](https://img.shields.io/crates/v/vareffect-cli.svg)](https://crates.io/crates/vareffect-cli)
+[![CI status](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-genomics/vareffect/actions/workflows/ci.yml)
+
 CLI for the [`vareffect`](https://crates.io/crates/vareffect) variant
 consequence prediction engine. Installs as a single binary named
 `vareffect` with four capabilities:
@@ -204,5 +207,6 @@ Delete `data/raw/` after setup if disk is tight.
 
 ## License
 
-Dual-licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
-or [MIT](https://opensource.org/licenses/MIT) at your option.
+Apache License, Version 2.0
+([LICENSE-APACHE](LICENSE-APACHE) or
+<https://www.apache.org/licenses/LICENSE-2.0>)

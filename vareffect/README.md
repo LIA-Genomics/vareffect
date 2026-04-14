@@ -2,11 +2,10 @@
 
 Rust variant consequence prediction and HGVS notation, concordant with
 [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/).
-
-<!-- TODO: set real badge URLs after the first `cargo publish` / CI setup. -->
-<!-- [![crates.io](https://img.shields.io/crates/v/vareffect.svg)](https://crates.io/crates/vareffect) -->
-<!-- [![docs.rs](https://img.shields.io/docsrs/vareffect)](https://docs.rs/vareffect) -->
-<!-- [![license](https://img.shields.io/crates/l/vareffect.svg)](#license) -->
+ 
+[![crates.io](https://img.shields.io/crates/v/vareffect.svg)](https://crates.io/crates/vareffect)
+[![docs.rs](https://img.shields.io/docsrs/vareffect)](https://docs.rs/vareffect)
+[![CI status](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-genomics/vareffect/actions/workflows/ci.yml)
 
 `vareffect` takes a variant (chromosome, position, reference allele,
 alternate allele) and tells you what it does to every transcript that
@@ -333,16 +332,10 @@ FASTA_PATH="$(pwd)/data/vareffect/GRCh38.bin" CONCORDANCE_THREADS=1 \
 
 ## License
 
-Dual-licensed under either of
-
-- Apache License, Version 2.0
+Apache License, Version 2.0
   ([LICENSE-APACHE](LICENSE-APACHE) or
   <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license
-  ([LICENSE-MIT](LICENSE-MIT) or
-  <https://opensource.org/licenses/MIT>)
 
-at your option.
 
 ## Contributing
 
