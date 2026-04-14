@@ -157,6 +157,59 @@ The gap is almost entirely I/O: VEP reads BGZF-compressed FASTA through block de
 
 vareffect targets concordance with VEP releases 115/116. Validated against 136 hand-curated variants across 6 test suites (6/6 pass as of 2026-04-11). Full details in [`VEP_DIVERGENCES.md`](vareffect/VEP_DIVERGENCES.md).
 
+### Large-scale concordance
+
+At-scale run over 50,000 variants (45,644 compared after skipping rows without a RefSeq transcript): 99.38% consequence concordance, 97.52% HGVS c., 97.72% HGVS p., 99.78% IMPACT, 98.10% protein start. Zero vareffect errors or panics.
+
+```
+============================================================
+LARGE-SCALE VEP CONCORDANCE REPORT
+============================================================
+Total TSV rows:                50000
+Skipped (no RefSeq tc):           97
+Skipped (vareffect error):         0
+Skipped (vareffect PANIC):         0  <- hard bugs, see mismatches.log
+Transcript not found:           4259
+Transcript version mismatch:       0
+Compared:                      45644
+
+Consequence concordance:   45361/45644 (99.38%)
+  Exact match:             40180       (88.03%)
+  Normalised (splice/NMD):  4504       (9.87%)
+  Real mismatch:             283       (0.62%)
+
+HGVS c. concordance:       44511/45641 (97.52%)
+HGVS p. concordance:       33008/33777 (97.72%)
+Impact concordance:        45543/45644 (99.78%)
+Protein start concordance: 33447/34096 (98.10%)
+
+TOP MISMATCH PATTERNS (up to 20):
+    728x  hgvsc
+    365x  protein_start
+    338x  hgvsp
+    316x  hgvsc+hgvsp
+    184x  hgvsp+protein_start
+    144x  csq
+     66x  hgvsc+protein_start
+     53x  csq+impact
+     24x  csq+hgvsp
+     18x  csq+hgvsp+protein_start
+     13x  csq+hgvsp+impact
+     13x  impact
+      7x  csq+protein_start
+      5x  csq+hgvsc+hgvsp+impact
+      5x  csq+hgvsc+protein_start
+      3x  csq+hgvsc+hgvsp
+      3x  csq+hgvsc+impact
+      3x  hgvsp+impact+protein_start
+      2x  csq+hgvsc
+      2x  csq+hgvsc+impact+protein_start
+
+Throughput: 249684 variants/second
+Elapsed:    0.2s
+============================================================
+```
+
 ### Intentional divergences
 
 | Area | vareffect behaviour | VEP behaviour |
