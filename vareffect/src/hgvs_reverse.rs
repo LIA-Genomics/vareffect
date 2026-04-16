@@ -50,6 +50,22 @@ pub struct GenomicVariant {
     pub alt_allele: Vec<u8>,
 }
 
+/// HGVS c. resolution result with transcript-version provenance.
+///
+/// Returned by [`crate::VarEffect::resolve_hgvs_c_with_meta`] so callers
+/// can detect when the transcript version they asked for was not present
+/// in the store and a different version was used instead. `resolved_accession`
+/// holds the accession (with version) that was actually matched — when it
+/// differs from the caller's input accession the caller is observing
+/// transcript-version drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHgvsC {
+    /// Genomic coordinates reverse-mapped from the HGVS c. notation.
+    pub variant: GenomicVariant,
+    /// Accession (with version) actually used from the transcript store.
+    pub resolved_accession: String,
+}
+
 // ---------------------------------------------------------------------------
 // Parsed HGVS c. types
 // ---------------------------------------------------------------------------
@@ -831,11 +847,23 @@ fn build_delins(
 // Transcript lookup
 // ---------------------------------------------------------------------------
 
-/// Look up a transcript by accession, with version-agnostic fallback.
+/// Look up a transcript by accession, with version-tolerant fallback.
 ///
-/// 1. Exact match (versioned, e.g. `"NM_000546.6"`)
-/// 2. If no `.` in accession: scan for highest version matching the prefix
-/// 3. If still not found: `TranscriptNotFound`
+/// 1. Exact match (e.g. `"NM_000546.6"`) — return immediately.
+/// 2. Otherwise, derive the base accession (everything before the first
+///    `.`, or the whole string if no dot) and scan the store for entries
+///    whose accession starts with `"{base}."` and whose suffix parses as
+///    a `u32`. Return the pair with the highest version.
+/// 3. If still not found: `TranscriptNotFound`.
+///
+/// The fallback runs for **both** unversioned inputs (e.g. `"NM_000546"`)
+/// and dotted inputs that miss the exact index (e.g. `"NM_000546.3"` when
+/// the store only carries `.6`). The clinical trade-off — CDS coordinates
+/// can shift between transcript versions when exon structure changes — is
+/// the same one `lia-resolve-clients` already makes on the VEP REST
+/// fallback path. Callers that need to surface drift to end users should
+/// use [`VarEffect::resolve_hgvs_c_with_meta`], which returns the
+/// resolved accession alongside the coordinates.
 fn lookup_transcript<'a>(
     accession: &str,
     store: &'a TranscriptStore,
@@ -845,26 +873,26 @@ fn lookup_transcript<'a>(
         return Ok(pair);
     }
 
-    // Version-agnostic fallback: only if the accession has no dot.
-    if !accession.contains('.') {
-        let prefix = format!("{accession}.");
-        let mut best: Option<(&TranscriptModel, u32)> = None;
+    // Version-tolerant fallback: RefSeq/Ensembl accessions all use a
+    // single `.` as the version separator, so splitting at the first dot
+    // yields the unique base accession for the versioned input case.
+    let base = accession.split_once('.').map_or(accession, |(b, _)| b);
+    let prefix = format!("{base}.");
+    let mut best: Option<(&TranscriptModel, u32)> = None;
 
-        for tx in store.transcripts() {
-            if let Some(rest) = tx.accession.strip_prefix(&prefix)
-                && let Ok(ver) = rest.parse::<u32>()
-                && best.is_none_or(|(_, v)| ver > v)
-            {
-                best = Some((tx, ver));
-            }
+    for tx in store.transcripts() {
+        if let Some(suffix) = tx.accession.strip_prefix(&prefix)
+            && let Ok(ver) = suffix.parse::<u32>()
+            && best.is_none_or(|(_, v)| ver > v)
+        {
+            best = Some((tx, ver));
         }
+    }
 
-        if let Some((tx, _)) = best {
-            // Re-lookup via the store to get the paired LocateIndex.
-            if let Some(pair) = store.get_by_accession(&tx.accession) {
-                return Ok(pair);
-            }
-        }
+    if let Some((tx, _)) = best
+        && let Some(pair) = store.get_by_accession(&tx.accession)
+    {
+        return Ok(pair);
     }
 
     Err(VarEffectError::TranscriptNotFound {
@@ -899,11 +927,11 @@ fn lookup_transcript<'a>(
 /// * [`VarEffectError::RefMismatch`] -- stated REF doesn't match FASTA
 /// * [`VarEffectError::ChromNotFound`] / [`VarEffectError::CoordinateOutOfRange`]
 ///   -- FASTA access failures
-pub(crate) fn resolve_hgvs_c(
+pub(crate) fn resolve_hgvs_c_with_meta(
     hgvs: &str,
     store: &TranscriptStore,
     fasta: &FastaReader,
-) -> Result<GenomicVariant, VarEffectError> {
+) -> Result<ResolvedHgvsC, VarEffectError> {
     let parsed = parse_hgvs_c(hgvs)?;
     let (transcript, index) = lookup_transcript(&parsed.accession, store)?;
 
@@ -915,13 +943,31 @@ pub(crate) fn resolve_hgvs_c(
         )));
     }
 
-    match &parsed.change {
+    // Snapshot the accession before the match — once we move into the
+    // builders, the borrow on `transcript` is released.
+    let resolved_accession = transcript.accession.clone();
+    let variant = match &parsed.change {
         HgvsCChange::Substitution { .. } => build_substitution(&parsed, transcript, index, fasta),
         HgvsCChange::Deletion => build_deletion(&parsed, transcript, index, fasta),
         HgvsCChange::Duplication => build_duplication(&parsed, transcript, index, fasta),
         HgvsCChange::Insertion { .. } => build_insertion(&parsed, transcript, index, fasta),
         HgvsCChange::Delins { .. } => build_delins(&parsed, transcript, index, fasta),
-    }
+    }?;
+    Ok(ResolvedHgvsC {
+        variant,
+        resolved_accession,
+    })
+}
+
+/// Backward-compatible wrapper returning only the coordinates. Callers
+/// that need transcript-version provenance (to detect and surface drift
+/// from the requested HGVS version) should use [`resolve_hgvs_c_with_meta`].
+pub(crate) fn resolve_hgvs_c(
+    hgvs: &str,
+    store: &TranscriptStore,
+    fasta: &FastaReader,
+) -> Result<GenomicVariant, VarEffectError> {
+    resolve_hgvs_c_with_meta(hgvs, store, fasta).map(|r| r.variant)
 }
 
 // ===========================================================================
@@ -1504,6 +1550,76 @@ mod tests {
         let store = single_tx_store(plus_strand_coding());
         let (tx, _) = lookup_transcript("NM_TEST_PLUS", &store).unwrap();
         assert_eq!(tx.accession, "NM_TEST_PLUS.1");
+    }
+
+    #[test]
+    fn lookup_versioned_but_missing_falls_back_to_available() {
+        // Store holds only `.1`; user cites `.2` (older) — fallback returns `.1`.
+        // This mirrors the real-world case of NM_006772.2:c.1861_1862del
+        // reported against a store carrying only NM_006772.3.
+        let store = single_tx_store(plus_strand_coding());
+        let (tx, _) = lookup_transcript("NM_TEST_PLUS.2", &store).unwrap();
+        assert_eq!(tx.accession, "NM_TEST_PLUS.1");
+    }
+
+    #[test]
+    fn lookup_versioned_missing_picks_highest_available() {
+        // Two versions in the store; the fallback must pick the highest.
+        let mut v1 = plus_strand_coding();
+        v1.accession = "NM_TEST_PLUS.1".into();
+        let mut v5 = plus_strand_coding();
+        v5.accession = "NM_TEST_PLUS.5".into();
+        let store = TranscriptStore::from_transcripts(vec![v1, v5]);
+
+        // Requested `.99` (absent) -> resolver returns `.5` (highest in store).
+        let (tx, _) = lookup_transcript("NM_TEST_PLUS.99", &store).unwrap();
+        assert_eq!(tx.accession, "NM_TEST_PLUS.5");
+    }
+
+    #[test]
+    fn lookup_versioned_missing_unknown_base_errors() {
+        // Store has only `NM_TEST_PLUS.1`. A request with a different base
+        // accession must still fail — the fallback must not cross base-
+        // accession boundaries.
+        let store = single_tx_store(plus_strand_coding());
+        assert!(matches!(
+            lookup_transcript("NM_DIFFERENT.1", &store),
+            Err(VarEffectError::TranscriptNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_hgvs_c_tolerates_missing_version() {
+        // Regression for NM_006772.2:c.1861_1862del — user cites a version
+        // absent from the store; resolution must succeed against the
+        // available version with identical genomic coordinates.
+        let store = single_tx_store(plus_strand_coding());
+        let (_tmp, fasta) = build_test_fasta();
+
+        let drifted = resolve_hgvs_c("NM_TEST_PLUS.9:c.1A>T", &store, &fasta).unwrap();
+        let exact = resolve_hgvs_c("NM_TEST_PLUS.1:c.1A>T", &store, &fasta).unwrap();
+
+        assert_eq!(drifted.chrom, exact.chrom);
+        assert_eq!(drifted.pos, exact.pos);
+        assert_eq!(drifted.ref_allele, exact.ref_allele);
+        assert_eq!(drifted.alt_allele, exact.alt_allele);
+    }
+
+    #[test]
+    fn resolve_hgvs_c_with_meta_reports_resolved_version() {
+        // The meta variant must surface the accession actually used so
+        // callers can detect drift. Exact-version hit reports the same
+        // accession; version-drift hit reports the store's version.
+        let store = single_tx_store(plus_strand_coding());
+        let (_tmp, fasta) = build_test_fasta();
+
+        let exact = resolve_hgvs_c_with_meta("NM_TEST_PLUS.1:c.1A>T", &store, &fasta).unwrap();
+        assert_eq!(exact.resolved_accession, "NM_TEST_PLUS.1");
+
+        let drifted = resolve_hgvs_c_with_meta("NM_TEST_PLUS.9:c.1A>T", &store, &fasta).unwrap();
+        assert_eq!(drifted.resolved_accession, "NM_TEST_PLUS.1");
+        // The variant payload must match the exact-version resolution.
+        assert_eq!(drifted.variant, exact.variant);
     }
 
     // -- Integration tests (require real store + FASTA) ----------------------

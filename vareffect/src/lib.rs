@@ -141,7 +141,7 @@ pub use consequence::{
 };
 pub use error::VarEffectError;
 pub use fasta::FastaReader;
-pub use hgvs_reverse::GenomicVariant;
+pub use hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
 pub use locate::{
     IndelLocation, IndelRegion, LocateIndex, SpliceOverlapDetail, SpliceSide, VariantLocation,
     locate_indel, locate_variant,

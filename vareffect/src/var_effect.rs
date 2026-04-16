@@ -27,7 +27,7 @@ use std::path::Path;
 use crate::consequence::ConsequenceResult;
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
-use crate::hgvs_reverse::GenomicVariant;
+use crate::hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
 use crate::locate::LocateIndex;
 use crate::transcript::TranscriptStore;
 use crate::types::TranscriptModel;
@@ -242,6 +242,33 @@ impl VarEffect {
     /// `RefMismatch`, `ChromNotFound`, `CoordinateOutOfRange`, `Malformed`.
     pub fn resolve_hgvs_c(&self, hgvs: &str) -> Result<GenomicVariant, VarEffectError> {
         crate::hgvs_reverse::resolve_hgvs_c(hgvs, &self.transcripts, &self.fasta)
+    }
+
+    /// Resolve HGVS c. notation and report which transcript version was
+    /// actually used.
+    ///
+    /// Behaves like [`VarEffect::resolve_hgvs_c`] but returns a
+    /// [`ResolvedHgvsC`] carrying both the genomic coordinates and the
+    /// accession (with version) that was matched in the transcript store.
+    /// When the store lacks the caller-specified version, the store's
+    /// version-tolerant lookup falls through to the highest available
+    /// version of the same base accession; comparing `resolved_accession`
+    /// against the input lets callers surface a transcript-version-drift
+    /// warning to end users.
+    ///
+    /// ```no_run
+    /// # use vareffect::VarEffect;
+    /// # let ve: VarEffect = unimplemented!();
+    /// let r = ve.resolve_hgvs_c_with_meta("NM_000546.5:c.742C>T")?;
+    /// // If the store only has `.6`, `r.resolved_accession == "NM_000546.6"`.
+    /// # Ok::<(), vareffect::VarEffectError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Same as [`VarEffect::resolve_hgvs_c`].
+    pub fn resolve_hgvs_c_with_meta(&self, hgvs: &str) -> Result<ResolvedHgvsC, VarEffectError> {
+        crate::hgvs_reverse::resolve_hgvs_c_with_meta(hgvs, &self.transcripts, &self.fasta)
     }
 
     // -----------------------------------------------------------------
