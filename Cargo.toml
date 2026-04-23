@@ -3,7 +3,7 @@ members = ["vareffect", "vareffect-cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 rust-version = "1.94.1"
 edition = "2024"
 

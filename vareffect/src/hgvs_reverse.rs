@@ -664,11 +664,16 @@ fn to_plus_strand_seq(bases: &[u8], strand: Strand) -> Vec<u8> {
 }
 
 /// Build a VCF-style [`GenomicVariant`] for a substitution.
+///
+/// `hgvs` is the original input notation; it is threaded through so a
+/// ref-allele disagreement can surface as [`VarEffectError::HgvsRefMismatch`]
+/// with enough context to reproduce VEP's diagnostic wording.
 fn build_substitution(
     parsed: &ParsedHgvsC,
     transcript: &TranscriptModel,
     index: &LocateIndex,
     fasta: &FastaReader,
+    hgvs: &str,
 ) -> Result<GenomicVariant, VarEffectError> {
     let HgvsCChange::Substitution { ref_base, alt_base } = parsed.change else {
         unreachable!("build_substitution is only called for Substitution variants")
@@ -684,7 +689,8 @@ fn build_substitution(
     // Verify against FASTA.
     let fasta_ref = fasta.fetch_base(chrom, genomic_pos)?;
     if fasta_ref.to_ascii_uppercase() != plus_ref {
-        return Err(VarEffectError::RefMismatch {
+        return Err(VarEffectError::HgvsRefMismatch {
+            hgvs: hgvs.to_string(),
             chrom: chrom.clone(),
             pos: genomic_pos,
             expected: String::from(fasta_ref as char),
@@ -924,7 +930,9 @@ fn lookup_transcript<'a>(
 /// * [`VarEffectError::TranscriptNotFound`] -- accession not in store
 /// * [`VarEffectError::PositionOutOfRange`] -- c. position exceeds transcript
 /// * [`VarEffectError::Malformed`] -- transcript model inconsistency
-/// * [`VarEffectError::RefMismatch`] -- stated REF doesn't match FASTA
+/// * [`VarEffectError::HgvsRefMismatch`] -- stated REF doesn't match FASTA
+///   (includes the HGVS input string in its payload so callers can emit a
+///   VEP-concordant diagnostic)
 /// * [`VarEffectError::ChromNotFound`] / [`VarEffectError::CoordinateOutOfRange`]
 ///   -- FASTA access failures
 pub(crate) fn resolve_hgvs_c_with_meta(
@@ -947,7 +955,9 @@ pub(crate) fn resolve_hgvs_c_with_meta(
     // builders, the borrow on `transcript` is released.
     let resolved_accession = transcript.accession.clone();
     let variant = match &parsed.change {
-        HgvsCChange::Substitution { .. } => build_substitution(&parsed, transcript, index, fasta),
+        HgvsCChange::Substitution { .. } => {
+            build_substitution(&parsed, transcript, index, fasta, hgvs)
+        }
         HgvsCChange::Deletion => build_deletion(&parsed, transcript, index, fasta),
         HgvsCChange::Duplication => build_duplication(&parsed, transcript, index, fasta),
         HgvsCChange::Insertion { .. } => build_insertion(&parsed, transcript, index, fasta),
@@ -1414,11 +1424,33 @@ mod tests {
         let store = single_tx_store(tx);
         let (_tmp, fasta) = build_test_fasta();
 
-        let result = resolve_hgvs_c("NM_TEST_PLUS.1:c.1C>T", &store, &fasta);
         // c.1 -> genomic 1500. FASTA at 1500 with ACGT pattern: 1500 % 4 = 0 -> 'A'
         // But the HGVS says REF is C. The FASTA has A at 1500, so this should
-        // be a RefMismatch.
-        assert!(matches!(result, Err(VarEffectError::RefMismatch { .. })));
+        // be an HgvsRefMismatch (HGVS-input path, distinct from VCF RefMismatch).
+        let hgvs = "NM_TEST_PLUS.1:c.1C>T";
+        let err = resolve_hgvs_c(hgvs, &store, &fasta).expect_err("expected mismatch");
+        let VarEffectError::HgvsRefMismatch {
+            hgvs: err_hgvs,
+            chrom,
+            pos,
+            expected,
+            got,
+        } = &err
+        else {
+            panic!("expected HgvsRefMismatch, got: {err:?}");
+        };
+        assert_eq!(err_hgvs, hgvs);
+        assert_eq!(chrom, "chr1");
+        assert_eq!(*pos, 1500);
+        assert_eq!(expected, "A");
+        assert_eq!(got, "C");
+        // Display matches VEP's wording so downstream callers can forward
+        // it verbatim.
+        assert_eq!(
+            format!("{err}"),
+            "ref allele mismatch at position 1500 for 'NM_TEST_PLUS.1:c.1C>T': \
+             genome has 'A', HGVS states 'C'",
+        );
 
         // Now use the correct ref base. 1500 % 4 = 0 -> A.
         let result = resolve_hgvs_c("NM_TEST_PLUS.1:c.1A>T", &store, &fasta).unwrap();
@@ -1426,6 +1458,37 @@ mod tests {
         assert_eq!(result.pos, 1500);
         assert_eq!(result.ref_allele, vec![b'A']);
         assert_eq!(result.alt_allele, vec![b'T']);
+    }
+
+    #[test]
+    fn hgvs_ref_mismatch_minus_strand_projects_to_plus() {
+        // Minus-strand transcript: caller types a coding-strand base, but
+        // the error's `got` field reports the plus-strand projection so it
+        // compares apples-to-apples with `expected` (also plus-strand).
+        let tx = minus_strand_coding();
+        let store = single_tx_store(tx);
+        let (_tmp, fasta) = build_test_fasta();
+
+        // c.1 on minus -> genomic 19499. FASTA: 19499 % 4 = 3 -> 'T' (plus).
+        // Caller types c.1C>G (coding-strand REF=C). Plus-strand projection
+        // of coding C is G, so `got = "G"`. FASTA has T, so mismatch.
+        let hgvs = "NM_TEST_MINUS.1:c.1C>G";
+        let err = resolve_hgvs_c(hgvs, &store, &fasta).expect_err("expected mismatch");
+        let VarEffectError::HgvsRefMismatch {
+            hgvs: err_hgvs,
+            chrom,
+            pos,
+            expected,
+            got,
+        } = &err
+        else {
+            panic!("expected HgvsRefMismatch, got: {err:?}");
+        };
+        assert_eq!(err_hgvs, hgvs);
+        assert_eq!(chrom, "chr17");
+        assert_eq!(*pos, 19499);
+        assert_eq!(expected, "T"); // plus-strand FASTA
+        assert_eq!(got, "G"); // plus-strand projection of coding-C on minus
     }
 
     #[test]

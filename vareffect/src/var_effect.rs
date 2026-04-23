@@ -239,7 +239,8 @@ impl VarEffect {
     /// # Errors
     ///
     /// `HgvsParseError`, `TranscriptNotFound`, `PositionOutOfRange`,
-    /// `RefMismatch`, `ChromNotFound`, `CoordinateOutOfRange`, `Malformed`.
+    /// `HgvsRefMismatch`, `ChromNotFound`, `CoordinateOutOfRange`,
+    /// `Malformed`.
     pub fn resolve_hgvs_c(&self, hgvs: &str) -> Result<GenomicVariant, VarEffectError> {
         crate::hgvs_reverse::resolve_hgvs_c(hgvs, &self.transcripts, &self.fasta)
     }

@@ -72,6 +72,11 @@ pub enum VarEffectError {
     ///
     /// For SNVs the strings are single characters; for indels they may be
     /// multi-base (e.g. `"ACGT"` vs `"ACGG"`).
+    ///
+    /// For HGVS-input mismatches (where the REF is stated inside the HGVS
+    /// notation itself) see [`VarEffectError::HgvsRefMismatch`], which
+    /// includes the HGVS input string in its payload so callers can
+    /// reproduce VEP-style diagnostics.
     #[error("REF allele mismatch at {chrom}:{pos}: genome has {expected}, VCF has {got}")]
     RefMismatch {
         /// UCSC-style chromosome name.
@@ -81,6 +86,35 @@ pub enum VarEffectError {
         /// Sequence found in the reference genome (uppercase ASCII).
         expected: String,
         /// Sequence provided by the caller (from VCF REF column).
+        got: String,
+    },
+
+    /// The HGVS-stated REF base disagrees with the reference FASTA at the
+    /// resolved genomic position. Only raised from
+    /// [`crate::VarEffect::resolve_hgvs_c`] /
+    /// [`crate::VarEffect::resolve_hgvs_c_with_meta`]; for VCF-driven
+    /// mismatches see [`VarEffectError::RefMismatch`].
+    ///
+    /// The `Display` format matches Ensembl VEP's wording, so
+    /// `eprintln!("{err}")` produces a VEP-concordant diagnostic without
+    /// further formatting.
+    #[error(
+        "ref allele mismatch at position {pos} for '{hgvs}': \
+         genome has '{expected}', HGVS states '{got}'"
+    )]
+    HgvsRefMismatch {
+        /// Full HGVS notation the caller passed in
+        /// (e.g. `"NM_000546.6:c.738C>T"`).
+        hgvs: String,
+        /// UCSC-style chromosome name of the resolved position.
+        chrom: String,
+        /// 0-based genomic position where the disagreement was detected.
+        pos: u64,
+        /// Plus-strand reference base from the FASTA (uppercase ASCII).
+        expected: String,
+        /// HGVS-stated ref base projected to the plus strand (uppercase
+        /// ASCII). For minus-strand transcripts this is the complement of
+        /// the base as typed in the HGVS string.
         got: String,
     },
 
