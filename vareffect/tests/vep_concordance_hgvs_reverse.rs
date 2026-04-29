@@ -46,7 +46,7 @@
 
 use std::path::Path;
 
-use vareffect::{FastaReader, TranscriptStore, VarEffect, VarEffectError};
+use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect, VarEffectError};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -73,7 +73,7 @@ fn load_store() -> TranscriptStore {
 fn load_fasta() -> FastaReader {
     let path = std::env::var("FASTA_PATH")
         .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
-    FastaReader::open_with_patch_aliases(
+    FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -83,6 +83,7 @@ fn load_fasta() -> FastaReader {
                 .join("data/vareffect/patch_chrom_aliases.csv")
                 .as_ref(),
         ),
+        Assembly::GRCh38,
     )
     .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
 }
@@ -400,7 +401,11 @@ const VARIANTS: &[ExpectedReverse] = &[
 #[test]
 #[ignore]
 fn vep_concordance_hgvs_reverse_20() {
-    let ve = VarEffect::new(load_store(), load_fasta());
+    let ve = VarEffect::builder()
+        .with_handles(Assembly::GRCh38, load_store(), load_fasta())
+        .expect("matching assemblies")
+        .build()
+        .expect("builder");
 
     let total = VARIANTS.len();
     let mut pass = 0u32;
@@ -410,7 +415,7 @@ fn vep_concordance_hgvs_reverse_20() {
     for (i, exp) in VARIANTS.iter().enumerate() {
         let tag = format!("[{}/{}] {}", i + 1, total, exp.label);
 
-        match ve.resolve_hgvs_c(exp.hgvs_input) {
+        match ve.resolve_hgvs_c(Assembly::GRCh38, exp.hgvs_input) {
             Ok(result) => {
                 let mut mismatches = Vec::new();
 
@@ -448,6 +453,7 @@ fn vep_concordance_hgvs_reverse_20() {
                     // Round-trip test: resolve -> annotate -> compare hgvs_c.
                     if exp.round_trip {
                         match ve.annotate(
+                            Assembly::GRCh38,
                             &result.chrom,
                             result.pos,
                             &result.ref_allele,
@@ -463,6 +469,7 @@ fn vep_concordance_hgvs_reverse_20() {
                                     .expect("valid HGVS input");
 
                                 let got_hgvs = ann_results
+                                    .consequences
                                     .iter()
                                     .find(|r| r.transcript == accession)
                                     .and_then(|r| r.hgvs_c.as_deref());

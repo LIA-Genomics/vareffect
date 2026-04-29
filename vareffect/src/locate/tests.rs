@@ -32,6 +32,8 @@ fn single_exon_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -842,6 +844,8 @@ fn plus_strand_multi_exon_utr() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -898,6 +902,8 @@ fn minus_strand_multi_exon_utr() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 

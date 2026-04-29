@@ -75,19 +75,24 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use vareffect::VarEffect;
+//! use vareffect::{Assembly, VarEffect};
 //!
-//! let ve = VarEffect::open(
-//!     Path::new("data/vareffect/transcript_models.bin"),
-//!     Path::new("data/vareffect/GRCh38.bin"),
-//! )?;
+//! let ve = VarEffect::builder()
+//!     .with_grch38(
+//!         Path::new("data/vareffect/transcript_models_grch38.bin"),
+//!         Path::new("data/vareffect/GRCh38.bin"),
+//!     )?
+//!     .build()?;
 //!
 //! // Annotate TP53 c.742C>T (p.R248W) — chr17, 0-based position 7,674,219.
-//! let results = ve.annotate("chr17", 7_674_219, b"C", b"T")?;
-//! for r in &results {
+//! let result = ve.annotate(Assembly::GRCh38, "chr17", 7_674_219, b"C", b"T")?;
+//! for r in &result.consequences {
 //!     for csq in &r.consequences {
 //!         println!("{} ({})", csq.as_str(), r.impact);
 //!     }
+//! }
+//! for warn in &result.warnings {
+//!     eprintln!("warning: {warn:?}");
 //! }
 //! # Ok::<(), vareffect::VarEffectError>(())
 //! ```
@@ -136,8 +141,10 @@ mod vep_json;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
+pub use chrom::Assembly;
 pub use consequence::{
-    Consequence, ConsequenceResult, Impact, annotate_deletion, annotate_insertion, annotate_snv,
+    AnnotationResult, Consequence, ConsequenceResult, Impact, Warning, annotate_deletion,
+    annotate_insertion, annotate_snv,
 };
 pub use error::VarEffectError;
 pub use fasta::FastaReader;
@@ -147,8 +154,10 @@ pub use locate::{
     locate_indel, locate_variant,
 };
 pub use transcript::TranscriptStore;
-pub use types::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
-pub use var_effect::VarEffect;
+pub use types::{
+    Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier, TranslationalException,
+};
+pub use var_effect::{VarEffect, VarEffectBuilder};
 
 // Compile-time proof that the runtime types are thread-safe to share across
 // worker tasks. A field that silently breaks `Send + Sync` in a future

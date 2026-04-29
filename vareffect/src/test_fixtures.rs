@@ -68,6 +68,8 @@ pub fn plus_strand_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 3,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -135,6 +137,8 @@ pub fn minus_strand_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 3,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -168,5 +172,7 @@ pub fn noncoding_2_exon() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::NonCodingRna,
         exon_count: 2,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }

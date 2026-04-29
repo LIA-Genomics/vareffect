@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use vareffect::{ConsequenceResult, FastaReader, TranscriptStore, VarEffect};
+use vareffect::{Assembly, ConsequenceResult, FastaReader, TranscriptStore, VarEffect};
 
 // ---------------------------------------------------------------------------
 // Paths and constants
@@ -132,8 +132,12 @@ fn load_fasta() -> FastaReader {
     let path = std::env::var("FASTA_PATH")
         .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
     let aliases = workspace_root().join("data/vareffect/patch_chrom_aliases.csv");
-    FastaReader::open_with_patch_aliases(Path::new(&path), Some(aliases.as_ref()))
-        .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
+    FastaReader::open_with_patch_aliases_and_assembly(
+        Path::new(&path),
+        Some(aliases.as_ref()),
+        Assembly::GRCh38,
+    )
+    .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +681,11 @@ fn vep_large_concordance() {
 
     let store = load_store();
     let fasta = load_fasta();
-    let ve = VarEffect::new(store, fasta);
+    let ve = VarEffect::builder()
+        .with_handles(Assembly::GRCh38, store, fasta)
+        .expect("matching assemblies")
+        .build()
+        .expect("builder");
 
     // Silence the default panic hook for the duration of the scan. Without
     // this, every caught panic from `VarEffect::annotate` would print a full
@@ -708,6 +716,7 @@ fn vep_large_concordance() {
 
                 let annotate_result = panic::catch_unwind(AssertUnwindSafe(|| {
                     ve.annotate(
+                        Assembly::GRCh38,
                         &ve_chrom,
                         ve_pos,
                         vep.ref_allele.as_bytes(),
@@ -726,7 +735,7 @@ fn vep_large_concordance() {
 
                 RowResult::Completed {
                     lineno,
-                    outcome: compare_variant(vep, &results),
+                    outcome: compare_variant(vep, &results.consequences),
                 }
             })
             .collect()

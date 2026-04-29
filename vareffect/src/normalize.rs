@@ -319,7 +319,7 @@ mod tests {
             ("chr17", chr17_seq.as_slice()),
         ];
         write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
-        let reader = FastaReader::open(&bin_path).unwrap();
+        let reader = FastaReader::open_with_assembly(&bin_path, crate::Assembly::GRCh38).unwrap();
         (tmp, reader)
     }
 
@@ -370,6 +370,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -403,6 +405,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -686,6 +690,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -737,6 +743,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 

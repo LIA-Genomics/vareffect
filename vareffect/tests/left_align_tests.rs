@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vareffect::{FastaReader, TranscriptStore, VarEffect};
+use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 
 /// Helper: build a minimal `VarEffect` with an empty transcript store and a
 /// real FASTA reader. `left_align_indel` only touches the FASTA, so the
@@ -26,10 +26,14 @@ fn open_var_effect() -> VarEffect {
          set FASTA_PATH=data/vareffect/GRCh38.bin.",
     );
     let path_buf = PathBuf::from(path);
-    let fasta =
-        FastaReader::open(Path::new(&path_buf)).expect("opening the reference genome binary");
-    let transcripts = TranscriptStore::from_transcripts(Vec::new());
-    VarEffect::new(transcripts, fasta)
+    let fasta = FastaReader::open_with_assembly(Path::new(&path_buf), Assembly::GRCh38)
+        .expect("opening the reference genome binary");
+    let transcripts = TranscriptStore::from_transcripts(Assembly::GRCh38, Vec::new());
+    VarEffect::builder()
+        .with_handles(Assembly::GRCh38, transcripts, fasta)
+        .expect("matching assemblies")
+        .build()
+        .expect("builder")
 }
 
 // -----------------------------------------------------------------------
@@ -43,7 +47,7 @@ fn snv_passthrough() {
     let ve = open_var_effect();
     // TP53 hotspot: chr17:7676154 C>T (GRCh38)
     let result = ve
-        .left_align_indel("chr17", 7_676_154, "C", "T")
+        .left_align_indel(Assembly::GRCh38, "chr17", 7_676_154, "C", "T")
         .expect("left_align_indel should not error on SNV");
     assert_eq!(result, None, "SNV should pass through unchanged");
 }
@@ -55,7 +59,7 @@ fn mnv_passthrough() {
     let ve = open_var_effect();
     // Two adjacent substitutions that don't share rightmost base
     let result = ve
-        .left_align_indel("chr17", 7_676_154, "CC", "TG")
+        .left_align_indel(Assembly::GRCh38, "chr17", 7_676_154, "CC", "TG")
         .expect("left_align_indel should not error on MNV");
     assert_eq!(result, None, "MNV should pass through unchanged");
 }
@@ -73,7 +77,7 @@ fn already_leftmost_deletion() {
     // region. The base at chr7:117559593 is not the same as at 117559590,
     // so this should already be leftmost.
     let result = ve
-        .left_align_indel("chr7", 117_559_590, "ATCT", "A")
+        .left_align_indel(Assembly::GRCh38, "chr7", 117_559_590, "ATCT", "A")
         .expect("left_align_indel should not error");
     assert_eq!(result, None, "non-repeat deletion should be unchanged");
 }
@@ -96,10 +100,10 @@ fn homopolymer_deletion_shifts_left() {
     //
     // The leftmost representation should have a smaller or equal pos.
     let result_right = ve
-        .left_align_indel("chr13", 32_340_301, "GA", "G")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "GA", "G")
         .expect("left_align_indel should not error");
     let result_left = ve
-        .left_align_indel("chr13", 32_340_300, "AG", "A")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_300, "AG", "A")
         .expect("left_align_indel should not error");
 
     // Both representations should normalize to the same coordinates.
@@ -120,10 +124,10 @@ fn homopolymer_insertion_shifts_left() {
     // Submit two representations of the same insertion and verify
     // they converge.
     let result_a = ve
-        .left_align_indel("chr13", 32_340_301, "G", "GA")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "G", "GA")
         .expect("left_align_indel should not error");
     let result_b = ve
-        .left_align_indel("chr13", 32_340_300, "A", "AG")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_300, "A", "AG")
         .expect("left_align_indel should not error");
 
     let norm_a = result_a.unwrap_or((32_340_301, "G".to_string(), "GA".to_string()));
@@ -152,7 +156,7 @@ fn complex_becomes_deletion_after_shift() {
     // chr17:7676154 — pick a region where we can construct a test.
     // We just verify the algorithm processes it without error and
     // recognizes it's not a simple substitution.
-    let result = ve.left_align_indel("chr17", 7_676_154, "CCC", "CC");
+    let result = ve.left_align_indel(Assembly::GRCh38, "chr17", 7_676_154, "CCC", "CC");
     assert!(result.is_ok(), "should not error on complex-becomes-indel");
     // This IS an indel (1bp deletion), so it may or may not shift
     // depending on the repeat context. The important thing is it
@@ -169,13 +173,13 @@ fn idempotent() {
     let ve = open_var_effect();
     // First pass: normalize a right-shifted deletion
     let first = ve
-        .left_align_indel("chr13", 32_340_301, "GA", "G")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "GA", "G")
         .expect("first pass should not error");
 
     if let Some((pos, ref_a, alt_a)) = first {
         // Second pass: normalize the already-normalized result
         let second = ve
-            .left_align_indel("chr13", pos, &ref_a, &alt_a)
+            .left_align_indel(Assembly::GRCh38, "chr13", pos, &ref_a, &alt_a)
             .expect("second pass should not error");
         assert_eq!(
             second, None,
@@ -196,7 +200,7 @@ fn position_one_boundary() {
     // At position 1 the loop guard `pos <= 1` prevents any shift.
     // This should succeed without error and return None or a trimmed
     // form (but never underflow).
-    let result = ve.left_align_indel("chr1", 1, "NN", "N");
+    let result = ve.left_align_indel(Assembly::GRCh38, "chr1", 1, "NN", "N");
     assert!(
         result.is_ok(),
         "position 1 should not cause underflow: {:?}",
@@ -215,7 +219,7 @@ fn vcf_anchor_preserved() {
     // After normalization, at least one allele must have length >= 1
     // (VCF anchor base requirement). The parsimony step preserves this.
     let result = ve
-        .left_align_indel("chr13", 32_340_301, "GA", "G")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "GA", "G")
         .expect("should not error");
     if let Some((_, ref ref_a, ref alt_a)) = result {
         assert!(

@@ -31,7 +31,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use vareffect::{FastaReader, TranscriptStore, annotate_snv};
+use vareffect::{Assembly, FastaReader, TranscriptStore, annotate_snv};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -64,7 +64,7 @@ fn load_fasta() -> FastaReader {
          with its .bin.idx sidecar. Run `vareffect-cli setup` first, \
          then set FASTA_PATH=data/vareffect/GRCh38.bin.",
     );
-    FastaReader::open_with_patch_aliases(
+    FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,6 +74,7 @@ fn load_fasta() -> FastaReader {
                 .join("data/vareffect/patch_chrom_aliases.csv")
                 .as_ref(),
         ),
+        Assembly::GRCh38,
     )
     .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
 }

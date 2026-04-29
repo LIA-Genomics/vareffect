@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vareffect::{FastaReader, VarEffectError};
+use vareffect::{Assembly, FastaReader, VarEffectError};
 
 /// Helper: read `FASTA_PATH` from the environment and open a reader.
 ///
@@ -29,7 +29,8 @@ fn open_reader() -> FastaReader {
          set FASTA_PATH=data/vareffect/GRCh38.bin.",
     );
     let path_buf = PathBuf::from(path);
-    FastaReader::open(Path::new(&path_buf)).expect("opening the reference genome binary")
+    FastaReader::open_with_assembly(Path::new(&path_buf), Assembly::GRCh38)
+        .expect("opening the reference genome binary")
 }
 
 /// TP53 c.742C>T (p.Arg248Trp) lives at chr17:7674221 (1-based VCF) which is

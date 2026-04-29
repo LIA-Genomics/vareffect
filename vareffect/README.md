@@ -46,19 +46,21 @@ Then annotate a variant against every overlapping transcript:
 
 ```rust,no_run
 use std::path::Path;
-use vareffect::{Consequence, VarEffect};
+use vareffect::{Assembly, Consequence, VarEffect};
 
 # fn main() -> Result<(), vareffect::VarEffectError> {
-let ve = VarEffect::open(
-    Path::new("data/vareffect/transcript_models.bin"),
-    Path::new("data/vareffect/GRCh38.bin"),
-)?;
+let ve = VarEffect::builder()
+    .with_grch38(
+        Path::new("data/vareffect/transcript_models_grch38.bin"),
+        Path::new("data/vareffect/GRCh38.bin"),
+    )?
+    .build()?;
 
 // TP53 c.742C>T (p.Arg248Trp) — a well-known hotspot missense variant.
 // chr17:7674220 is 0-based (BED / UCSC style).
-let results = ve.annotate("chr17", 7_674_220, b"G", b"A")?;
+let result = ve.annotate(Assembly::GRCh38, "chr17", 7_674_220, b"G", b"A")?;
 
-for result in &results {
+for result in &result.consequences {
     println!(
         "{} {}: {} ({})",
         result.transcript,
@@ -175,8 +177,9 @@ binary and reads bytes directly.
 - No multi-allele VCF splitting — the caller must split comma-separated
   `ALT`s before invoking `annotate`.
 - No plugin system.
-- No alternate genome builds out of the box — GRCh37 or CHM13 require
-  regenerating the transcript and genome binaries with your own build.
+- GRCh38 and GRCh37 are both supported via the `Assembly` enum;
+  `vareffect setup --assembly grch37` provisions the GRCh37 binaries.
+  CHM13 and other alternate builds are not yet supported.
 
 See [`VEP_DIVERGENCES.md`](./VEP_DIVERGENCES.md) for the complete list of
 intentional divergences from VEP and features that are not yet implemented.
@@ -272,12 +275,18 @@ feed the result straight back into `annotate` — useful when your input is
 transcript-relative rather than coordinate-based:
 
 ```rust,no_run
-# use vareffect::VarEffect;
+# use vareffect::{Assembly, VarEffect};
 # fn example(ve: &VarEffect) -> Result<(), vareffect::VarEffectError> {
-let gv = ve.resolve_hgvs_c("NM_000546.6:c.742C>T")?;
+let gv = ve.resolve_hgvs_c(Assembly::GRCh38, "NM_000546.6:c.742C>T")?;
 
-let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
-# let _ = results;
+let result = ve.annotate(
+    Assembly::GRCh38,
+    &gv.chrom,
+    gv.pos,
+    &gv.ref_allele,
+    &gv.alt_allele,
+)?;
+# let _ = result;
 # Ok(())
 # }
 ```
@@ -347,8 +356,10 @@ Contributions are welcome. The most valuable areas for outside help are:
 - Broadening the VEP concordance corpus in `tests/vep_concordance_*.rs`
   with variants that stress a part of the pipeline that isn't already
   covered.
-- Alternate genome build support (GRCh37, CHM13) in the `vareffect-cli`
-  provisioning flow.
+- CHM13 / non-human assembly support in the `vareffect-cli` provisioning
+  flow. (GRCh37 is supported as of Stage A of the dual-assembly rollout;
+  Stage B adds a GRCh37 cross-validation source, Stage C adds the
+  GRCh37 ClinVar / VEP concordance benchmark suites.)
 
 Open an issue before starting on anything larger than a bug fix so we can
 agree on scope.

@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vareffect::{FastaReader, TranscriptStore, VarEffect, VarEffectError};
+use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect, VarEffectError};
 
 /// Helper: build a minimal `VarEffect` with an empty transcript store and a
 /// real FASTA reader. `anchor_prepend_indel` only touches the FASTA, so the
@@ -30,10 +30,14 @@ fn open_var_effect() -> VarEffect {
          set FASTA_PATH=data/vareffect/GRCh38.bin.",
     );
     let path_buf = PathBuf::from(path);
-    let fasta =
-        FastaReader::open(Path::new(&path_buf)).expect("opening the reference genome binary");
-    let transcripts = TranscriptStore::from_transcripts(Vec::new());
-    VarEffect::new(transcripts, fasta)
+    let fasta = FastaReader::open_with_assembly(Path::new(&path_buf), Assembly::GRCh38)
+        .expect("opening the reference genome binary");
+    let transcripts = TranscriptStore::from_transcripts(Assembly::GRCh38, Vec::new());
+    VarEffect::builder()
+        .with_handles(Assembly::GRCh38, transcripts, fasta)
+        .expect("matching assemblies")
+        .build()
+        .expect("builder")
 }
 
 /// POLH deletion `NM_006772.2:c.1861_1862del` — VEP REST emits
@@ -45,7 +49,7 @@ fn open_var_effect() -> VarEffect {
 fn anchor_prepend_deletion_polh() {
     let ve = open_var_effect();
     let (pos, ref_a, alt_a) = ve
-        .anchor_prepend_indel("chr6", 33_409_450, "TG", "-")
+        .anchor_prepend_indel(Assembly::GRCh38, "chr6", 33_409_450, "TG", "-")
         .unwrap()
         .expect("pure deletion should be normalized");
     assert_eq!(pos, 33_409_449);
@@ -62,7 +66,7 @@ fn anchor_prepend_deletion_polh() {
 fn anchor_prepend_insertion_brca1() {
     let ve = open_var_effect();
     let (pos, ref_a, alt_a) = ve
-        .anchor_prepend_indel("chr17", 43_057_063, "-", "C")
+        .anchor_prepend_indel(Assembly::GRCh38, "chr17", 43_057_063, "-", "C")
         .unwrap()
         .expect("pure insertion should be normalized");
     assert_eq!(pos, 43_057_062);
@@ -78,7 +82,7 @@ fn anchor_prepend_insertion_brca1() {
 fn anchor_prepend_snv_passthrough() {
     let ve = open_var_effect();
     assert!(
-        ve.anchor_prepend_indel("chr17", 7_674_221, "G", "A")
+        ve.anchor_prepend_indel(Assembly::GRCh38, "chr17", 7_674_221, "G", "A")
             .unwrap()
             .is_none(),
     );
@@ -92,7 +96,7 @@ fn anchor_prepend_snv_passthrough() {
 fn anchor_prepend_complex_passthrough() {
     let ve = open_var_effect();
     assert!(
-        ve.anchor_prepend_indel("chr17", 7_674_221, "GA", "TC")
+        ve.anchor_prepend_indel(Assembly::GRCh38, "chr17", 7_674_221, "GA", "TC")
             .unwrap()
             .is_none(),
     );
@@ -106,7 +110,7 @@ fn anchor_prepend_complex_passthrough() {
 fn anchor_prepend_guard_pos_one() {
     let ve = open_var_effect();
     let err = ve
-        .anchor_prepend_indel("chr1", 1, "TG", "-")
+        .anchor_prepend_indel(Assembly::GRCh38, "chr1", 1, "TG", "-")
         .expect_err("pos=1 should fail out-of-range guard");
     match err {
         VarEffectError::CoordinateOutOfRange {
@@ -130,7 +134,7 @@ fn anchor_prepend_guard_pos_one() {
 fn anchor_prepend_chrom_not_found() {
     let ve = open_var_effect();
     let err = ve
-        .anchor_prepend_indel("chrZZ", 100, "TG", "-")
+        .anchor_prepend_indel(Assembly::GRCh38, "chrZZ", 100, "TG", "-")
         .expect_err("bogus chrom should fail");
     assert!(
         matches!(err, VarEffectError::ChromNotFound { .. }),

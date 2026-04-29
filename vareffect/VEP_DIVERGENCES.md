@@ -7,15 +7,49 @@ and every feature that is intentionally out of scope for the core crate.
 ## Overview
 
 - **Target VEP version:** releases 115 and 116.
-- **Genome build:** GRCh38 (GRCh37 and CHM13 are not validated; the
-  transcript and genome binaries would need to be rebuilt from
-  build-specific sources).
-- **Transcript source:** MANE Select, MANE Plus Clinical, and RefSeq
-  Select. Variants on accessions outside the loaded store are reported as
-  `intergenic_variant` even if they would overlap a non-loaded transcript.
+- **Genome builds:** GRCh38 and GRCh37, selected per call via the
+  `Assembly` enum. CHM13 is not yet supported. UCSC `hg19` / `hg38`
+  aliases are explicitly rejected at parse time — UCSC `hg19` chrM
+  (`NC_001807`) differs from GRCh37 chrMT (`NC_012920.1`, the rCRS) by
+  ~10 bases and would silently mis-annotate every chrM variant.
+- **Transcript source:** **GRCh38** uses MANE Select + MANE Plus
+  Clinical from the NCBI MANE v1.5 release. **GRCh37** uses NCBI RefSeq
+  Select from `GCF_000001405.25_GRCh37.p13`; MANE is GRCh38-only and
+  has no GRCh37 equivalent. Variants on accessions outside the loaded
+  store are reported as `intergenic_variant` even if they would overlap
+  a non-loaded transcript.
+- **Transcript-vs-genome divergence (GRCh37 only):** ~5 % of NCBI
+  RefSeq Select transcripts on GRCh37 carry sequence that differs from
+  the reference assembly at one or more positions. NCBI flags these in
+  the GFF3 `Note=` attribute on the affected mRNA / CDS rows; vareffect
+  detects the flag at build time, persists it on
+  [`TranscriptModel::genome_transcript_divergent`], and surfaces a
+  structured [`Warning::DivergentTranscript`] on every `annotate(...)`
+  call whose chosen transcript carries it. HGVS positions emitted
+  against a divergent transcript may not map back to the same genomic
+  position they would against the reference; clinical callers should
+  consider falling back to a non-divergent transcript before reporting.
+  GRCh38 MANE transcripts are curated to exclude divergence by
+  construction, so this warning is silent there.
+- **Translational exceptions (selenocysteine / pyrrolysine
+  readthrough):** parsed from the GFF3 `transl_except=` attribute and
+  recorded on [`TranscriptModel::translational_exception`]. Distinct
+  from divergence: a `transl_except` codon is a known biological
+  mechanism, not a sequence disagreement, and HGVS positions remain
+  reliable — vareffect therefore does NOT raise a clinical warning.
+- **Cross-validation:** GRCh38 builds are second-source-checked against
+  the MANE summary TSV at build time, with mismatches failing the
+  build. GRCh37 ships with **no second-source check** in Stage A —
+  NCBI's GRCh37 publication has no MANE-summary equivalent, and UCSC's
+  `ncbiRefSeq.txt` is not authoritative for RefSeq Select status (Select
+  flags live in the sibling `ncbiRefSeqSelect.txt`). Stage B will add a
+  proper validator. Until then the build emits an explicit
+  `tracing::warn!` flagging the gap; ClinVar concordance stats for
+  GRCh37 land in Stage C.
 - **Validation date:** last full concordance run 2026-04-11 — 6 / 6 test
   files pass (see [Validation methodology](#validation-methodology) for the
-  per-file variant counts).
+  per-file variant counts). GRCh37 concordance numbers will land with
+  Stage C of the GRCh37 rollout.
 
 ## Intentional divergences
 
@@ -92,9 +126,11 @@ requests welcome.
   calls, not VCF rows).
 - **`--shift_3prime` equivalent** — a toggle to switch off 3' normalization
   for callers who need VEP's pre-release-109 behaviour.
-- **Alternate genome builds** — GRCh37, CHM13, and non-human assemblies.
-  The crate is build-agnostic at runtime; the work is all upstream, in the
-  transcript-model and genome-binary build pipelines.
+- **CHM13 and non-human assemblies.** The crate accepts an `Assembly`
+  selector; adding new variants requires a hardcoded NC_* accession
+  table per assembly plus a transcript-source pipeline. (GRCh38 and
+  GRCh37 are both supported as of the dual-assembly rollout — see
+  Stage A in the change log.)
 - **Multi-allele VCF splitting** — VCF `ALT` columns can carry multiple
   comma-separated alternate alleles. `vareffect` expects one ref / one alt
   per `annotate` call; callers must split beforehand. A convenience

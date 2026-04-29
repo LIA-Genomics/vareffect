@@ -153,7 +153,7 @@ fn write_test_fasta() -> (TempDir, FastaReader) {
     let bin_path = tmp.path().join("test.bin");
     let idx_path = tmp.path().join("test.bin.idx");
     write_genome_binary(&contigs, "test", &bin_path, &idx_path).unwrap();
-    let reader = FastaReader::open(&bin_path).unwrap();
+    let reader = FastaReader::open_with_assembly(&bin_path, crate::Assembly::GRCh38).unwrap();
     (tmp, reader)
 }
 
@@ -188,6 +188,8 @@ fn mito_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -220,6 +222,8 @@ fn single_exon_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -301,6 +305,8 @@ fn stop_gained_transcript() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -324,7 +330,7 @@ fn write_stop_gained_fasta() -> (TempDir, FastaReader) {
     let bin_path = tmp.path().join("stop.bin");
     let idx_path = tmp.path().join("stop.bin.idx");
     write_genome_binary(&[("chr1", seq.as_slice())], "test", &bin_path, &idx_path).unwrap();
-    let reader = FastaReader::open(&bin_path).unwrap();
+    let reader = FastaReader::open_with_assembly(&bin_path, crate::Assembly::GRCh38).unwrap();
     (tmp, reader)
 }
 
@@ -581,7 +587,9 @@ fn tp53_r248w() {
     let store = crate::TranscriptStore::load_from_path(&store_path).unwrap();
 
     let fasta_path = std::env::var("FASTA_PATH").expect("FASTA_PATH env var");
-    let fasta = FastaReader::open(std::path::Path::new(&fasta_path)).unwrap();
+    let fasta =
+        FastaReader::open_with_assembly(std::path::Path::new(&fasta_path), crate::Assembly::GRCh38)
+            .unwrap();
 
     let (tx, idx) = store
         .get_by_accession("NM_000546.6")
@@ -1340,7 +1348,7 @@ fn splice_donor_boundary_regression() {
 fn trim_complex_dispatches_delins() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
+    let store = crate::TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx]);
     let results = annotate("chr1", 1503, b"CGTC", b"TG", &store, &fasta).unwrap();
     assert!(
         !results.is_empty(),
@@ -1352,7 +1360,7 @@ fn trim_complex_dispatches_delins() {
 fn trim_mnv_dispatches() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
+    let store = crate::TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx]);
     let results = annotate("chr1", 1503, b"CG", b"TA", &store, &fasta).unwrap();
     assert!(!results.is_empty(), "should annotate MNV");
 }
@@ -1363,7 +1371,7 @@ fn trim_mnv_dispatches() {
 fn intergenic_no_overlap() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
+    let store = crate::TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx]);
     // Position 50 is outside the transcript [1000, 5000).
     let results = annotate("chr1", 50, b"A", b"T", &store, &fasta).unwrap();
     assert_eq!(results.len(), 1);
@@ -1381,7 +1389,7 @@ fn intergenic_no_overlap() {
 fn intergenic_different_chrom() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
+    let store = crate::TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx]);
     // chr2 exists in the FASTA but has no transcripts in the store.
     let results = annotate("chr2", 150, b"A", b"T", &store, &fasta).unwrap();
     assert_eq!(results.len(), 1);
@@ -1395,7 +1403,7 @@ fn intergenic_different_chrom() {
 fn non_intergenic_has_transcript() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
+    let store = crate::TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx]);
     // Position 1505 is inside the transcript CDS.
     let results = annotate("chr1", 1505, b"T", b"A", &store, &fasta).unwrap();
     assert!(!results.is_empty());

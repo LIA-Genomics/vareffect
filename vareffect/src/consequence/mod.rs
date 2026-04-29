@@ -52,6 +52,67 @@ use crate::fasta::FastaReader;
 use crate::transcript::TranscriptStore;
 use crate::types::Biotype;
 
+/// Top-level annotation output bundling per-transcript consequences with
+/// any structured warnings the annotator surfaced.
+///
+/// Consequences and warnings are kept as separate vectors (rather than
+/// pushing warnings onto each [`ConsequenceResult`]) so a divergent
+/// transcript that overlaps multiple consequence rows produces exactly
+/// one entry in [`Self::warnings`] per affected transcript. Downstream
+/// consumers (CSQ formatter, VEP-JSON serializer) iterate the warnings
+/// list once instead of de-duplicating per-row.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnnotationResult {
+    /// Per-transcript consequence rows. Empty only when no overlap was
+    /// found and the intergenic-variant fallback was suppressed (which
+    /// the public API does not do today, but the type permits).
+    pub consequences: Vec<ConsequenceResult>,
+    /// Structured warnings raised during annotation. Empty when nothing
+    /// noteworthy happened — clinical-grade callers gate output on this
+    /// being empty *or* on every entry being acceptable.
+    pub warnings: Vec<Warning>,
+}
+
+impl AnnotationResult {
+    /// Construct an [`AnnotationResult`] from a consequence vector with no
+    /// warnings. Convenience for the common case of a non-divergent
+    /// annotation.
+    pub fn from_consequences(consequences: Vec<ConsequenceResult>) -> Self {
+        Self {
+            consequences,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// Structured warning surfaced by [`crate::VarEffect::annotate`] on top of
+/// the consequence vector.
+///
+/// `#[non_exhaustive]` so future variants — `TranscriptVersionDrift`,
+/// `AmbiguousReference`, `LowCoverageRegion`, etc. — can be added without
+/// a SemVer break for downstream `match`-on-warning consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Warning {
+    /// The chosen transcript is flagged by NCBI as having sequence that
+    /// differs from the reference assembly at one or more positions.
+    /// HGVS positions emitted against this transcript may not map back to
+    /// the same genomic position they would against the reference, so
+    /// clinical callers should consider falling back to a non-divergent
+    /// transcript for variant reporting.
+    ///
+    /// Sourced from the GFF3 `Note=` attribute on the mRNA / CDS rows;
+    /// see [`crate::TranscriptModel::genome_transcript_divergent`]. About
+    /// 5 % of NCBI RefSeq Select transcripts on GRCh37 carry this flag;
+    /// MANE Select / Plus Clinical transcripts on GRCh38 are curated to
+    /// exclude divergence by construction.
+    DivergentTranscript {
+        /// Affected transcript accession with version (e.g.
+        /// `"NM_001134380.2"`).
+        accession: String,
+    },
+}
+
 /// VEP-compatible severity rating for consequence terms.
 ///
 /// Variants are ordered by declaration so [`Ord`] gives

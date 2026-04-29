@@ -1195,7 +1195,7 @@ mod tests {
 
     // Helper: build a TranscriptStore from a single transcript.
     fn single_tx_store(tx: TranscriptModel) -> TranscriptStore {
-        TranscriptStore::from_transcripts(vec![tx])
+        TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![tx])
     }
 
     // plus_strand_coding() geometry:
@@ -1408,7 +1408,7 @@ mod tests {
         let bin_path = tmp.path().join("test.bin");
         let idx_path = tmp.path().join("test.bin.idx");
         write_genome_binary(&contigs, "test", &bin_path, &idx_path).unwrap();
-        let reader = FastaReader::open(&bin_path).unwrap();
+        let reader = FastaReader::open_with_assembly(&bin_path, crate::Assembly::GRCh38).unwrap();
         (tmp, reader)
     }
 
@@ -1632,7 +1632,7 @@ mod tests {
         v1.accession = "NM_TEST_PLUS.1".into();
         let mut v5 = plus_strand_coding();
         v5.accession = "NM_TEST_PLUS.5".into();
-        let store = TranscriptStore::from_transcripts(vec![v1, v5]);
+        let store = TranscriptStore::from_transcripts(crate::Assembly::GRCh38, vec![v1, v5]);
 
         // Requested `.99` (absent) -> resolver returns `.5` (highest in store).
         let (tx, _) = lookup_transcript("NM_TEST_PLUS.99", &store).unwrap();
@@ -1784,16 +1784,17 @@ mod tests {
     fn load_fasta() -> FastaReader {
         let path = std::env::var("FASTA_PATH")
             .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
-        FastaReader::open_with_patch_aliases(
+        FastaReader::open_with_patch_aliases_and_assembly(
             std::path::Path::new(&path),
             Some(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .parent()
                     .and_then(|p| p.parent())
                     .expect("workspace root")
-                    .join("data/vareffect/patch_chrom_aliases.csv")
+                    .join("data/vareffect/patch_chrom_aliases_grch38.csv")
                     .as_ref(),
             ),
+            crate::Assembly::GRCh38,
         )
         .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
     }

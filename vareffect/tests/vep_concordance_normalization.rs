@@ -42,7 +42,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use vareffect::{FastaReader, TranscriptStore, VarEffect};
+use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure (same pattern as vep_concordance_hgvs.rs)
@@ -69,7 +69,7 @@ fn load_store() -> TranscriptStore {
 fn load_fasta() -> FastaReader {
     let path = std::env::var("FASTA_PATH")
         .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
-    FastaReader::open_with_patch_aliases(
+    FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -79,6 +79,7 @@ fn load_fasta() -> FastaReader {
                 .join("data/vareffect/patch_chrom_aliases.csv")
                 .as_ref(),
         ),
+        Assembly::GRCh38,
     )
     .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
 }
@@ -529,17 +530,25 @@ const VARIANTS: &[ExpectedAnnotation] = &[
 /// descriptions, or `Err(msg)` on transcript-not-found / annotate error.
 fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>, String> {
     let results = ve
-        .annotate(exp.chrom, exp.pos, exp.ref_allele, exp.alt_allele)
+        .annotate(
+            Assembly::GRCh38,
+            exp.chrom,
+            exp.pos,
+            exp.ref_allele,
+            exp.alt_allele,
+        )
         .map_err(|e| format!("annotate error: {e}"))?;
 
     // For intergenic: match on empty transcript.
     // For others: match on transcript accession.
     let result = if exp.transcript.is_empty() {
         results
+            .consequences
             .iter()
             .find(|r| r.transcript.is_empty())
             .ok_or_else(|| {
                 let detail: Vec<String> = results
+                    .consequences
                     .iter()
                     .map(|r| {
                         let csqs: Vec<&str> = r.consequences.iter().map(|c| c.as_str()).collect();
@@ -550,10 +559,15 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>
             })?
     } else {
         results
+            .consequences
             .iter()
             .find(|r| r.transcript == exp.transcript)
             .ok_or_else(|| {
-                let found: Vec<&str> = results.iter().map(|r| r.transcript.as_str()).collect();
+                let found: Vec<&str> = results
+                    .consequences
+                    .iter()
+                    .map(|r| r.transcript.as_str())
+                    .collect();
                 format!(
                     "transcript {} not found in results (found: {found:?})",
                     exp.transcript,
@@ -627,7 +641,11 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>
 #[test]
 #[ignore]
 fn vep_concordance_normalization_18() {
-    let ve = VarEffect::new(load_store(), load_fasta());
+    let ve = VarEffect::builder()
+        .with_handles(Assembly::GRCh38, load_store(), load_fasta())
+        .expect("matching assemblies")
+        .build()
+        .expect("builder");
 
     let total = VARIANTS.len();
     let mut pass = 0u32;
