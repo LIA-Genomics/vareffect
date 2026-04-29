@@ -28,7 +28,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use vareffect::VarEffect;
+use vareffect::{Assembly, VarEffect};
 
 use crate::csq;
 use crate::vcf;
@@ -41,17 +41,21 @@ const CHUNK_SIZE: usize = 10_000;
 
 /// Configuration for the annotate pipeline.
 pub struct AnnotateConfig<'a> {
+    /// Reference build the input VCF was called against. Drives both
+    /// the [`VarEffect`] slot routing and the chrom-table selection
+    /// inside [`vareffect::FastaReader`].
+    pub assembly: Assembly,
     /// Path to the input VCF (`.vcf` or `.vcf.gz`).
     pub input: &'a Path,
     /// Path to the output VCF (`.vcf` or `.vcf.gz`).
     pub output: &'a Path,
-    /// Path to the flat binary genome (`GRCh38.bin`).
+    /// Path to the flat binary genome (e.g. `GRCh38.bin` / `GRCh37.bin`).
     pub fasta: &'a Path,
-    /// Path to `transcript_models.bin`.
+    /// Path to the per-assembly transcript models bin.
     pub transcripts: &'a Path,
     /// Number of rayon worker threads.
     pub threads: usize,
-    /// Optional path to `patch_chrom_aliases.csv`.
+    /// Optional path to the per-assembly `patch_chrom_aliases_*.csv`.
     pub patch_aliases: Option<&'a Path>,
 }
 
@@ -82,15 +86,27 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         .context("configuring rayon thread pool")?;
 
     // -- 2. Load VarEffect ------------------------------------------------
-    tracing::info!("loading vareffect data");
+    tracing::info!(assembly = %config.assembly, "loading vareffect data");
     let load_start = Instant::now();
-    let ve = Arc::new(
-        VarEffect::open_with_patch_aliases(config.transcripts, config.fasta, config.patch_aliases)
-            .context("loading vareffect data")?,
-    );
+    let mut builder = VarEffect::builder();
+    builder = match (config.assembly, config.patch_aliases) {
+        (Assembly::GRCh38, Some(p)) => builder
+            .with_grch38_and_patch_aliases(config.transcripts, config.fasta, p)
+            .context("loading GRCh38 data with patch aliases")?,
+        (Assembly::GRCh38, None) => builder
+            .with_grch38(config.transcripts, config.fasta)
+            .context("loading GRCh38 data")?,
+        (Assembly::GRCh37, Some(p)) => builder
+            .with_grch37_and_patch_aliases(config.transcripts, config.fasta, p)
+            .context("loading GRCh37 data with patch aliases")?,
+        (Assembly::GRCh37, None) => builder
+            .with_grch37(config.transcripts, config.fasta)
+            .context("loading GRCh37 data")?,
+    };
+    let ve = Arc::new(builder.build().context("assembling VarEffect")?);
     let load_elapsed = load_start.elapsed();
     tracing::info!(
-        transcripts = ve.transcripts().len(),
+        transcripts = ve.transcripts(config.assembly)?.len(),
         "vareffect loaded in {:.1}ms",
         load_elapsed.as_secs_f64() * 1000.0
     );
@@ -129,7 +145,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         chunk.push(line);
 
         if chunk.len() == CHUNK_SIZE {
-            process_chunk(&chunk, &ve, &counters, &mut writer)?;
+            process_chunk(&chunk, &ve, config.assembly, &counters, &mut writer)?;
             total += chunk.len() as u64;
             pb.set_message(format!("{total} variants processed"));
             chunk.clear();
@@ -138,7 +154,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
 
     // Flush remaining lines.
     if !chunk.is_empty() {
-        process_chunk(&chunk, &ve, &counters, &mut writer)?;
+        process_chunk(&chunk, &ve, config.assembly, &counters, &mut writer)?;
         total += chunk.len() as u64;
     }
 
@@ -208,12 +224,13 @@ fn process_headers(
 fn process_chunk(
     chunk: &[String],
     ve: &Arc<VarEffect>,
+    assembly: Assembly,
     counters: &Counters,
     writer: &mut dyn Write,
 ) -> Result<()> {
     let annotated: Vec<String> = chunk
         .par_iter()
-        .map(|line| annotate_line(line, ve, counters))
+        .map(|line| annotate_line(line, ve, assembly, counters))
         .collect();
 
     for line in &annotated {
@@ -227,7 +244,7 @@ fn process_chunk(
 ///
 /// On any error (malformed line, annotation failure, panic), the original
 /// line is returned unchanged.
-fn annotate_line(line: &str, ve: &VarEffect, counters: &Counters) -> String {
+fn annotate_line(line: &str, ve: &VarEffect, assembly: Assembly, counters: &Counters) -> String {
     let record = match vcf::parse_vcf_line(line) {
         Ok(r) => r,
         Err(e) => {
@@ -272,12 +289,12 @@ fn annotate_line(line: &str, ve: &VarEffect, counters: &Counters) -> String {
         // immutable/read-only (mmap'd FASTA + Arc'd transcript store), so
         // AssertUnwindSafe is sound — no mutable state to corrupt on unwind.
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            ve.annotate(&chrom, pos_0based, ref_bytes, alt_bytes)
+            ve.annotate(assembly, &chrom, pos_0based, ref_bytes, alt_bytes)
         }));
 
         match result {
             Ok(Ok(results)) => {
-                let csq_str = csq::format_variant_csq(&trimmed_alt, &results);
+                let csq_str = csq::format_variant_csq(&trimmed_alt, &results.consequences);
                 if !csq_str.is_empty() {
                     all_csq_parts.push(csq_str);
                     counters.annotated.fetch_add(1, Ordering::Relaxed);

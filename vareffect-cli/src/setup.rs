@@ -1,16 +1,20 @@
 //! Orchestrator for the `vareffect-cli setup` subcommand.
 //!
 //! Responsible for provisioning every runtime input the `vareffect` crate
-//! needs in a single idempotent invocation:
+//! needs, in a single idempotent invocation, for one or both supported
+//! assemblies.
 //!
-//! 1. Download + decompress + convert the GRCh38 reference FASTA to flat binary.
-//! 2. Download + parse the NCBI assembly report into patch-chrom aliases.
-//! 3. Download + parse + validate the MANE GFF3 -> `transcript_models.bin`.
+//! Per assembly:
+//! 1. Download + decompress + convert the reference FASTA to flat binary.
+//! 2. Download + parse the NCBI assembly report into per-assembly
+//!    patch-chrom aliases.
+//! 3. Download + parse + (when supported) cross-validate the GFF3 →
+//!    `transcript_models_<assembly>.bin`.
 //!
-//! Outputs live under the `output_dir` configured in `vareffect_build.toml`
-//! (default `data/vareffect/`). Source archives (`.gz` FASTA, MANE GFF3,
-//! MANE summary TSV) land in `raw_dir` (default `data/raw/`) as a cache so
-//! reruns skip the download step.
+//! Output artifacts live under the `output_dir` configured in
+//! `vareffect_build.toml` (default `data/vareffect/`). Source archives
+//! land in `raw_dir` (default `data/raw/`) as a cache so reruns skip the
+//! download step.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -21,38 +25,40 @@ use console::style;
 use crate::builders;
 use crate::builders::reference_genome::{self, GenomeOutcome};
 use crate::common::format_size;
-use crate::config;
+use crate::config::{self, AssemblyEntry, TranscriptSource};
+use vareffect::Assembly;
+
+/// Selection passed in by the CLI: build a single assembly, or every
+/// assembly defined in the config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssemblyFilter {
+    /// Build the named assembly only. Errors out if the config does not
+    /// define a sub-table for it.
+    Single(Assembly),
+    /// Build every assembly defined in the config (`grch38`, `grch37`,
+    /// or both).
+    All,
+}
 
 /// Run the `vareffect-cli setup` subcommand.
 ///
-/// # Arguments
-///
-/// * `config_path` -- Explicit `--config` path, or `None` to auto-discover.
-/// * `fasta_only` -- Skip the transcript-model build step.
-/// * `models_only` -- Skip the reference FASTA step.
-/// * `output_override` -- When `Some`, overrides `[vareffect].output_dir`
-///   from the config file so runtime files land in the given directory.
-///
-/// `fasta_only` and `models_only` are mutually exclusive at the CLI layer
-/// (clap enforces this via `conflicts_with`).
+/// `fasta_only` and `models_only` are mutually exclusive at the CLI
+/// layer (clap enforces this via `conflicts_with`).
 pub fn run(
     config_path: Option<&Path>,
     fasta_only: bool,
     models_only: bool,
     output_override: Option<&Path>,
+    assemblies: AssemblyFilter,
 ) -> Result<()> {
     let total_start = Instant::now();
 
-    // 1. Locate and parse the config.
     let config_file = config::find_config(config_path)?;
     let config_text = std::fs::read_to_string(&config_file)
         .with_context(|| format!("reading config {}", config_file.display()))?;
     let config: config::VareffectConfig = toml::from_str(&config_text)
-        .with_context(|| format!("parsing [vareffect] section in {}", config_file.display()))?;
+        .with_context(|| format!("parsing {}", config_file.display()))?;
 
-    // 2. Resolve directories. `output_dir` comes from the [vareffect]
-    //    section (it's vareffect-specific). `raw_dir` comes from the shared
-    //    [paths] block, falling back to `data/raw` if unset.
     let output_dir = output_override
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(&config.vareffect.output_dir));
@@ -67,42 +73,117 @@ pub fn run(
         .with_context(|| format!("creating {}", output_dir.display()))?;
     std::fs::create_dir_all(&raw_dir).with_context(|| format!("creating {}", raw_dir.display()))?;
 
-    // Sanity-check that `fasta_url` matches the declared `fasta_build`.
-    // A MANE / reference-FASTA assembly mismatch would silently corrupt
-    // every coordinate lookup downstream; better to fail loudly here than
-    // to debug an off-by-millions variant call months later.
-    if !config
-        .vareffect
-        .fasta_url
-        .contains(&config.vareffect.fasta_build)
-    {
-        bail!(
-            "config mismatch: [vareffect].fasta_url={:?} does not contain the declared \
-             fasta_build={:?} -- refusing to download a FASTA that may be the wrong assembly",
-            config.vareffect.fasta_url,
-            config.vareffect.fasta_build,
-        );
-    }
-
-    eprintln!();
-    eprintln!(
-        "{}",
-        style("Setting up vareffect runtime data").bold().cyan()
-    );
-    eprintln!("  output_dir  = {}", output_dir.display());
-    eprintln!("  raw_dir     = {}", raw_dir.display());
-    eprintln!("  fasta_build = {}", config.vareffect.fasta_build);
-    eprintln!();
-
-    // 3. Build a single HTTP client for all downloads. 1800 s body timeout
-    //    covers the ~3 GB gzipped reference FASTA on a slow link; 30 s
-    //    connect keeps misconfigured hosts from hanging the build.
     let http_client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1800))
         .connect_timeout(Duration::from_secs(30))
-        .user_agent("vareffect-cli/0.1.0")
+        .user_agent(concat!("vareffect-cli/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("building HTTP client")?;
+
+    // Resolve the list of (assembly, entry) pairs to build.
+    let targets = resolve_targets(&config.vareffect, assemblies)?;
+
+    eprintln!();
+    eprintln!(
+        "{}  ({} assembly target{})",
+        style("Setting up vareffect runtime data").bold().cyan(),
+        targets.len(),
+        if targets.len() == 1 { "" } else { "s" },
+    );
+    eprintln!("  output_dir = {}", output_dir.display());
+    eprintln!("  raw_dir    = {}", raw_dir.display());
+    for (assembly, _) in &targets {
+        eprintln!("  build      = {assembly}");
+    }
+    eprintln!();
+
+    for (assembly, entry) in &targets {
+        run_one_assembly(
+            &http_client,
+            *assembly,
+            entry,
+            &config,
+            &output_dir,
+            &raw_dir,
+            fasta_only,
+            models_only,
+        )?;
+    }
+
+    eprintln!(
+        "{}  vareffect-cli setup complete in {}s",
+        style("OK").green().bold(),
+        total_start.elapsed().as_secs(),
+    );
+
+    Ok(())
+}
+
+/// Resolve the `(Assembly, &AssemblyEntry)` list the CLI asked for,
+/// erroring out for entries the config doesn't define.
+fn resolve_targets(
+    section: &config::VareffectSection,
+    filter: AssemblyFilter,
+) -> Result<Vec<(Assembly, &AssemblyEntry)>> {
+    let mut out: Vec<(Assembly, &AssemblyEntry)> = Vec::new();
+    match filter {
+        AssemblyFilter::Single(asm) => {
+            let entry = section.entry(asm).with_context(|| {
+                format!(
+                    "config has no [vareffect.{}] sub-table; \
+                     define one or pass `--assembly` for a different build",
+                    asm.as_str().to_ascii_lowercase()
+                )
+            })?;
+            out.push((asm, entry));
+        }
+        AssemblyFilter::All => {
+            if let Some(entry) = &section.grch38 {
+                out.push((Assembly::GRCh38, entry));
+            }
+            if let Some(entry) = &section.grch37 {
+                out.push((Assembly::GRCh37, entry));
+            }
+            if out.is_empty() {
+                bail!(
+                    "config has no [vareffect.grch38] or [vareffect.grch37] \
+                     sub-table; nothing to build"
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Build all artifacts for a single assembly. Mirrors the previous
+/// monolithic flow but takes the per-assembly entry as an argument so
+/// the orchestrator can fan out across multiple builds.
+#[allow(clippy::too_many_arguments)]
+fn run_one_assembly(
+    http_client: &reqwest::blocking::Client,
+    assembly: Assembly,
+    entry: &AssemblyEntry,
+    config: &config::VareffectConfig,
+    output_dir: &Path,
+    raw_dir: &Path,
+    fasta_only: bool,
+    models_only: bool,
+) -> Result<()> {
+    eprintln!(
+        "{}",
+        style(format!("=== Building {assembly} ===")).bold().cyan()
+    );
+
+    // Sanity-check that `fasta_url` matches the declared `fasta_build`.
+    if !entry.fasta_url.contains(&entry.fasta_build) {
+        bail!(
+            "config mismatch for {assembly}: fasta_url={:?} does not contain \
+             fasta_build={:?} -- refusing to download a FASTA that may be \
+             the wrong assembly",
+            entry.fasta_url,
+            entry.fasta_build,
+        );
+    }
 
     // -- Step 1/3: Flat binary reference genome -------------------------
     if !models_only {
@@ -111,32 +192,15 @@ pub fn run(
             style("[1/3] Flat binary reference genome (NCBI)").bold()
         );
         let outcome = reference_genome::ensure_genome(
-            &http_client,
-            &config.vareffect.fasta_url,
-            &output_dir,
-            &config.vareffect.fasta_filename,
-            &config.vareffect.fasta_build,
-            &raw_dir,
+            http_client,
+            &entry.fasta_url,
+            output_dir,
+            &entry.fasta_filename,
+            &entry.fasta_build,
+            raw_dir,
         )
-        .context("preparing reference genome binary")?;
-        report_genome_outcome(&outcome, &output_dir.join(&config.vareffect.fasta_filename));
-
-        // Warn (non-destructive) if a legacy BGZF FASTA is still present.
-        let legacy_bgzf = output_dir.join("GRCh38.fa.gz");
-        if legacy_bgzf.exists() {
-            tracing::warn!(
-                path = %legacy_bgzf.display(),
-                "legacy BGZF FASTA detected; delete it (and .fai/.gzi sidecars) \
-                 manually to complete the flat binary migration",
-            );
-        }
-        let legacy_plain = output_dir.join("GRCh38.fa");
-        if legacy_plain.exists() {
-            tracing::warn!(
-                path = %legacy_plain.display(),
-                "legacy plain FASTA detected; delete it manually",
-            );
-        }
+        .with_context(|| format!("preparing reference genome binary for {assembly}"))?;
+        report_genome_outcome(&outcome, &output_dir.join(&entry.fasta_filename));
         eprintln!();
     } else {
         eprintln!(
@@ -146,34 +210,29 @@ pub fn run(
         eprintln!();
     }
 
-    // -- Step 2/3: Patch-chrom aliases (feeds transcript cross-validation)
+    // -- Step 2/3: Patch-chrom aliases ---------------------------------
     let aliases_path = if !fasta_only {
         eprintln!("{}", style("[2/3] Patch-chrom aliases").bold());
 
-        let assembly_report_path = raw_dir.join(&config.vareffect.assembly_report_input);
+        let assembly_report_path = raw_dir.join(&entry.assembly_report_input);
         ensure_cached(
-            &http_client,
-            &config.vareffect.assembly_report_url,
+            http_client,
+            &entry.assembly_report_url,
             &assembly_report_path,
             "NCBI assembly report",
         )?;
 
         let (csv_path, row_count) = builders::patch_chrom_aliases::build_from_assembly_report(
             &assembly_report_path,
-            &output_dir,
+            output_dir,
+            &entry.patch_aliases_filename,
         )
-        .context("building patch_chrom_aliases.csv")?;
+        .with_context(|| format!("building {}", entry.patch_aliases_filename))?;
 
         eprintln!(
             "  {}  wrote {} ({} aliases)",
             style("OK").green(),
-            style(
-                csv_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(builders::patch_chrom_aliases::OUTPUT_FILENAME)
-            )
-            .cyan(),
+            style(&entry.patch_aliases_filename).cyan(),
             row_count,
         );
         eprintln!();
@@ -191,52 +250,48 @@ pub fn run(
     if !fasta_only {
         eprintln!("{}", style("[3/3] Transcript models").bold());
 
-        // GFF3 cache filename from the optional `[mane]` section, so a
-        // downstream pipeline can pre-stage the ~80 MB MANE GFF3 and have
-        // the `setup` command reuse it instead of re-downloading.
-        let gff_filename = config.gff_filename();
+        // GFF3 cache filename. For GRCh38 use the optional `[mane].input`
+        // override; for GRCh37 derive a default name from the assembly.
+        let gff_filename = match assembly {
+            Assembly::GRCh38 => config.gff_filename().to_string(),
+            Assembly::GRCh37 => "ncbi_grch37.gff.gz".to_string(),
+        };
+        let gff_path = raw_dir.join(&gff_filename);
+        ensure_cached(http_client, &entry.gff_url, &gff_path, "RefSeq GFF3")?;
 
-        // Download both source files to raw_dir (not output_dir) so only
-        // the canonical .bin/.sha256/.manifest.json end up under
-        // data/vareffect/.
-        let gff_path = raw_dir.join(gff_filename);
-        ensure_cached(
-            &http_client,
-            &config.vareffect.gff_url,
-            &gff_path,
-            "MANE GFF3",
-        )?;
+        let cross_validation_path = if let Some(input) = &entry.cross_validation_input {
+            let path = raw_dir.join(input);
+            if let Some(url) = &entry.cross_validation_url {
+                ensure_cached(http_client, url, &path, "cross-validation source")?;
+            }
+            Some(path)
+        } else {
+            None
+        };
 
-        let summary_path = raw_dir.join(&config.vareffect.summary_input);
-        ensure_cached(
-            &http_client,
-            &config.vareffect.summary_url,
-            &summary_path,
-            "MANE summary TSV",
-        )?;
+        let admit_tags = match entry.transcript_source {
+            TranscriptSource::Mane => builders::transcript_models::ADMIT_TAGS_MANE,
+            TranscriptSource::RefSeqSelect => builders::transcript_models::ADMIT_TAGS_REFSEQ_SELECT,
+        };
 
-        // Always rebuild the transcript model store: the parse is cheap
-        // (~10 s) and the cross-validation is cheap too, so an always-fresh
-        // build is simpler than trying to decide "is this .bin up to date?".
         let build_start = Instant::now();
-        // `aliases_path` is `Some` here by construction -- Step 2/3 only
-        // returns `None` under `fasta_only`, which short-circuits this block.
-        let aliases_ref = aliases_path
-            .as_deref()
-            .expect("patch aliases must be built before transcript models in vareffect-cli setup");
+        let aliases_ref = aliases_path.as_deref();
         let (out, size_bytes) = builders::transcript_models::build(
             &gff_path,
-            Some(&summary_path),
-            Some(aliases_ref),
-            &output_dir,
-            &config.vareffect.transcript_models_version,
+            cross_validation_path.as_deref(),
+            aliases_ref,
+            output_dir,
+            &entry.transcript_models_version,
+            assembly,
+            admit_tags,
+            &entry.transcript_models_basename,
         )
-        .context("building transcript_models store")?;
+        .with_context(|| format!("building transcript models for {assembly}"))?;
 
         eprintln!(
             "  {}  wrote {} ({} records, {} in {}s)",
             style("OK").green(),
-            style("transcript_models.bin").cyan(),
+            style(&entry.transcript_models_filename).cyan(),
             out.record_count,
             format_size(size_bytes as u64),
             build_start.elapsed().as_secs(),
@@ -249,12 +304,6 @@ pub fn run(
         );
         eprintln!();
     }
-
-    eprintln!(
-        "{}  vareffect-cli setup complete in {}s",
-        style("OK").green().bold(),
-        total_start.elapsed().as_secs(),
-    );
 
     Ok(())
 }
@@ -287,7 +336,7 @@ fn ensure_cached(
     Ok(())
 }
 
-/// Pretty-print an [`GenomeOutcome`].
+/// Pretty-print a [`GenomeOutcome`].
 fn report_genome_outcome(outcome: &GenomeOutcome, bin_path: &Path) {
     match outcome {
         GenomeOutcome::AlreadyPresent {

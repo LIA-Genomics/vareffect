@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use vareffect::chrom::{is_patch_sequence, refseq_to_ucsc};
+use vareffect::chrom::{Assembly, is_patch_sequence, refseq_to_ucsc};
 use vareffect::{Strand, TranscriptModel, TranscriptTier};
 
 // Re-import types used only by tests.
@@ -32,6 +32,7 @@ pub(super) fn cross_validate_summary(
     transcripts: &[TranscriptModel],
     summary_path: &Path,
     patch_aliases: &HashMap<String, String>,
+    assembly: Assembly,
 ) -> Result<()> {
     let file = std::fs::File::open(summary_path)
         .with_context(|| format!("opening {}", summary_path.display()))?;
@@ -107,7 +108,7 @@ pub(super) fn cross_validate_summary(
         // resolves the patch case. A patch/primary disagreement between the
         // two sides is a real discrepancy and must fail the build.
         let summary_raw = row.grch38_chr.trim();
-        let summary_chrom = normalize_summary_chrom(summary_raw);
+        let summary_chrom = normalize_summary_chrom(summary_raw, assembly);
         let built_is_patch = is_patch_sequence(&tx.chrom);
         let summary_is_patch = summary_raw.starts_with("NW_") || summary_raw.starts_with("NT_");
         match (built_is_patch, summary_is_patch) {
@@ -260,13 +261,17 @@ pub(super) fn cross_validate_summary(
 ///
 /// Handles the three formats observed in NCBI files:
 ///   `"6"` -> `"chr6"`, `"chr6"` -> `"chr6"`, `"NC_000006.12"` -> `"chr6"`.
-fn normalize_summary_chrom(raw: &str) -> String {
+///
+/// `NC_*` translation respects the assembly the validator was called with;
+/// the GRCh37 and GRCh38 NC_* version tables differ for every primary
+/// chromosome except chrM.
+fn normalize_summary_chrom(raw: &str, assembly: Assembly) -> String {
     let trimmed = raw.trim();
     if trimmed.starts_with("chr") {
         return trimmed.to_string();
     }
     if trimmed.starts_with("NC_") {
-        return refseq_to_ucsc(trimmed).to_string();
+        return refseq_to_ucsc(assembly, trimmed).to_string();
     }
     // Bare number or letter form (e.g. "6", "X").
     if !trimmed.is_empty() {
@@ -354,11 +359,14 @@ mod tests {
 
     #[test]
     fn normalize_summary_chrom_handles_all_formats() {
-        assert_eq!(normalize_summary_chrom("chr6"), "chr6");
-        assert_eq!(normalize_summary_chrom("6"), "chr6");
-        assert_eq!(normalize_summary_chrom("NC_000006.12"), "chr6");
-        assert_eq!(normalize_summary_chrom("X"), "chrX");
-        assert_eq!(normalize_summary_chrom(""), "");
+        assert_eq!(normalize_summary_chrom("chr6", Assembly::GRCh38), "chr6");
+        assert_eq!(normalize_summary_chrom("6", Assembly::GRCh38), "chr6");
+        assert_eq!(
+            normalize_summary_chrom("NC_000006.12", Assembly::GRCh38),
+            "chr6"
+        );
+        assert_eq!(normalize_summary_chrom("X", Assembly::GRCh38), "chrX");
+        assert_eq!(normalize_summary_chrom("", Assembly::GRCh38), "");
     }
 
     /// Build a minimal patch-sequence `TranscriptModel` suitable for
@@ -390,6 +398,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -430,8 +440,13 @@ mod tests {
             "chr22_KI270879v1_alt".to_string(),
         );
 
-        cross_validate_summary(&transcripts, summary_file.path(), &aliases)
-            .expect("validator should accept a resolved patch alias");
+        cross_validate_summary(
+            &transcripts,
+            summary_file.path(),
+            &aliases,
+            Assembly::GRCh38,
+        )
+        .expect("validator should accept a resolved patch alias");
     }
 
     #[test]
@@ -445,8 +460,13 @@ mod tests {
         let mut aliases = HashMap::new();
         aliases.insert("NT_187633.1".to_string(), "chr9_KN196479v1_fix".to_string());
 
-        let err = cross_validate_summary(&transcripts, summary_file.path(), &aliases)
-            .expect_err("validator should reject a patch alias mismatch");
+        let err = cross_validate_summary(
+            &transcripts,
+            summary_file.path(),
+            &aliases,
+            Assembly::GRCh38,
+        )
+        .expect_err("validator should reject a patch alias mismatch");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("patch chrom mismatch"),
@@ -466,8 +486,13 @@ mod tests {
         let summary_file = write_minimal_summary_tsv("NM_PATCH3.1", "NT_999999.1", "PATCH3");
         let aliases: HashMap<String, String> = HashMap::new();
 
-        cross_validate_summary(&transcripts, summary_file.path(), &aliases)
-            .expect("validator should tolerate unknown patch aliases");
+        cross_validate_summary(
+            &transcripts,
+            summary_file.path(),
+            &aliases,
+            Assembly::GRCh38,
+        )
+        .expect("validator should tolerate unknown patch aliases");
     }
 
     #[test]
@@ -480,8 +505,13 @@ mod tests {
         let summary_file = write_minimal_summary_tsv("NM_ASYMM1.1", "NC_000022.11", "ASYMM1");
         let aliases: HashMap<String, String> = HashMap::new();
 
-        let err = cross_validate_summary(&transcripts, summary_file.path(), &aliases)
-            .expect_err("validator should reject patch/primary asymmetry");
+        let err = cross_validate_summary(
+            &transcripts,
+            summary_file.path(),
+            &aliases,
+            Assembly::GRCh38,
+        )
+        .expect_err("validator should reject patch/primary asymmetry");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("patch/primary asymmetry"),
@@ -501,8 +531,13 @@ mod tests {
             "chr22_KI270879v1_alt".to_string(),
         );
 
-        let err = cross_validate_summary(&transcripts, summary_file.path(), &aliases)
-            .expect_err("validator should reject patch/primary asymmetry");
+        let err = cross_validate_summary(
+            &transcripts,
+            summary_file.path(),
+            &aliases,
+            Assembly::GRCh38,
+        )
+        .expect_err("validator should reject patch/primary asymmetry");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("patch/primary asymmetry"),

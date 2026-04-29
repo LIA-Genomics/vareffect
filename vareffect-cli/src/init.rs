@@ -157,7 +157,18 @@ mod tests {
     fn default_template_parses_as_valid_config() {
         let config: crate::config::VareffectConfig =
             toml::from_str(DEFAULT_CONFIG).expect("default template must parse");
-        assert_eq!(config.vareffect.fasta_build, "GRCh38");
+        let g38 = config
+            .vareffect
+            .grch38
+            .as_ref()
+            .expect("default template must include [vareffect.grch38]");
+        assert_eq!(g38.fasta_build, "GRCh38");
+        let g37 = config
+            .vareffect
+            .grch37
+            .as_ref()
+            .expect("default template must include [vareffect.grch37]");
+        assert_eq!(g37.fasta_build, "GRCh37");
     }
 
     #[test]

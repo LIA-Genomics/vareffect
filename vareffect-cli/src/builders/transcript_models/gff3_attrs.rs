@@ -131,6 +131,94 @@ pub(super) fn extract_transcript_from_id(id: &str) -> Option<String> {
 /// helper: `NP_` (canonical), `YP_` (mitochondrial), `XP_` (predicted).
 pub(super) const PROTEIN_ACCESSION_PREFIXES: &[&str] = &["NP_", "YP_", "XP_"];
 
+/// Substring patterns NCBI uses in `Note=` attributes to flag transcripts
+/// whose sequence differs from the reference assembly.
+///
+/// Sourced from manual inspection of the GRCh37.p13 GFF3 plus NCBI's
+/// public documentation:
+///
+/// > "transcript variant XX has X extra bases at the 3' end relative to
+/// > the genome"
+/// > "transcript and genome sequences differ"
+/// > "transcript and genome differ at this position"
+/// > "indel in genome compared to transcript"
+/// > "extra bases at"
+///
+/// The match is case-insensitive substring; specifically curated to avoid
+/// catching benign `Note=` content like `"transcript variant 2"`. Future
+/// drift in NCBI's wording surfaces as a Stage C concordance regression
+/// rather than a silent miss, because the Stage C ClinVar-concordance
+/// suite excludes flagged transcripts and any unflagged divergence will
+/// show up as an HGVS mismatch.
+pub(super) const DIVERGENCE_NOTE_PATTERNS: &[&str] = &[
+    "differs from",
+    "does not match",
+    "indel in genome",
+    "extra bases",
+    "transcript and genome",
+    "genome assembly",
+    "transcript exception",
+];
+
+/// Detect whether an mRNA or CDS row's `Note=` attribute flags the
+/// transcript as having sequence divergence from the reference assembly.
+///
+/// Case-insensitive substring match against [`DIVERGENCE_NOTE_PATTERNS`].
+/// Returns `false` for absent or empty `Note=` attributes — divergence is
+/// the rare case (~5 % on GRCh37, 0 % on GRCh38 MANE) and the default
+/// must be permissive so non-divergent transcripts produce no warning.
+pub(super) fn extract_divergence_flag(attrs: &str) -> bool {
+    let Some(note) = extract_attr(attrs, "Note") else {
+        return false;
+    };
+    if note.is_empty() {
+        return false;
+    }
+    let lower = note.to_ascii_lowercase();
+    DIVERGENCE_NOTE_PATTERNS
+        .iter()
+        .any(|pat| lower.contains(pat))
+}
+
+/// Detect whether a CDS row's `transl_except=` attribute marks a
+/// translational exception (selenocysteine / pyrrolysine readthrough).
+///
+/// Returns the residue identity. Distinct from divergence detection:
+/// `transl_except` is a known biological mechanism that vareffect should
+/// record but should NOT raise as a clinical warning, because the HGVS
+/// position remains correct against the reference.
+///
+/// NCBI's qualifier format is
+/// `transl_except=(pos:X..Y,aa:Sec)` (or `aa:Pyl`).
+pub(super) fn extract_translational_exception(
+    attrs: &str,
+) -> Option<vareffect::TranslationalException> {
+    let raw = extract_attr(attrs, "transl_except")?;
+    // Look for `aa:Sec` / `aa:Pyl` / `aa:<other>` inside the qualifier.
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("aa:sec") || lower.contains("aa:selenocysteine") {
+        Some(vareffect::TranslationalException::Selenocysteine)
+    } else if lower.contains("aa:pyl") || lower.contains("aa:pyrrolysine") {
+        Some(vareffect::TranslationalException::Pyrrolysine)
+    } else if let Some(idx) = lower.find("aa:") {
+        // Capture the rest of the value after `aa:` up to the next
+        // delimiter, so an unknown amino acid round-trips as
+        // `Other("Cys")` rather than getting silently dropped.
+        let tail = &raw[idx + 3..];
+        let stop = tail
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(tail.len());
+        let aa = &tail[..stop];
+        if aa.is_empty() {
+            None
+        } else {
+            Some(vareffect::TranslationalException::Other(aa.to_string()))
+        }
+    } else {
+        None
+    }
+}
+
 /// Extract a protein accession from a CDS row's attribute column.
 ///
 /// NCBI GFF3 places the protein accession in two possible locations:

@@ -19,12 +19,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// Output filename produced by [`build_from_assembly_report`].
-pub const OUTPUT_FILENAME: &str = "patch_chrom_aliases.csv";
+/// Default output filename produced by [`build_from_assembly_report`]
+/// when callers don't override via the per-assembly config.
+#[allow(dead_code)]
+pub const DEFAULT_OUTPUT_FILENAME: &str = "patch_chrom_aliases.csv";
 
 /// Parse the NCBI assembly report at `report_path` and write a 2-column
-/// `refseq,ucsc` CSV to `{output_dir}/patch_chrom_aliases.csv`. Returns
+/// `refseq,ucsc` CSV to `{output_dir}/{output_filename}`. Returns
 /// `(output_path, row_count)`. The write is atomic via `.tmp` + rename.
+///
+/// `output_filename` is config-driven so GRCh37 and GRCh38 builds can
+/// produce side-by-side `patch_chrom_aliases_grch37.csv` /
+/// `patch_chrom_aliases_grch38.csv` files in the same `output_dir`.
 ///
 /// # Errors
 ///
@@ -32,6 +38,7 @@ pub const OUTPUT_FILENAME: &str = "patch_chrom_aliases.csv";
 pub fn build_from_assembly_report(
     report_path: &Path,
     output_dir: &Path,
+    output_filename: &str,
 ) -> Result<(PathBuf, usize)> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("creating {}", output_dir.display()))?;
@@ -68,15 +75,15 @@ pub fn build_from_assembly_report(
     rows.sort_by(|a, b| a.0.cmp(&b.0));
 
     let row_count = rows.len();
-    let output_path = output_dir.join(OUTPUT_FILENAME);
-    let tmp_path = output_dir.join(format!("{OUTPUT_FILENAME}.tmp"));
+    let output_path = output_dir.join(output_filename);
+    let tmp_path = output_dir.join(format!("{output_filename}.tmp"));
 
     {
         let mut out =
             File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?;
         writeln!(
             out,
-            "# GRCh38 patch-contig aliases: RefSeq accession -> UCSC contig name."
+            "# Patch-contig aliases: RefSeq accession -> UCSC contig name (GRCh37 or GRCh38)."
         )?;
         writeln!(
             out,
@@ -176,10 +183,11 @@ HSCHR22_3_CTG1\talt-scaffold\t22\tChromosome\tKI270879.1\t=\tNT_187633.1\tALT_RE
         let out_dir = tempfile::tempdir().unwrap();
 
         let (csv_path, count) =
-            build_from_assembly_report(&report_path, out_dir.path()).expect("build");
+            build_from_assembly_report(&report_path, out_dir.path(), DEFAULT_OUTPUT_FILENAME)
+                .expect("build");
 
         assert_eq!(count, 2, "expected 2 patch rows (NC_ skipped, na skipped)");
-        assert_eq!(csv_path.file_name().unwrap(), OUTPUT_FILENAME);
+        assert_eq!(csv_path.file_name().unwrap(), DEFAULT_OUTPUT_FILENAME);
 
         let contents = std::fs::read_to_string(&csv_path).unwrap();
         // Header preserved.
@@ -207,7 +215,9 @@ HSCHR22_3_CTG1\talt-scaffold\t22\tChromosome\tKI270879.1\t=\tNT_187633.1\tALT_RE
     fn load_round_trips_build_output() {
         let (_tmp_in, report_path) = write_temp(MINI_REPORT);
         let out_dir = tempfile::tempdir().unwrap();
-        let (csv_path, _) = build_from_assembly_report(&report_path, out_dir.path()).unwrap();
+        let (csv_path, _) =
+            build_from_assembly_report(&report_path, out_dir.path(), DEFAULT_OUTPUT_FILENAME)
+                .unwrap();
 
         let map = load(&csv_path).expect("load");
         assert_eq!(map.len(), 2);

@@ -234,7 +234,7 @@ Elapsed:    0.2s
 | `mature_miRNA_variant` | Requires miRNA locus track |
 | Regulatory terms (`TFBS_ablation`, `TF_binding_site_variant`, `regulatory_region_variant`) | Requires regulatory feature store |
 | SV terms (`feature_elongation`, `feature_truncation`, `transcript_amplification`) | Requires segment-level SV input |
-| Alternate builds (GRCh37, CHM13) | Build pipeline work, not engine limitation |
+| Alternate builds (CHM13) | Build pipeline work, not engine limitation. GRCh38 and GRCh37 are both supported via `Assembly` selector. |
 | Multi-allele VCF splitting | Caller's responsibility |
 | Canonical transcript selection | Caller filters on tier metadata |
 

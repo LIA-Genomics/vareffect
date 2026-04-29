@@ -40,16 +40,41 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
-use vareffect::chrom::{is_patch_sequence, refseq_to_ucsc};
-use vareffect::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
+use vareffect::chrom::{Assembly, is_patch_sequence, refseq_to_ucsc};
+use vareffect::{
+    Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier, TranslationalException,
+};
 
 use cross_validate::cross_validate_summary;
 use gff3_attrs::{
-    extract_attr, extract_ensembl_from_dbxref, extract_hgnc_from_dbxref,
+    extract_attr, extract_divergence_flag, extract_ensembl_from_dbxref, extract_hgnc_from_dbxref,
     extract_protein_id_from_cds_attrs, extract_refseq_acc_from_dbxref, extract_transcript_from_id,
+    extract_translational_exception,
 };
 
-use crate::common::{BuildOutput, serialize_and_finalize};
+/// Tag-list configuration for [`tier_from_attrs`]. Maps a `tag=` value
+/// to the tier it implies. The slice is `&'static` so admit logic stays
+/// const-evaluable and lookup-free; future sources (Ensembl Canonical,
+/// CCDS) require zero parser changes — just add another entry.
+pub(crate) type AdmitTag = (&'static str, TranscriptTier);
+
+/// `MANE Select` / `MANE Plus Clinical` admission set for GRCh38 builds.
+pub(crate) const ADMIT_TAGS_MANE: &[AdmitTag] = &[
+    ("MANE Select", TranscriptTier::ManeSelect),
+    ("MANE_Select", TranscriptTier::ManeSelect),
+    ("MANE Plus Clinical", TranscriptTier::ManePlusClinical),
+    ("MANE_Plus_Clinical", TranscriptTier::ManePlusClinical),
+];
+
+/// `RefSeq Select` admission set for GRCh37 builds. NCBI's GRCh37.p13
+/// GFF3 carries `tag=RefSeq Select` on the curated representative
+/// transcripts; MANE tags are absent because MANE is GRCh38-only.
+pub(crate) const ADMIT_TAGS_REFSEQ_SELECT: &[AdmitTag] = &[
+    ("RefSeq Select", TranscriptTier::RefSeqSelect),
+    ("RefSeq_Select", TranscriptTier::RefSeqSelect),
+];
+
+use crate::common::BuildOutput;
 
 /// GFF3 feature types that carry the MANE tag on MANE Select / MANE Plus
 /// Clinical transcripts in release v1.5. Any admitted transcript whose
@@ -95,14 +120,18 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
 /// cross-validation fails, the patch-alias CSV cannot be read, or the
 /// output files cannot be written. Also errors if `summary_input` is
 /// provided without a matching `patch_aliases_input`.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     input: &Path,
     summary_input: Option<&Path>,
     patch_aliases_input: Option<&Path>,
     output_dir: &Path,
     version: &str,
+    assembly: Assembly,
+    admit_tags: &[AdmitTag],
+    output_basename: &str,
 ) -> Result<(BuildOutput, usize)> {
-    let transcripts = parse_gff3(input)?;
+    let transcripts = parse_gff3(input, assembly, admit_tags)?;
 
     if let Some(summary_path) = summary_input {
         let aliases_path = patch_aliases_input.ok_or_else(|| {
@@ -118,32 +147,87 @@ pub fn build(
                     aliases_path.display()
                 )
             })?;
-        cross_validate_summary(&transcripts, summary_path, &aliases).with_context(|| {
-            format!(
-                "cross-validating GFF3 build against {}",
-                summary_path.display()
-            )
-        })?;
+        cross_validate_summary(&transcripts, summary_path, &aliases, assembly).with_context(
+            || {
+                format!(
+                    "cross-validating GFF3 build against {}",
+                    summary_path.display()
+                )
+            },
+        )?;
+    } else {
+        tracing::warn!(
+            store = "transcript_models",
+            assembly = %assembly,
+            "no cross-validation source configured for {assembly} build; \
+             this is the documented gap for GRCh37 RefSeq Select — Stage B \
+             will introduce a dispatching validator"
+        );
     }
 
     let count = transcripts.len() as u64;
-    serialize_and_finalize(
-        "transcript_models",
+    serialize_and_finalize_with_assembly(
+        output_basename,
         &transcripts,
         count,
         input,
         output_dir,
         version,
+        assembly,
     )
+}
+
+/// Like [`crate::common::serialize_and_finalize`] but also writes the
+/// `assembly` field into the sidecar `.manifest.json`. Required for the
+/// runtime [`vareffect::TranscriptStore::load_from_path`] to identify
+/// which build the on-disk records belong to.
+fn serialize_and_finalize_with_assembly(
+    name: &str,
+    store: &Vec<TranscriptModel>,
+    record_count: u64,
+    input: &Path,
+    output_dir: &Path,
+    version: &str,
+    assembly: Assembly,
+) -> Result<(BuildOutput, usize)> {
+    let (output, data_len) = crate::common::serialize_and_finalize(
+        name,
+        store,
+        record_count,
+        input,
+        output_dir,
+        version,
+    )?;
+    // Patch the manifest in place by re-reading, injecting the assembly
+    // key, and writing back. Cheaper than threading the assembly through
+    // `finalize_store` and avoids an upstream signature break.
+    let manifest_path = output_dir.join(format!("{name}.manifest.json"));
+    let raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    manifest["assembly"] = serde_json::Value::String(assembly.as_str().to_string());
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
+        .with_context(|| format!("rewriting {}", manifest_path.display()))?;
+    Ok((output, data_len))
 }
 
 // ---------------------------------------------------------------------------
 // GFF3 parsing
 // ---------------------------------------------------------------------------
 
-/// Parse a MANE GFF3 file into `Vec<TranscriptModel>`, sorted by accession
-/// for deterministic MessagePack output.
-fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
+/// Parse a NCBI RefSeq / MANE GFF3 file into `Vec<TranscriptModel>`,
+/// sorted by accession for deterministic MessagePack output.
+///
+/// `assembly` selects the chrom-table for `NC_*` → UCSC translation;
+/// `admit_tags` is the slice of `(tag, tier)` pairs the parser will admit
+/// (see [`ADMIT_TAGS_MANE`] for GRCh38, [`ADMIT_TAGS_REFSEQ_SELECT`] for
+/// GRCh37).
+fn parse_gff3(
+    input: &Path,
+    assembly: Assembly,
+    admit_tags: &[AdmitTag],
+) -> Result<Vec<TranscriptModel>> {
     let file =
         std::fs::File::open(input).with_context(|| format!("opening {}", input.display()))?;
 
@@ -163,6 +247,13 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
     let mut exon_ranges: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
     // mRNA_id -> first-observed protein accession (from CDS rows).
     let mut mrna_protein: HashMap<String, String> = HashMap::new();
+    // mRNA_id -> divergence flag (OR-aggregated across the mRNA row and
+    // every child CDS row; GFF3 row order is not guaranteed by spec, so
+    // we accumulate during the single pass and apply at assembly time).
+    let mut divergence_flags: HashMap<String, bool> = HashMap::new();
+    // mRNA_id -> translational exception (selenocysteine / pyrrolysine)
+    // sourced from any child CDS row carrying `transl_except=`.
+    let mut translational_exceptions: HashMap<String, TranslationalException> = HashMap::new();
     // Admitted-transcript count per feature type (mRNA, lnc_RNA, ...).
     // Used to surface uncommon feature types in the build log so future
     // MANE releases that introduce new biotypes are visible at a glance.
@@ -262,7 +353,24 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
                 if !mrna_protein.contains_key(&parent_mrna)
                     && let Some(pid) = extract_protein_id_from_cds_attrs(attrs)
                 {
-                    mrna_protein.insert(parent_mrna, pid);
+                    mrna_protein.insert(parent_mrna.clone(), pid);
+                }
+
+                // OR-merge the divergence flag from this CDS row into the
+                // parent mRNA's accumulator. NCBI sometimes places the
+                // `Note=` divergence flag on CDS rows rather than mRNA
+                // rows, so we have to scan both.
+                if extract_divergence_flag(attrs) {
+                    divergence_flags.insert(parent_mrna.clone(), true);
+                }
+
+                // Translational exception (selenocysteine / pyrrolysine)
+                // — first wins; later CDS rows are ignored if the parent
+                // already has a recorded exception.
+                if !translational_exceptions.contains_key(&parent_mrna)
+                    && let Some(exc) = extract_translational_exception(attrs)
+                {
+                    translational_exceptions.insert(parent_mrna, exc);
                 }
             }
 
@@ -288,7 +396,7 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             // telomerase_RNA. Anything outside this set triggers a build-log
             // warning via the `feature_type_counts` loop below.
             _ => {
-                let Some(tier) = tier_from_attrs(attrs) else {
+                let Some(tier) = tier_from_attrs(attrs, admit_tags) else {
                     continue;
                 };
                 let Some(id) = extract_attr(attrs, "ID") else {
@@ -300,9 +408,17 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
                 // gene lookup.
                 let parent_gene = extract_first_parent(attrs).unwrap_or_default();
 
+                // OR-merge divergence flag from the mRNA row itself (CDS
+                // children also contribute via their branch above). Done
+                // before chrom translation because either source can fire
+                // independently.
+                if extract_divergence_flag(attrs) {
+                    divergence_flags.insert(id.clone(), true);
+                }
+
                 // Chromosome: convert NC_ -> chr. Patch sequences fall through
                 // unchanged and are flagged for the build summary.
-                let chrom = refseq_to_ucsc(raw_chrom).to_string();
+                let chrom = refseq_to_ucsc(assembly, raw_chrom).to_string();
 
                 // RefSeq transcript accession: Name attr -> GenBank Dbxref
                 // fallback -> ID-prefix fallback. Every MANE transcript in
@@ -317,7 +433,7 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
                     tracing::warn!(
                         transcript_id = %id,
                         store = "transcript_models",
-                        "skipping MANE transcript: no accession could be resolved",
+                        "skipping admitted transcript: no accession could be resolved",
                     );
                     continue;
                 }
@@ -476,6 +592,9 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             patch_seq_count += 1;
         }
 
+        let genome_transcript_divergent = divergence_flags.get(mrna_id).copied().unwrap_or(false);
+        let translational_exception = translational_exceptions.get(mrna_id).cloned();
+
         transcripts.push(TranscriptModel {
             accession: pending.accession.clone(),
             protein_accession,
@@ -493,6 +612,8 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             tier: pending.tier,
             biotype,
             exon_count,
+            genome_transcript_divergent,
+            translational_exception,
         });
     }
 
@@ -679,27 +800,27 @@ fn extract_first_parent(attrs: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Detect MANE tier from an mRNA row's attribute column.
+/// Detect a transcript tier from an mRNA row's attribute column,
+/// parameterized by the admission set the build was configured with.
 ///
-/// Returns `None` for untagged rows. Parses the `tag=` attribute
-/// structurally -- the previous implementation used `attrs.contains(...)`
-/// which would match any substring anywhere in column 9 (for example a
-/// `Note=...includes MANE_Select isoforms...` description), silently
-/// admitting non-MANE transcripts.
+/// Returns `None` for untagged rows or rows whose tags don't appear in
+/// `admit_tags`. Parses the `tag=` attribute structurally -- the
+/// previous implementation used `attrs.contains(...)` which would match
+/// any substring anywhere in column 9 (for example a `Note=...includes
+/// MANE_Select isoforms...` description), silently admitting
+/// unintended transcripts. The `admit_tags` slice provides exact
+/// (`==`) matching against each comma-separated tag value.
 ///
 /// GFF3 tag values are comma-separated, so a row can carry multiple tags
-/// (`tag=basic,MANE Select`). Both the NCBI space form (`MANE Select`)
-/// and the underscore form (`MANE_Select`) are accepted so the parser
-/// stays compatible with either convention.
-fn tier_from_attrs(attrs: &str) -> Option<TranscriptTier> {
+/// (`tag=basic,MANE Select`). Both space (`MANE Select`) and underscore
+/// (`MANE_Select`) forms are typically present in the slice.
+fn tier_from_attrs(attrs: &str, admit_tags: &[AdmitTag]) -> Option<TranscriptTier> {
     let tag = extract_attr(attrs, "tag")?;
     for value in tag.split(',').map(str::trim) {
-        match value {
-            "MANE Select" | "MANE_Select" => return Some(TranscriptTier::ManeSelect),
-            "MANE Plus Clinical" | "MANE_Plus_Clinical" => {
-                return Some(TranscriptTier::ManePlusClinical);
+        for (admit, tier) in admit_tags {
+            if value == *admit {
+                return Some(*tier);
             }
-            _ => {}
         }
     }
     None
@@ -867,7 +988,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn parses_mane_select_with_reversed_exons_and_cds() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
 
         let syngap = transcripts
             .iter()
@@ -915,7 +1037,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn parses_mane_plus_clinical_plus_strand() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
 
         let tp53 = transcripts
             .iter()
@@ -951,7 +1074,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn non_mane_row_is_dropped_regardless_of_feature_type() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
 
         assert!(
             transcripts.iter().all(|t| t.accession != "XR_999.1"),
@@ -963,7 +1087,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn output_is_sorted_by_accession_for_determinism() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
         let accessions: Vec<&str> = transcripts.iter().map(|t| t.accession.as_str()).collect();
         assert_eq!(
             accessions,
@@ -980,7 +1105,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn parses_non_coding_lnc_rna_transcript() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
 
         let lncx = transcripts
             .iter()
@@ -1003,7 +1129,9 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn parses_uncommon_feature_type_vault_rna() {
         let file = write_temp(MINI_GFF);
-        let (transcripts, logs) = with_captured_logs(|| parse_gff3(file.path()).expect("parse"));
+        let (transcripts, logs) = with_captured_logs(|| {
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse")
+        });
 
         let vault = transcripts
             .iter()
@@ -1030,7 +1158,8 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn parses_patch_sequence_transcript() {
         let file = write_temp(MINI_GFF);
-        let transcripts = parse_gff3(file.path()).expect("parse");
+        let transcripts =
+            parse_gff3(file.path(), Assembly::GRCh38, ADMIT_TAGS_MANE).expect("parse");
 
         let fixed = transcripts
             .iter()
@@ -1088,20 +1217,20 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn tier_from_attrs_detects_both_tiers() {
         assert_eq!(
-            tier_from_attrs("tag=MANE Select"),
+            tier_from_attrs("tag=MANE Select", ADMIT_TAGS_MANE),
             Some(TranscriptTier::ManeSelect)
         );
         assert_eq!(
-            tier_from_attrs("tag=MANE Plus Clinical"),
+            tier_from_attrs("tag=MANE Plus Clinical", ADMIT_TAGS_MANE),
             Some(TranscriptTier::ManePlusClinical)
         );
-        assert_eq!(tier_from_attrs("tag=Basic"), None);
+        assert_eq!(tier_from_attrs("tag=Basic", ADMIT_TAGS_MANE), None);
     }
 
     #[test]
     fn tier_from_attrs_accepts_comma_separated_tag_list() {
         assert_eq!(
-            tier_from_attrs("ID=rna-x;tag=basic,MANE Select;Name=foo"),
+            tier_from_attrs("ID=rna-x;tag=basic,MANE Select;Name=foo", ADMIT_TAGS_MANE),
             Some(TranscriptTier::ManeSelect)
         );
     }
@@ -1109,7 +1238,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
     #[test]
     fn tier_from_attrs_rejects_substring_false_positive() {
         let attrs = "ID=rna-x;Note=similar to MANE_Select isoforms;tag=basic";
-        assert_eq!(tier_from_attrs(attrs), None);
+        assert_eq!(tier_from_attrs(attrs, ADMIT_TAGS_MANE), None);
     }
 
     #[test]
