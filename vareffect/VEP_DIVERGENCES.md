@@ -53,10 +53,34 @@ and every feature that is intentionally out of scope for the core crate.
   parser skips chrM rows at parse time with a build-log warning; the
   ~37 affected mitochondrial transcripts (MT-RNR1, MT-CO1, …) are
   validated separately via downstream ClinVar concordance.
-- **Validation date:** last full concordance run 2026-04-11 — 6 / 6 test
-  files pass (see [Validation methodology](#validation-methodology) for the
-  per-file variant counts). GRCh37 concordance numbers will land with a
-  separate ClinVar / VEP pass.
+- **Validation date:** last full concordance run 2026-04-30.
+  - **GRCh38:** 6 / 6 spot-check files pass (136 / 136 hand-curated
+    variants — see [Validation methodology](#validation-methodology) for
+    the per-file breakdown). Large-scale concordance against VEP REST on
+    ~50,000 ClinVar variants (`vep_large_concordance.rs`) is in progress
+    with the threshold currently set at ≥95 % consequence concordance;
+    tightening to ≥99 % once divergences are triaged.
+  - **GRCh37 ClinVar self-concordance** (vareffect-GRCh37 vs
+    vareffect-GRCh38 on 5,000 dual-coordinate ClinVar pairs,
+    `grch37_clinvar_concordance.rs`): **100.00 %** consequence,
+    **99.98 %** HGVS.c, **100.00 %** HGVS.p across 4,698
+    shared-transcript comparisons, with **902 / 19,262 (4.68 %)**
+    divergent transcripts excluded by construction (within tolerance
+    of NCBI's published ~5 % figure for RefSeq Select on GRCh37).
+  - **GRCh37 VEP REST concordance** on 10,000 stratified ClinVar
+    variants captured from `https://grch37.rest.ensembl.org`
+    (`vep_large_concordance_grch37.rs`): **99.33 %** consequence
+    concordance across 5,220 in-store comparisons (89.64 % strict-equal
+    + 8.31 % normalised splice/NMD folding + 0.67 % real mismatch).
+    HGVS.c **96.99 %**, HGVS.p **96.53 %**, IMPACT **99.67 %**, protein
+    start **97.68 %**. Zero panics, zero annotation errors.
+  - **GRCh37 spot-check tier**: `vep_concordance_grch37_snv.rs` ships
+    with **3 hand-curated variants** validated against VEP REST. Five
+    additional spot-check files (`indel`, `hgvs`, `hgvs_p`,
+    `hgvs_reverse`, `normalization`) — mirroring the GRCh38 layout —
+    will land as separate files once their fixtures are curated. Use
+    the same `https://grch37.rest.ensembl.org/vep/human/region/...`
+    REST endpoint as the GRCh38 spot-checks, with `assembly=GRCh37`.
 
 ## Intentional divergences
 
@@ -221,6 +245,8 @@ reader once, iterates its `VARIANTS` fixture, and asserts per-variant
 equality on `hgvs_c`, `hgvs_p`, the consequence subset, and (where
 relevant) the `predicts_nmd` flag.
 
+### GRCh38 hand-curated spot-checks
+
 | Test file                              | Variants | Focus |
 |----------------------------------------|---------:|-------|
 | `vep_concordance_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
@@ -229,22 +255,40 @@ relevant) the `predicts_nmd` flag.
 | `vep_concordance_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
 | `vep_concordance_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
 | `vep_concordance_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
-| **Total**                              |  **136** | |
+| **GRCh38 spot-check total**            |  **136** | |
 
-As of 2026-04-11 all six test files pass (6 / 6 test functions, 136 / 136
-variants). The suite is `#[ignore]`-gated because it requires the
-transcript store and genome binary on disk; run with:
+### GRCh37 hand-curated spot-checks
+
+| Test file                                     | Variants | Focus |
+|-----------------------------------------------|---------:|-------|
+| `vep_concordance_grch37_snv.rs`               |        3 | SNV consequences (in progress; target ~50) |
+| **GRCh37 spot-check total**                   |    **3** | additional files (`indel`, `hgvs`, `hgvs_p`, `hgvs_reverse`, `normalization`) will mirror the GRCh38 layout once curated |
+
+### Statistical / large-scale concordance
+
+| Test file                                | Rows | Focus |
+|------------------------------------------|-----:|-------|
+| `vep_large_concordance.rs` (GRCh38)      | ~50,000 | Statistical consequence concordance vs VEP REST on stratified ClinVar variants. Threshold ≥95 %. |
+| `vep_large_concordance_grch37.rs`        |  9,986 | Same shape on GRCh37; 5,220 in-store comparisons → 99.33 % consequence concordance. |
+| `grch37_clinvar_concordance.rs`          |  5,000 | GRCh37 self-concordance vs vareffect-GRCh38 on dual-coord ClinVar pairs. Threshold ≥99 % per metric. |
+
+The suite is `#[ignore]`-gated because it requires the transcript stores
+and genome binaries on disk; run with:
 
 ```bash
-FASTA_PATH=/absolute/path/to/GRCh38.bin \
-    cargo test -p vareffect --release -- --ignored vep_concordance
+FASTA_PATH=/abs/path/to/GRCh38.bin \
+GRCH37_FASTA=/abs/path/to/GRCh37.bin \
+GRCH37_TRANSCRIPTS=/abs/path/to/transcript_models_grch37.bin \
+  cargo test -p vareffect --release -- --ignored
 ```
 
-When adding a new variant to a fixture, record its expected output by
-querying the Ensembl VEP REST API with `refseq=1&hgvs=1` (or `&numbers=1`
-for exon number assertions) and paste the response into the fixture
-comment so future reviewers can cross-check against the recorded ground
-truth.
+or via `make test-ignored` for the env-var-laden form. When adding a new
+variant to a hand-curated fixture, record its expected output from the
+relevant Ensembl VEP REST endpoint (`rest.ensembl.org` for GRCh38,
+`grch37.rest.ensembl.org` for GRCh37) with
+`refseq=1&hgvs=1&shift_hgvs=1&numbers=1` and paste the response into
+the fixture comment so future reviewers can cross-check against the
+recorded ground truth.
 
 ## Known edge cases
 

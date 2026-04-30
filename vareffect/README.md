@@ -357,9 +357,15 @@ Contributions are welcome. The most valuable areas for outside help are:
   with variants that stress a part of the pipeline that isn't already
   covered.
 - CHM13 / non-human assembly support in the `vareffect-cli` provisioning
-  flow. (GRCh37 is supported as of Stage A of the dual-assembly rollout;
-  Stage B adds a GRCh37 cross-validation source, Stage C adds the
-  GRCh37 ClinVar / VEP concordance benchmark suites.)
+  flow. (GRCh38 + GRCh37 are both supported. The GRCh37 testing tier
+  mirrors the GRCh38 layout: `tests/vep_large_concordance_grch37.rs`
+  pairs with `vep_large_concordance.rs`, `tests/vep_concordance_grch37_*.rs`
+  pairs with `vep_concordance_*.rs` (curation in progress —
+  `vep_concordance_grch37_snv.rs` ships first; the rest land per-file
+  as fixtures are written), and `tests/grch37_clinvar_concordance.rs`
+  adds a cross-build self-consistency harness with no GRCh38 mirror by
+  construction. See `VEP_DIVERGENCES.md` for the latest concordance
+  numbers.)
 
 Open an issue before starting on anything larger than a bug fix so we can
 agree on scope.
