@@ -20,9 +20,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 /// Default output filename produced by [`build_from_assembly_report`]
-/// when callers don't override via the per-assembly config.
+/// when callers don't override via the per-assembly config. The default
+/// targets the GRCh38 layout because that's the only assembly that ever
+/// falls back to a hard-coded default; GRCh37 always supplies an
+/// explicit `patch_aliases_filename` via the per-assembly config.
 #[allow(dead_code)]
-pub const DEFAULT_OUTPUT_FILENAME: &str = "patch_chrom_aliases.csv";
+pub const DEFAULT_OUTPUT_FILENAME: &str = "patch_chrom_aliases_grch38.csv";
 
 /// Parse the NCBI assembly report at `report_path` and write a 2-column
 /// `refseq,ucsc` CSV to `{output_dir}/{output_filename}`. Returns
@@ -112,10 +115,11 @@ pub fn build_from_assembly_report(
     Ok((output_path, row_count))
 }
 
-/// Load `patch_chrom_aliases.csv` into a `HashMap` keyed on RefSeq
-/// accession. Tolerates `#` comments, the header row, blank lines, and
-/// whitespace. Duplicate keys keep the last value. Errors (with a
-/// `vareffect-cli setup` hint) if the file is missing or empty.
+/// Load a per-assembly `patch_chrom_aliases_grch{37,38}.csv` into a
+/// `HashMap` keyed on RefSeq accession. Tolerates `#` comments, the
+/// header row, blank lines, and whitespace. Duplicate keys keep the
+/// last value. Errors (with a `vareffect setup` hint) if the file is
+/// missing or empty.
 pub fn load(path: &Path) -> Result<HashMap<String, String>> {
     let file = File::open(path).with_context(|| {
         format!(
@@ -234,7 +238,7 @@ HSCHR22_3_CTG1\talt-scaffold\t22\tChromosome\tKI270879.1\t=\tNT_187633.1\tALT_RE
     #[test]
     fn load_tolerates_hand_edits_and_whitespace() {
         let tmp = tempfile::tempdir().unwrap();
-        let csv_path = tmp.path().join("patch_chrom_aliases.csv");
+        let csv_path = tmp.path().join("patch_chrom_aliases_grch38.csv");
         let contents = "\
 # Comment line
 # Another comment

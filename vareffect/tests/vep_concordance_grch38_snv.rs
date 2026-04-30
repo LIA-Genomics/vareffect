@@ -6,7 +6,7 @@
 //!
 //! Run with:
 //! ```bash
-//! FASTA_PATH=data/vareffect/GRCh38.bin \
+//! GRCH38_FASTA=data/vareffect/GRCh38.bin \
 //!   cargo test -p vareffect -- --ignored vep_concordance
 //! ```
 //!
@@ -37,32 +37,35 @@ use vareffect::{Assembly, FastaReader, TranscriptStore, annotate_snv};
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
-/// Load the transcript store from the workspace data directory.
+/// Load the GRCh38 transcript store.
 ///
-/// Derives the path from `CARGO_MANIFEST_DIR` so the test works regardless of
-/// the working directory. Panics with a clear message if the store is missing.
+/// Reads the path from `GRCH38_TRANSCRIPTS` (matching the GRCh37 sibling's
+/// `GRCH37_TRANSCRIPTS` convention) or falls back to the workspace default
+/// `data/vareffect/transcript_models_grch38.bin`. Panics with a clear
+/// message if the store is missing.
 fn load_store() -> TranscriptStore {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("could not determine workspace root from CARGO_MANIFEST_DIR");
-    let path = workspace_root.join("data/vareffect/transcript_models.bin");
-    TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
+    let path = std::env::var("GRCH38_TRANSCRIPTS").unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("could not determine workspace root from CARGO_MANIFEST_DIR")
+            .join("data/vareffect/transcript_models_grch38.bin")
+            .to_string_lossy()
+            .into_owned()
+    });
+    TranscriptStore::load_from_path(Path::new(&path)).unwrap_or_else(|e| {
         panic!(
-            "failed to load transcript store from {}: {}. \
-             Run `cargo run -p vareffect-cli -- build` first.",
-            path.display(),
-            e,
+            "failed to load GRCh38 transcript store from {path}: {e}. \
+             Run `vareffect setup --assembly grch38` first.",
         )
     })
 }
 
-/// Load the genome reader from the `FASTA_PATH` environment variable.
+/// Load the GRCh38 genome reader from the `GRCH38_FASTA` environment variable.
 fn load_fasta() -> FastaReader {
-    let path = std::env::var("FASTA_PATH").expect(
-        "FASTA_PATH env var must point to a GRCh38 genome binary (.bin) \
-         with its .bin.idx sidecar. Run `vareffect-cli setup` first, \
-         then set FASTA_PATH=data/vareffect/GRCh38.bin.",
+    let path = std::env::var("GRCH38_FASTA").expect(
+        "GRCH38_FASTA env var must point to a GRCh38 genome binary (.bin) \
+         with its .bin.idx sidecar. Run `vareffect setup --assembly grch38` \
+         first, then set GRCH38_FASTA=data/vareffect/GRCh38.bin.",
     );
     FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
@@ -71,12 +74,12 @@ fn load_fasta() -> FastaReader {
                 .parent()
                 .and_then(|p| p.parent())
                 .expect("workspace root")
-                .join("data/vareffect/patch_chrom_aliases.csv")
+                .join("data/vareffect/patch_chrom_aliases_grch38.csv")
                 .as_ref(),
         ),
         Assembly::GRCh38,
     )
-    .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
+    .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +685,7 @@ fn check_variant(
 /// present depending on the store build configuration.
 #[test]
 #[ignore]
-fn vep_concordance_snv_20() {
+fn vep_concordance_grch38_snv_20() {
     let store = load_store();
     let fasta = load_fasta();
 

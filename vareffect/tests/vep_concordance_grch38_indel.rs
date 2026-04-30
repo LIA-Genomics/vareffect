@@ -6,7 +6,7 @@
 //!
 //! Run with:
 //! ```bash
-//! FASTA_PATH=data/vareffect/GRCh38.bin \
+//! GRCH38_FASTA=data/vareffect/GRCh38.bin \
 //!   cargo test -p vareffect -- --ignored vep_concordance_indel
 //! ```
 //!
@@ -62,27 +62,30 @@ use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 // Test infrastructure (same pattern as vep_concordance_snv.rs)
 // ---------------------------------------------------------------------------
 
-/// Load the transcript store from the workspace data directory.
+/// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
+/// falls back to `data/vareffect/transcript_models_grch38.bin` under the
+/// workspace root (derived from `CARGO_MANIFEST_DIR`).
 fn load_store() -> TranscriptStore {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("could not determine workspace root from CARGO_MANIFEST_DIR");
-    let path = workspace_root.join("data/vareffect/transcript_models.bin");
-    TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
+    let path = std::env::var("GRCH38_TRANSCRIPTS").unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("could not determine workspace root from CARGO_MANIFEST_DIR")
+            .join("data/vareffect/transcript_models_grch38.bin")
+            .to_string_lossy()
+            .into_owned()
+    });
+    TranscriptStore::load_from_path(Path::new(&path)).unwrap_or_else(|e| {
         panic!(
-            "failed to load transcript store from {}: {}. \
-             Run `cargo run -p vareffect-cli -- build` first.",
-            path.display(),
-            e,
+            "failed to load GRCh38 transcript store from {path}: {e}. \
+             Run `vareffect setup --assembly grch38` first.",
         )
     })
 }
 
-/// Load the genome reader from `FASTA_PATH` env var.
+/// Load the GRCh38 genome reader from `GRCH38_FASTA` env var.
 fn load_fasta() -> FastaReader {
-    let path = std::env::var("FASTA_PATH")
-        .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
+    let path = std::env::var("GRCH38_FASTA")
+        .expect("GRCH38_FASTA env var must point to a GRCh38 genome binary");
     FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
         Some(
@@ -90,12 +93,12 @@ fn load_fasta() -> FastaReader {
                 .parent()
                 .and_then(|p| p.parent())
                 .expect("workspace root")
-                .join("data/vareffect/patch_chrom_aliases.csv")
+                .join("data/vareffect/patch_chrom_aliases_grch38.csv")
                 .as_ref(),
         ),
         Assembly::GRCh38,
     )
-    .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
+    .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,7 +1134,7 @@ fn check_variant(ve: &VarEffect, exp: &Expected) -> Result<Vec<String>, String> 
 /// correct output — the divergence flag is informational only.
 #[test]
 #[ignore]
-fn vep_concordance_indel_28() {
+fn vep_concordance_grch38_indel_28() {
     let ve = VarEffect::builder()
         .with_handles(Assembly::GRCh38, load_store(), load_fasta())
         .expect("matching assemblies")

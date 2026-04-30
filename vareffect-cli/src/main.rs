@@ -28,12 +28,20 @@ use crate::common::{print_build_header, print_build_summary};
 /// CLI value for `--assembly`. Maps to [`vareffect::Assembly`] for the
 /// runtime path; the `All` variant is `setup`-only and means "build
 /// every assembly the config defines".
+///
+/// Variant idents follow the NCBI casing used by the core [`Assembly`]
+/// enum. The explicit `#[value(name = "...")]` attributes pin the
+/// CLI surface form (`grch37` / `grch38`) so it stays decoupled from
+/// the Rust ident — without them, clap's kebab-case derivation would
+/// split `GRCh38` at the `RCh` boundary and produce `gr-ch38`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AssemblyArg {
     /// GRCh38 (NCBI MANE source).
-    Grch38,
+    #[value(name = "grch38")]
+    GRCh38,
     /// GRCh37 (NCBI RefSeq Select source).
-    Grch37,
+    #[value(name = "grch37")]
+    GRCh37,
     /// Build every assembly defined in the config. Setup-only — the
     /// `annotate` subcommand requires a single assembly.
     All,
@@ -42,8 +50,8 @@ enum AssemblyArg {
 impl AssemblyArg {
     fn to_assembly(self) -> Result<Assembly> {
         match self {
-            AssemblyArg::Grch38 => Ok(Assembly::GRCh38),
-            AssemblyArg::Grch37 => Ok(Assembly::GRCh37),
+            AssemblyArg::GRCh38 => Ok(Assembly::GRCh38),
+            AssemblyArg::GRCh37 => Ok(Assembly::GRCh37),
             AssemblyArg::All => bail!("--assembly all is only valid for `setup`"),
         }
     }
@@ -80,10 +88,11 @@ enum Command {
 
     /// Set up all runtime data for vareffect in one command.
     ///
-    /// Downloads the GRCh38 reference FASTA, decompresses and indexes it
-    /// (produces `GRCh38.fa.gz` + `.fai` + `.gzi`), downloads the NCBI
+    /// Downloads the per-assembly reference FASTA, decompresses and indexes
+    /// it (produces e.g. `GRCh38.bin` + `.bin.idx`), downloads the NCBI
     /// assembly report and builds patch-chrom aliases, then downloads the
-    /// MANE GFF3 + summary TSV and builds `transcript_models.bin`.
+    /// transcript-source GFF3 (MANE for GRCh38, RefSeq Select for GRCh37)
+    /// and builds the matching `transcript_models_grch{37,38}.bin`.
     ///
     /// Idempotent: the reference FASTA is skipped if already present;
     /// transcript models are always rebuilt. Source archives land in
@@ -100,7 +109,7 @@ enum Command {
         /// Reference build to set up. Defaults to `grch38`; `all` builds
         /// every assembly defined in the config (an additional ~6 GB of
         /// raw downloads + ~3 GB of binaries on top of GRCh38).
-        #[arg(long, value_enum, default_value_t = AssemblyArg::Grch38)]
+        #[arg(long, value_enum, default_value_t = AssemblyArg::GRCh38)]
         assembly: AssemblyArg,
         /// Only download + index the reference FASTA; skip the transcript
         /// model build.
@@ -153,7 +162,7 @@ enum Command {
 
     /// Build transcript model store from a MANE GFF3 file.
     ///
-    /// Produces `transcript_models.bin` containing full
+    /// Produces `transcript_models_grch{37,38}.bin` containing full
     /// `Vec<vareffect::TranscriptModel>` with exon structure, CDS bounds,
     /// protein accessions, and MANE tier. When `--summary-input` is
     /// provided, every transcript is cross-validated against the MANE
@@ -255,8 +264,8 @@ fn main() -> Result<()> {
             models_only,
         } => {
             let filter = match assembly {
-                AssemblyArg::Grch38 => setup::AssemblyFilter::Single(Assembly::GRCh38),
-                AssemblyArg::Grch37 => setup::AssemblyFilter::Single(Assembly::GRCh37),
+                AssemblyArg::GRCh38 => setup::AssemblyFilter::Single(Assembly::GRCh38),
+                AssemblyArg::GRCh37 => setup::AssemblyFilter::Single(Assembly::GRCh37),
                 AssemblyArg::All => setup::AssemblyFilter::All,
             };
             setup::run(
@@ -319,7 +328,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Bridge `AssemblyArg::Grch{37,38}` to [`vareffect::Assembly`] without
+/// Bridge `AssemblyArg::GRCh{37,38}` to [`vareffect::Assembly`] without
 /// triggering the `--assembly all` rejection. The runtime parser is
 /// unused for the non-`All` cases but kept as a shared correctness check
 /// for the rejection-of-aliases path that the CLI never reaches.

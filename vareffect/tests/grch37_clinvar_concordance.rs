@@ -16,7 +16,7 @@
 //!
 //! Run with:
 //! ```bash
-//! FASTA_PATH=data/vareffect/GRCh38.bin \
+//! GRCH38_FASTA=data/vareffect/GRCh38.bin \
 //! GRCH37_FASTA=data/vareffect/GRCh37.bin \
 //! GRCH37_TRANSCRIPTS=data/vareffect/transcript_models_grch37.bin \
 //!   cargo test -p vareffect --release -- --ignored grch37_clinvar_concordance --nocapture
@@ -110,7 +110,7 @@ fn open_var_effect() -> VarEffect {
     let g37_transcripts = std::env::var("GRCH37_TRANSCRIPTS")
         .expect("GRCH37_TRANSCRIPTS env var must point at the transcript_models_grch37.bin");
     let g38_fasta =
-        std::env::var("FASTA_PATH").expect("FASTA_PATH env var must point at GRCh38.bin");
+        std::env::var("GRCH38_FASTA").expect("GRCH38_FASTA env var must point at GRCh38.bin");
 
     let root = workspace_root();
     let g38_transcripts = root.join("data/vareffect/transcript_models_grch38.bin");

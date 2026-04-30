@@ -362,15 +362,15 @@ patch_aliases_filename = "patch_chrom_aliases_grch38.csv"
     #[test]
     fn manifest_record_count_read() {
         let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
+        let bin_path = tmp.path().join("transcript_models_grch38.bin");
         fs::write(&bin_path, b"data").unwrap();
 
         let manifest = serde_json::json!({
-            "store_name": "transcript_models",
+            "store_name": "transcript_models_grch38",
             "record_count": 1234,
         });
         fs::write(
-            tmp.path().join("transcript_models.manifest.json"),
+            tmp.path().join("transcript_models_grch38.manifest.json"),
             serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
@@ -381,7 +381,7 @@ patch_aliases_filename = "patch_chrom_aliases_grch38.csv"
     #[test]
     fn manifest_record_count_missing_manifest() {
         let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
+        let bin_path = tmp.path().join("transcript_models_grch38.bin");
         assert_eq!(read_manifest_record_count(&bin_path), None);
     }
 }

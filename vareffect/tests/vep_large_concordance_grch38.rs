@@ -16,7 +16,7 @@
 //!
 //! Run with:
 //! ```bash
-//! FASTA_PATH=data/vareffect/GRCh38.bin \
+//! GRCH38_FASTA=data/vareffect/GRCh38.bin \
 //!   cargo test -p vareffect -- --ignored vep_large_concordance --nocapture
 //! ```
 //!
@@ -116,28 +116,30 @@ fn store_accessions_path() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 fn load_store() -> TranscriptStore {
-    let root = workspace_root();
-    let path = root.join("data/vareffect/transcript_models.bin");
-    TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
+    let path = std::env::var("GRCH38_TRANSCRIPTS").unwrap_or_else(|_| {
+        workspace_root()
+            .join("data/vareffect/transcript_models_grch38.bin")
+            .to_string_lossy()
+            .into_owned()
+    });
+    TranscriptStore::load_from_path(Path::new(&path)).unwrap_or_else(|e| {
         panic!(
-            "failed to load transcript store from {}: {}. \
-             Run `cargo run -p vareffect-cli -- build` first.",
-            path.display(),
-            e,
+            "failed to load GRCh38 transcript store from {path}: {e}. \
+             Run `vareffect setup --assembly grch38` first.",
         )
     })
 }
 
 fn load_fasta() -> FastaReader {
-    let path = std::env::var("FASTA_PATH")
-        .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
-    let aliases = workspace_root().join("data/vareffect/patch_chrom_aliases.csv");
+    let path = std::env::var("GRCH38_FASTA")
+        .expect("GRCH38_FASTA env var must point to a GRCh38 genome binary");
+    let aliases = workspace_root().join("data/vareffect/patch_chrom_aliases_grch38.csv");
     FastaReader::open_with_patch_aliases_and_assembly(
         Path::new(&path),
         Some(aliases.as_ref()),
         Assembly::GRCh38,
     )
-    .unwrap_or_else(|e| panic!("failed to open FASTA at {path}: {e}"))
+    .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -639,7 +641,7 @@ enum RowResult {
 
 #[test]
 #[ignore]
-fn vep_large_concordance() {
+fn vep_large_concordance_grch38() {
     let tsv_path = ground_truth_path();
     if !tsv_path.exists() {
         eprintln!(
@@ -868,7 +870,7 @@ fn vep_large_concordance() {
 /// picks land on transcripts absent from the store and the comparison
 /// corpus shrinks to ~27% of the TSV rows.
 ///
-/// Run after rebuilding `data/vareffect/transcript_models.bin`:
+/// Run after rebuilding `data/vareffect/transcript_models_grch38.bin`:
 /// ```bash
 /// cargo test -p vareffect -- --ignored dump_store_accessions --nocapture
 /// ```

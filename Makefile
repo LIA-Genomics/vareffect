@@ -18,7 +18,7 @@ test:
 # Run #[ignore]-gated concordance harnesses (GRCh38 + GRCh37). Requires both
 # assemblies' data files on disk (see `vareffect setup --assembly all`).
 test-ignored:
-	FASTA_PATH=data/vareffect/GRCh38.bin \
+	GRCH38_FASTA=data/vareffect/GRCh38.bin \
 	GRCH37_FASTA=data/vareffect/GRCh37.bin \
 	GRCH37_TRANSCRIPTS=data/vareffect/transcript_models_grch37.bin \
 	  cargo test -p vareffect --release -- --ignored --nocapture

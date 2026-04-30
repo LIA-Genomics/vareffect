@@ -19,7 +19,7 @@
 //! use vareffect::{Biotype, TranscriptStore};
 //!
 //! let store = TranscriptStore::load_from_path(
-//!     Path::new("data/vareffect/transcript_models.bin"),
+//!     Path::new("data/vareffect/transcript_models_grch38.bin"),
 //! )?;
 //!
 //! // Overlap query: all transcripts whose tx_start..tx_end intersects the interval.

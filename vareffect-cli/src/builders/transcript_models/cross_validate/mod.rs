@@ -309,8 +309,8 @@ fn compare(
             store = "transcript_models",
             count = unknown_patch_aliases.len(),
             "{source_label} references patch accessions missing from \
-             patch_chrom_aliases.csv -- the assembly report may be out of \
-             date; aliases: [{aliases}]",
+             patch_chrom_aliases_grch{{37,38}}.csv -- the assembly report \
+             may be out of date; aliases: [{aliases}]",
         );
     }
 

@@ -583,10 +583,16 @@ fn tp53_r248w() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("data/vareffect/transcript_models.bin");
-    let store = crate::TranscriptStore::load_from_path(&store_path).unwrap();
+        .join("data/vareffect/transcript_models_grch38.bin");
+    let store = crate::TranscriptStore::load_from_path(&store_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load GRCh38 transcript store from {}: {e}. \
+             Run `vareffect setup --assembly grch38` first.",
+            store_path.display(),
+        )
+    });
 
-    let fasta_path = std::env::var("FASTA_PATH").expect("FASTA_PATH env var");
+    let fasta_path = std::env::var("GRCH38_FASTA").expect("GRCH38_FASTA env var");
     let fasta =
         FastaReader::open_with_assembly(std::path::Path::new(&fasta_path), crate::Assembly::GRCh38)
             .unwrap();

@@ -44,8 +44,8 @@
 //!   and maps `chrM -> MT`.
 //!
 //! Patch contigs (`chr9_KN196479v1_fix`, `chr22_KI270879v1_alt`, ...) can
-//! only be served against an NCBI-naming binary when a
-//! `patch_chrom_aliases.csv` is supplied via
+//! only be served against an NCBI-naming binary when a per-assembly
+//! `patch_chrom_aliases_grch{37,38}.csv` is supplied via
 //! [`FastaReader::open_with_patch_aliases_and_assembly`].
 //!
 //! # Thread safety
@@ -345,8 +345,8 @@ pub struct FastaReader {
     naming: ContigNaming,
 
     /// Optional UCSC -> RefSeq patch alias table. Only populated when the
-    /// caller supplies a `patch_chrom_aliases.csv` to
-    /// [`FastaReader::open_with_patch_aliases_and_assembly`] *and* the
+    /// caller supplies a per-assembly `patch_chrom_aliases_grch{37,38}.csv`
+    /// to [`FastaReader::open_with_patch_aliases_and_assembly`] *and* the
     /// binary uses [`ContigNaming::NcbiRefSeq`].
     patch_aliases: Option<Arc<HashMap<String, String>>>,
 
@@ -734,7 +734,8 @@ impl FastaReader {
     }
 }
 
-/// Load `patch_chrom_aliases.csv` into a UCSC -> RefSeq lookup map.
+/// Load a per-assembly `patch_chrom_aliases_grch{37,38}.csv` into a
+/// UCSC -> RefSeq lookup map.
 ///
 /// The on-disk CSV format is `refseq,ucsc` (see
 /// `vareffect-cli::builders::patch_chrom_aliases`), so this loader inverts
@@ -817,7 +818,7 @@ mod tests {
 
     /// Write a `refseq,ucsc` alias CSV to a tempdir and return the path.
     fn write_patch_alias_csv(tmp: &TempDir) -> PathBuf {
-        let csv_path = tmp.path().join("patch_chrom_aliases.csv");
+        let csv_path = tmp.path().join("patch_chrom_aliases_grch38.csv");
         let contents = "\
 # GRCh38 patch-contig aliases: RefSeq accession -> UCSC contig name.
 refseq,ucsc

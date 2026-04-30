@@ -39,7 +39,9 @@ vareffect = "0.1.2"
 # ~3 GB of disk, then you never have to touch it again.
 cargo install vareffect-cli
 vareffect init
-vareffect setup
+vareffect setup                        # default: --assembly grch38
+# vareffect setup --assembly grch37    # add the GRCh37 build
+# vareffect setup --assembly all       # build both side-by-side
 ```
 
 Then annotate a variant against every overlapping transcript:
@@ -188,10 +190,11 @@ intentional divergences from VEP and features that are not yet implemented.
 
 `vareffect` does not ship reference data. You provide two files at runtime:
 
-1. **`transcript_models.bin`** — a MessagePack-serialised
-   `Vec<TranscriptModel>` built from a MANE / RefSeq Select GFF3.
-2. **`GRCh38.bin`** (or whatever build you use) — a flat uppercase-IUPAC
-   binary plus a `.bin.idx` MessagePack sidecar produced by the builder.
+1. **`transcript_models_grch{37,38}.bin`** — a MessagePack-serialised
+   `Vec<TranscriptModel>` built from a MANE GFF3 (GRCh38) or NCBI
+   RefSeq Select GFF3 (GRCh37). One per assembly; both can coexist.
+2. **`GRCh38.bin`** / **`GRCh37.bin`** — a flat uppercase-IUPAC binary
+   plus a `.bin.idx` MessagePack sidecar produced by the builder.
 
 ### Recommended: use `vareffect-cli`
 
@@ -208,7 +211,12 @@ cargo install vareffect-cli
 vareffect init
 
 # Full provisioning (GRCh38 genome + MANE transcript models).
-vareffect setup
+vareffect setup --assembly grch38       # the default; flag shown for clarity
+
+# Provision GRCh37 (RefSeq Select transcripts) alongside GRCh38:
+vareffect setup --assembly grch37
+# ...or build both in one go:
+vareffect setup --assembly all
 
 # Validate everything is in place:
 vareffect check
@@ -231,10 +239,12 @@ After `vareffect setup` finishes, you have the layout the library expects:
 
 ```text
 data/vareffect/
-  GRCh38.bin               # flat-binary reference genome
-  GRCh38.bin.idx           # MessagePack contig index
-  transcript_models.bin    # serialised Vec<TranscriptModel>
-  patch_chrom_aliases.csv  # UCSC <-> RefSeq patch-contig map
+  GRCh38.bin                            # flat-binary reference genome
+  GRCh38.bin.idx                        # MessagePack contig index
+  transcript_models_grch38.bin          # serialised Vec<TranscriptModel>
+  transcript_models_grch38.manifest.json
+  patch_chrom_aliases_grch38.csv        # UCSC <-> RefSeq patch-contig map
+  # ... and the matching `_grch37`-suffixed siblings if you also built GRCh37.
 ```
 
 ### Alternative: roll your own
@@ -309,8 +319,10 @@ from the same memory-mapped bytes.
   API. GFF3's 1-based-fully-closed input is converted at build time.
 - **UCSC chromosome names** (`chr17`, `chrM`). The `FastaReader` has an
   alias table so it can transparently accept `"17"`, `"NC_000017.11"`, etc.
-  Patch-contig lookups additionally need `open_with_patch_aliases` and a
-  `refseq,ucsc` alias CSV (written automatically by `vareffect setup`).
+  Patch-contig lookups additionally need
+  [`VarEffectBuilder::with_grch38_and_patch_aliases`] (or the GRCh37
+  variant) and a `refseq,ucsc` alias CSV (written automatically by
+  `vareffect setup` as `patch_chrom_aliases_grch{37,38}.csv`).
 - **Uppercase ASCII** allele bytes — no case coercion at call time, so
   lowercase input is a bug in your code, not something we silently fix.
 
@@ -335,7 +347,7 @@ transcript store and reference genome on disk (run `vareffect setup` first
 if you haven't already):
 
 ```bash
-FASTA_PATH="$(pwd)/data/vareffect/GRCh38.bin" CONCORDANCE_THREADS=1 \
+GRCH38_FASTA="$(pwd)/data/vareffect/GRCh38.bin" CONCORDANCE_THREADS=1 \
     cargo test -p vareffect --release -- --ignored vep_concordance
 ```
 
@@ -359,8 +371,9 @@ Contributions are welcome. The most valuable areas for outside help are:
 - CHM13 / non-human assembly support in the `vareffect-cli` provisioning
   flow. (GRCh38 + GRCh37 are both supported. The GRCh37 testing tier
   mirrors the GRCh38 layout: `tests/vep_large_concordance_grch37.rs`
-  pairs with `vep_large_concordance.rs`, `tests/vep_concordance_grch37_*.rs`
-  pairs with `vep_concordance_*.rs` (curation in progress —
+  pairs with `tests/vep_large_concordance_grch38.rs`,
+  `tests/vep_concordance_grch37_*.rs` pairs with
+  `tests/vep_concordance_grch38_*.rs` (curation in progress —
   `vep_concordance_grch37_snv.rs` ships first; the rest land per-file
   as fixtures are written), and `tests/grch37_clinvar_concordance.rs`
   adds a cross-build self-consistency harness with no GRCh38 mirror by

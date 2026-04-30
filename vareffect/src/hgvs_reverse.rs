@@ -1770,10 +1770,10 @@ mod tests {
             .parent()
             .and_then(|p| p.parent())
             .expect("workspace root");
-        let path = workspace_root.join("data/vareffect/transcript_models.bin");
+        let path = workspace_root.join("data/vareffect/transcript_models_grch38.bin");
         TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
             panic!(
-                "failed to load transcript store from {}: {}",
+                "failed to load GRCh38 transcript store from {}: {}",
                 path.display(),
                 e,
             )
@@ -1782,8 +1782,8 @@ mod tests {
 
     #[cfg(test)]
     fn load_fasta() -> FastaReader {
-        let path = std::env::var("FASTA_PATH")
-            .expect("FASTA_PATH env var must point to a GRCh38 genome binary");
+        let path = std::env::var("GRCH38_FASTA")
+            .expect("GRCH38_FASTA env var must point to a GRCh38 genome binary");
         FastaReader::open_with_patch_aliases_and_assembly(
             std::path::Path::new(&path),
             Some(

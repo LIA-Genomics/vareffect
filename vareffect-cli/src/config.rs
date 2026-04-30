@@ -151,7 +151,7 @@ pub struct AssemblyEntry {
     /// values to admit and which tier each maps to.
     pub transcript_source: TranscriptSource,
 
-    // Patch-contig aliases (NCBI assembly report -> patch_chrom_aliases.csv)
+    // Patch-contig aliases (NCBI assembly report -> patch_chrom_aliases_grch{37,38}.csv)
     /// URL to the NCBI assembly report.
     pub assembly_report_url: String,
     /// Cache filename for the assembly report in `raw_dir`.

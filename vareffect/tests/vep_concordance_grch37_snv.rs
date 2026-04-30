@@ -356,5 +356,8 @@ fn vep_concordance_grch37_snv() {
             eprintln!("  {f}");
         }
     }
-    assert_eq!(fail, 0, "{fail} of {total} variants failed concordance check");
+    assert_eq!(
+        fail, 0,
+        "{fail} of {total} variants failed concordance check"
+    );
 }

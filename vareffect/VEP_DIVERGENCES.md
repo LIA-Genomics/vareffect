@@ -57,9 +57,9 @@ and every feature that is intentionally out of scope for the core crate.
   - **GRCh38:** 6 / 6 spot-check files pass (136 / 136 hand-curated
     variants — see [Validation methodology](#validation-methodology) for
     the per-file breakdown). Large-scale concordance against VEP REST on
-    ~50,000 ClinVar variants (`vep_large_concordance.rs`) is in progress
-    with the threshold currently set at ≥95 % consequence concordance;
-    tightening to ≥99 % once divergences are triaged.
+    ~50,000 ClinVar variants (`vep_large_concordance_grch38.rs`) is in
+    progress with the threshold currently set at ≥95 % consequence
+    concordance; tightening to ≥99 % once divergences are triaged.
   - **GRCh37 ClinVar self-concordance** (vareffect-GRCh37 vs
     vareffect-GRCh38 on 5,000 dual-coordinate ClinVar pairs,
     `grch37_clinvar_concordance.rs`): **100.00 %** consequence,
@@ -247,15 +247,15 @@ relevant) the `predicts_nmd` flag.
 
 ### GRCh38 hand-curated spot-checks
 
-| Test file                              | Variants | Focus |
-|----------------------------------------|---------:|-------|
-| `vep_concordance_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
-| `vep_concordance_indel.rs`             |       28 | Frameshift, inframe insertions / deletions, boundary-spanning indels, splice-overlap indels |
-| `vep_concordance_hgvs.rs`              |       20 | HGVS c. forward formatting (substitution, del, ins, dup, delins, intronic offsets, UTR offsets) |
-| `vep_concordance_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
-| `vep_concordance_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
-| `vep_concordance_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
-| **GRCh38 spot-check total**            |  **136** | |
+| Test file                                     | Variants | Focus |
+|-----------------------------------------------|---------:|-------|
+| `vep_concordance_grch38_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
+| `vep_concordance_grch38_indel.rs`             |       28 | Frameshift, inframe insertions / deletions, boundary-spanning indels, splice-overlap indels |
+| `vep_concordance_grch38_hgvs.rs`              |       20 | HGVS c. forward formatting (substitution, del, ins, dup, delins, intronic offsets, UTR offsets) |
+| `vep_concordance_grch38_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
+| `vep_concordance_grch38_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
+| `vep_concordance_grch38_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
+| **GRCh38 spot-check total**                   |  **136** | |
 
 ### GRCh37 hand-curated spot-checks
 
@@ -268,7 +268,7 @@ relevant) the `predicts_nmd` flag.
 
 | Test file                                | Rows | Focus |
 |------------------------------------------|-----:|-------|
-| `vep_large_concordance.rs` (GRCh38)      | ~50,000 | Statistical consequence concordance vs VEP REST on stratified ClinVar variants. Threshold ≥95 %. |
+| `vep_large_concordance_grch38.rs`        | ~50,000 | Statistical consequence concordance vs VEP REST on stratified ClinVar variants. Threshold ≥95 %. |
 | `vep_large_concordance_grch37.rs`        |  9,986 | Same shape on GRCh37; 5,220 in-store comparisons → 99.33 % consequence concordance. |
 | `grch37_clinvar_concordance.rs`          |  5,000 | GRCh37 self-concordance vs vareffect-GRCh38 on dual-coord ClinVar pairs. Threshold ≥99 % per metric. |
 
@@ -276,7 +276,7 @@ The suite is `#[ignore]`-gated because it requires the transcript stores
 and genome binaries on disk; run with:
 
 ```bash
-FASTA_PATH=/abs/path/to/GRCh38.bin \
+GRCH38_FASTA=/abs/path/to/GRCh38.bin \
 GRCH37_FASTA=/abs/path/to/GRCh37.bin \
 GRCH37_TRANSCRIPTS=/abs/path/to/transcript_models_grch37.bin \
   cargo test -p vareffect --release -- --ignored
@@ -301,9 +301,11 @@ recorded ground truth.
   interpretation of the rule but may produce false positives in rare
   transcript architectures.
 - **Patch-contig lookups.** The reference genome binary can be built with
-  or without NCBI patch contigs. When you need patch lookups, use
-  `VarEffect::open_with_patch_aliases` and supply a `refseq,ucsc` alias
-  CSV — otherwise variants on patch contigs return `ChromNotFound`.
+  or without NCBI patch contigs. When you need patch lookups, build the
+  `VarEffect` via `VarEffect::builder().with_grch38_and_patch_aliases(...)`
+  (or the GRCh37 variant) and supply the `refseq,ucsc` alias CSV that
+  `vareffect setup` writes as `patch_chrom_aliases_grch{37,38}.csv` —
+  otherwise variants on patch contigs return `ChromNotFound`.
 - **IUPAC ambiguity codes.** The NCBI GRCh38.p14 assembly contains
   ambiguity bases (`M`, `R`, `Y`, etc.) in a few patch regions. The
   genome reader preserves them, but codon translation treats any

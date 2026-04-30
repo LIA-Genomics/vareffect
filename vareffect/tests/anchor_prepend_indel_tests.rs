@@ -5,7 +5,7 @@
 //! flat binary genome as [`fasta_tests`]. Run them explicitly with:
 //!
 //! ```bash
-//! FASTA_PATH=data/vareffect/GRCh38.bin cargo test -p vareffect -- --ignored
+//! GRCH38_FASTA=data/vareffect/GRCh38.bin cargo test -p vareffect -- --ignored
 //! ```
 //!
 //! All reference bases are derived from the GRCh38.p14 primary assembly
@@ -21,13 +21,13 @@ use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect, VarEffectErro
 /// real FASTA reader. `anchor_prepend_indel` only touches the FASTA, so the
 /// transcript store can safely be empty — the helper never queries it.
 ///
-/// Panics with a clear message if `FASTA_PATH` is unset or the path is
+/// Panics with a clear message if `GRCH38_FASTA` is unset or the path is
 /// invalid. Integration tests are explicitly opt-in, so this is fine.
 fn open_var_effect() -> VarEffect {
-    let path = std::env::var("FASTA_PATH").expect(
-        "FASTA_PATH env var must point to a GRCh38 genome binary (.bin) \
-         with its .bin.idx sidecar. Run `vareffect-cli setup` first, then \
-         set FASTA_PATH=data/vareffect/GRCh38.bin.",
+    let path = std::env::var("GRCH38_FASTA").expect(
+        "GRCH38_FASTA env var must point to a GRCh38 genome binary (.bin) \
+         with its .bin.idx sidecar. Run `vareffect setup --assembly grch38` \
+         first, then set GRCH38_FASTA=data/vareffect/GRCh38.bin.",
     );
     let path_buf = PathBuf::from(path);
     let fasta = FastaReader::open_with_assembly(Path::new(&path_buf), Assembly::GRCh38)

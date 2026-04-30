@@ -217,9 +217,9 @@ pub struct TranscriptModel {
     /// contig name exactly as published by MANE GFF3 column 1 (e.g.
     /// `"chr9_KN196479v1_fix"`, `"chr22_KI270879v1_alt"`). Against an NCBI
     /// RefSeq FASTA, patch lookups work only when
-    /// [`crate::FastaReader::open_with_patch_aliases_and_assembly`] is supplied a
-    /// `patch_chrom_aliases.csv` that maps the UCSC form back to the
-    /// matching `NW_*`/`NT_*` RefSeq accession.
+    /// [`crate::FastaReader::open_with_patch_aliases_and_assembly`] is supplied
+    /// a per-assembly `patch_chrom_aliases_grch{37,38}.csv` that maps the
+    /// UCSC form back to the matching `NW_*`/`NT_*` RefSeq accession.
     pub chrom: String,
     /// Transcript strand orientation.
     pub strand: Strand,
@@ -279,11 +279,12 @@ pub struct TranscriptModel {
     /// surfaces a clinical warning whenever the chosen transcript carries
     /// the flag.
     ///
-    /// `#[serde(default)]` keeps existing GRCh38-only `transcript_models.bin`
-    /// files (built before this field was added) deserializable — missing
-    /// values default to `false`, which is the correct semantic for MANE
-    /// transcripts (MANE Select / Plus Clinical curation excludes any
-    /// known divergence by construction).
+    /// `#[serde(default)]` is purely forward-compatibility insurance —
+    /// the build pipeline always populates this field for both MANE
+    /// (GRCh38) and RefSeq Select (GRCh37) sources. If a future store
+    /// format ever omits it, the default `false` is the correct semantic
+    /// for MANE (curation excludes known divergence by construction)
+    /// and the safest fallback for any other source.
     #[serde(default)]
     pub genome_transcript_divergent: bool,
 
