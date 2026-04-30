@@ -37,6 +37,13 @@ use anyhow::{Result, bail};
 use vareffect::chrom::{Assembly, is_patch_sequence, refseq_to_ucsc};
 use vareffect::{Strand, TranscriptModel, TranscriptTier};
 
+/// Patch-class predicate. A chrom is "patch-like" when it's either a
+/// RefSeq accessioned scaffold (`NW_*` / `NT_*`) or a UCSC patch contig
+/// (`is_patch_sequence` recognizes the `_alt`/`_random`/`_fix` suffixes).
+fn is_patch_like(chrom: &str) -> bool {
+    chrom.starts_with("NW_") || chrom.starts_with("NT_") || is_patch_sequence(chrom)
+}
+
 /// Pointer to a tabular cross-validation source. Owns its `PathBuf`s so
 /// callers can build the variant from `raw_dir.join(...)` temporaries
 /// inside a match arm without lifetime threading.
@@ -137,85 +144,102 @@ fn compare(
         .map(|t| (t.accession.as_str(), t))
         .collect();
 
-    let mut mismatches: Vec<String> = parse_errors;
+    // UCSC's `ncbiRefSeq.txt.gz` ships each transcript on every placement
+    // it has (primary + patch fix contigs + alt-loci / haplotype contigs +
+    // X/Y pseudoautosomal duplicates), while the GFF3 build keeps only the
+    // canonical placement. Group source rows by accession so we can pick
+    // the row whose chrom matches the built placement and silently ignore
+    // the rest.
+    let mut source_rows_by_acc: HashMap<&str, Vec<&CrossValidationRow>> = HashMap::new();
+    for row in &rows {
+        source_rows_by_acc
+            .entry(row.accession.as_str())
+            .or_default()
+            .push(row);
+    }
 
-    // Invariant: every accession the parser emitted gets recorded in
-    // `source_seen` *before* any chrom/coord/tier check, so the inverse
-    // "missing from source" pass below cannot false-positive on rows
-    // that the comparison loop chose to flag for some other reason.
-    let mut source_seen: HashSet<String> = HashSet::new();
+    let mut mismatches: Vec<String> = parse_errors;
     let mut rows_checked: usize = 0;
     let mut unknown_patch_aliases: BTreeSet<String> = BTreeSet::new();
 
+    // First pass: every source accession must exist in the built store.
+    // Catches version drift between the cross-validation source and the
+    // GFF3 build (e.g. UCSC has `NM_X.5`, build has `NM_X.4`). Iterating
+    // the accession-sorted `rows` (rather than the unordered
+    // `source_rows_by_acc` map) keeps the mismatch output reproducible;
+    // the inline `HashSet<&str>` dedupes alt placements so an accession
+    // missing from the build only flags once.
+    let mut flagged_source_only: HashSet<&str> = HashSet::new();
     for row in &rows {
-        source_seen.insert(row.accession.clone());
-
-        let Some(tx) = by_acc.get(row.accession.as_str()) else {
+        let acc = row.accession.as_str();
+        if !by_acc.contains_key(acc) && flagged_source_only.insert(acc) {
             mismatches.push(format!(
-                "{}: no matching transcript in built store \
-                 (version drift between {} and the GFF3?)",
-                row.accession, source_label
+                "{acc}: no matching transcript in built store \
+                 (version drift between {source_label} and the GFF3?)"
             ));
+        }
+    }
+
+    // Forward pass: for each built transcript, find the source row whose
+    // placement matches and validate against it. Other source rows for
+    // the same accession (alt placements, PAR duplicates, redundant patch
+    // listings) are silently ignored.
+    for tx in transcripts {
+        if excluded_built_chroms.contains(&tx.chrom) {
+            continue;
+        }
+        let Some(rows_for_acc) = source_rows_by_acc.get(tx.accession.as_str()) else {
+            continue; // handled by the inverse pass below
+        };
+
+        let matching = rows_for_acc
+            .iter()
+            .copied()
+            .find(|r| chrom_matches(r, tx, patch_aliases, assembly));
+        let Some(row) = matching else {
+            // Source has the accession but no row reconciles with the
+            // built placement. Pick the single most specific message
+            // shape: patch/primary asymmetry > patch alias mismatch >
+            // plain chrom drift.
+            let built_is_patch = is_patch_sequence(&tx.chrom);
+            let any_asymmetric = rows_for_acc
+                .iter()
+                .any(|r| is_patch_like(r.chrom.trim()) != built_is_patch);
+            let any_same_class_patch = rows_for_acc.iter().any(|r| {
+                let r_is_patch = is_patch_like(r.chrom.trim());
+                r_is_patch && r_is_patch == built_is_patch
+            });
+            let chroms_seen: Vec<&str> = rows_for_acc.iter().map(|r| r.chrom.as_str()).collect();
+            if any_same_class_patch {
+                mismatches.push(format!(
+                    "{}: patch chrom mismatch -- {}={:?}, built={}",
+                    tx.accession, source_label, chroms_seen, tx.chrom
+                ));
+            } else if any_asymmetric {
+                mismatches.push(format!(
+                    "{}: patch/primary asymmetry -- {}={:?}, built={} (patch={})",
+                    tx.accession, source_label, chroms_seen, tx.chrom, built_is_patch
+                ));
+            } else {
+                mismatches.push(format!(
+                    "{}: chrom mismatch -- {}={:?}, built={}",
+                    tx.accession, source_label, chroms_seen, tx.chrom
+                ));
+            }
             continue;
         };
         rows_checked += 1;
 
-        // --- Chromosome ---
+        // Track unknown patch aliases on the chosen row only. UCSC source
+        // rows always carry UCSC-form chroms (`chr*`), so this branch
+        // fires only under the MANE summary backend, where the source can
+        // emit RefSeq-form patch accessions (`NW_*`/`NT_*`). When the
+        // alias CSV has no entry, `chrom_matches` returned true
+        // permissively; surface the gap as a build-log warning so the
+        // assembly-report refresh is visible.
         let raw = row.chrom.trim();
-        let normalized = normalize_chrom(raw, assembly);
-        let built_is_patch = is_patch_sequence(&tx.chrom);
-        let source_is_patch =
-            raw.starts_with("NW_") || raw.starts_with("NT_") || is_patch_sequence(raw);
-        match (built_is_patch, source_is_patch) {
-            (true, true) => {
-                // Patch contig — patch_aliases is keyed on RefSeq form
-                // (`NW_*`/`NT_*`); UCSC patch names appear as the
-                // *value*, so compare directly when the source is
-                // already UCSC-native.
-                let resolved_match = if raw.starts_with("NW_") || raw.starts_with("NT_") {
-                    match patch_aliases.get(raw) {
-                        Some(expected_ucsc) => {
-                            if expected_ucsc == &tx.chrom {
-                                Ok(true)
-                            } else {
-                                Err(format!(
-                                    "{}: patch chrom mismatch -- {} alias={}, built={}",
-                                    row.accession, source_label, expected_ucsc, tx.chrom
-                                ))
-                            }
-                        }
-                        None => {
-                            unknown_patch_aliases.insert(raw.to_string());
-                            Ok(true)
-                        }
-                    }
-                } else if raw == tx.chrom {
-                    Ok(true)
-                } else {
-                    Err(format!(
-                        "{}: patch chrom mismatch -- {}={}, built={}",
-                        row.accession, source_label, raw, tx.chrom
-                    ))
-                };
-                if let Err(msg) = resolved_match {
-                    mismatches.push(msg);
-                }
-            }
-            (false, false) => {
-                if normalized != tx.chrom {
-                    mismatches.push(format!(
-                        "{}: chrom mismatch -- {}={}, built={}",
-                        row.accession, source_label, normalized, tx.chrom
-                    ));
-                }
-            }
-            (built_patch, source_patch) => {
-                mismatches.push(format!(
-                    "{}: patch/primary asymmetry -- {}={} (patch={}), \
-                     built={} (patch={})",
-                    row.accession, source_label, raw, source_patch, tx.chrom, built_patch
-                ));
-            }
+        if (raw.starts_with("NW_") || raw.starts_with("NT_")) && !patch_aliases.contains_key(raw) {
+            unknown_patch_aliases.insert(raw.to_string());
         }
 
         // --- Strand ---
@@ -261,11 +285,13 @@ fn compare(
 
     // Inverse check: every built transcript must be named by the source,
     // except those on chromosomes the parser excluded (chrM under UCSC).
+    // The accession-keyed `source_rows_by_acc` map is the deduplicated
+    // source-side accession set, so reuse it directly.
     for tx in transcripts {
         if excluded_built_chroms.contains(&tx.chrom) {
             continue;
         }
-        if !source_seen.contains(&tx.accession) {
+        if !source_rows_by_acc.contains_key(tx.accession.as_str()) {
             mismatches.push(format!(
                 "{}: built transcript is not present in the {} source",
                 tx.accession, source_label
@@ -308,6 +334,52 @@ fn compare(
         );
     }
     Ok(())
+}
+
+/// Decide whether a source row's chrom is consistent with the built
+/// transcript's chrom. Pure: side effects (unknown-alias warnings) are
+/// recorded by the caller after row selection.
+///
+/// Match rules:
+/// - Both placements primary: equal after `normalize_chrom`.
+/// - Both placements patch: bidirectional alias resolution. The alias
+///   CSV is keyed RefSeq (`NW_*`/`NT_*`) → UCSC; whichever side carries
+///   the RefSeq form drives the lookup. Unknown aliases are accepted
+///   permissively here — the caller separately logs them for visibility.
+/// - Mixed placement class: never matches. The caller iterates the rest
+///   of the source rows for this accession before flagging.
+fn chrom_matches(
+    row: &CrossValidationRow,
+    tx: &TranscriptModel,
+    patch_aliases: &HashMap<String, String>,
+    assembly: Assembly,
+) -> bool {
+    let raw = row.chrom.trim();
+    let built_is_patch = is_patch_sequence(&tx.chrom);
+    let source_is_patch = is_patch_like(raw);
+
+    if built_is_patch != source_is_patch {
+        return false;
+    }
+    if !built_is_patch {
+        return normalize_chrom(raw, assembly) == tx.chrom;
+    }
+
+    // Both patch. Resolve via patch_aliases in whichever direction has
+    // the RefSeq-form key.
+    if raw.starts_with("NW_") || raw.starts_with("NT_") {
+        match patch_aliases.get(raw) {
+            Some(expected_ucsc) => expected_ucsc == &tx.chrom,
+            None => true,
+        }
+    } else if tx.chrom.starts_with("NW_") || tx.chrom.starts_with("NT_") {
+        match patch_aliases.get(tx.chrom.as_str()) {
+            Some(expected_ucsc) => expected_ucsc == raw,
+            None => true,
+        }
+    } else {
+        raw == tx.chrom
+    }
 }
 
 /// Normalize a source-native chromosome value to UCSC form.
@@ -502,7 +574,11 @@ mod tests {
 
     #[test]
     fn ucsc_passes_for_matching_grch37_build() {
-        let select = write_temp(".select.txt", "1\tNM_A.1\n1\tNM_B.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &(ncbi_refseq_row("NM_A.1", "chr1", "+", 100, 200, "A")
+                + &ncbi_refseq_row("NM_B.1", "chr2", "-", 300, 500, "B")),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &(ncbi_refseq_row("NM_A.1", "chr1", "+", 100, 200, "A")
@@ -523,11 +599,44 @@ mod tests {
     }
 
     #[test]
+    fn ucsc_skips_alt_placement_rows_when_canonical_match_exists() {
+        // UCSC ncbiRefSeq.txt.gz lists transcripts on every placement
+        // (primary + alts/haplotypes/patches); the build keeps only the
+        // canonical placement. The validator must compare against the
+        // matching primary source row and silently skip the alt rows.
+        let select = write_temp(
+            ".select.txt",
+            &(ncbi_refseq_row("NM_HLA.1", "chr6", "+", 100, 200, "HLA")
+                + &ncbi_refseq_row("NM_HLA.1", "chr6_cox_hap2", "+", 999, 1099, "HLA")
+                + &ncbi_refseq_row("NM_HLA.1", "chr6_dbb_hap3", "+", 888, 988, "HLA")),
+        );
+        let coords = write_temp(
+            ".ncbiRefSeq.txt",
+            &(ncbi_refseq_row("NM_HLA.1", "chr6", "+", 100, 200, "HLA")
+                + &ncbi_refseq_row("NM_HLA.1", "chr6_cox_hap2", "+", 999, 1099, "HLA")
+                + &ncbi_refseq_row("NM_HLA.1", "chr6_dbb_hap3", "+", 888, 988, "HLA")),
+        );
+        let mut tx = fake_tx("NM_HLA.1", "chr6", 100, 200);
+        tx.gene_symbol = "HLA".into();
+        let aliases: HashMap<String, String> = HashMap::new();
+        let source = CrossValidationSource::UcscRefseqSelect {
+            coords_path: coords.path().to_path_buf(),
+            select_path: select.path().to_path_buf(),
+        };
+        cross_validate(&[tx], &aliases, Assembly::GRCh37, &source)
+            .expect("alt-placement source rows must not flag the canonical match");
+    }
+
+    #[test]
     fn ucsc_skips_chrm_in_inverse_check() {
         // Built store has an MT-CO1 transcript on chrM. Source has only
         // the primary chr1 row. The inverse check would normally fail,
         // but `excluded_built_chroms` contains chrM.
-        let select = write_temp(".select.txt", "1\tNM_PRIMARY.1\n1\tNM_MITO.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &(ncbi_refseq_row("NM_PRIMARY.1", "chr1", "+", 100, 200, "GENE")
+                + &ncbi_refseq_row("NM_MITO.1", "chrM", "+", 50, 150, "MT-CO1")),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &(ncbi_refseq_row("NM_PRIMARY.1", "chr1", "+", 100, 200, "GENE")
@@ -548,7 +657,10 @@ mod tests {
 
     #[test]
     fn ucsc_fails_on_coordinate_drift() {
-        let select = write_temp(".select.txt", "1\tNM_DRIFT.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_DRIFT.1", "chr1", "+", 100, 500, "DRIFT"),
+        );
         // Source says tx_end = 500; built has 600.
         let coords = write_temp(
             ".ncbiRefSeq.txt",
@@ -569,7 +681,10 @@ mod tests {
 
     #[test]
     fn ucsc_fails_on_version_drift() {
-        let select = write_temp(".select.txt", "1\tNM_TEST.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_TEST.1", "chr1", "+", 100, 200, "TEST"),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &ncbi_refseq_row("NM_TEST.1", "chr1", "+", 100, 200, "TEST"),
@@ -592,7 +707,10 @@ mod tests {
         // The source row has an invalid strand. The parser must surface
         // it as a structural-parse error, not let it slip through and
         // re-appear later as "built transcript not in source".
-        let select = write_temp(".select.txt", "1\tNM_BADSTRAND.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_BADSTRAND.1", "chr1", "?", 100, 200, "GENE"),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &ncbi_refseq_row("NM_BADSTRAND.1", "chr1", "?", 100, 200, "GENE"),

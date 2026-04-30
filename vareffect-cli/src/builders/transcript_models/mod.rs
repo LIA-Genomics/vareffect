@@ -90,6 +90,10 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
     "snRNA",
     "RNase_MRP_RNA",
     "telomerase_RNA",
+    // pre-miRNA hairpin precursors. NCBI's GFF3 emits `primary_transcript`
+    // for these (e.g. NR_029512.1 / MIR96 on GRCh37 RefSeq Select);
+    // GRCh38 MANE does not include them, so this only fires on GRCh37.
+    "primary_transcript",
 ];
 
 /// Build the transcript model store from a RefSeq / MANE GFF3 file.

@@ -27,11 +27,14 @@
 //!
 //! # File format
 //!
-//! `ncbiRefSeqSelect.txt.gz`: tab-separated, no header, exactly 2
-//! columns: `bin\tname`. Other shapes are rejected with a clear error.
+//! Both files are tab-separated, no header, genePred-extended (16
+//! columns). `ncbiRefSeqSelect.txt.gz` is the genePred-shaped table dump
+//! filtered to the RefSeq Select tier; `ncbiRefSeq.txt.gz` carries the
+//! full set. The parser uses the Select dump only for its `name` column
+//! (the set of accessions to admit) and pulls coordinates from the full
+//! `ncbiRefSeq` file.
 //!
-//! `ncbiRefSeq.txt.gz`: tab-separated, no header, 16 columns
-//! (genePred-extended). Used columns:
+//! genePred-extended columns used:
 //!   1: `name`         — versioned RefSeq accession
 //!   2: `chrom`        — UCSC contig name
 //!   3: `strand`       — `+` or `-`
@@ -73,9 +76,11 @@ pub(super) fn parse(coords_path: &Path, select_path: &Path) -> Result<ParsedSour
 }
 
 /// Read `ncbiRefSeqSelect.txt.gz` into a `HashSet<String>` keyed on the
-/// versioned accession in column 2. Bails on any row that is not the
-/// expected `bin\tname` shape — UCSC has shipped this file as
-/// 2 columns since 2018, and a different shape signals a different file.
+/// versioned accession in column 2. UCSC ships this file as a
+/// genePred-extended dump (≥16 columns), identical in shape to
+/// `ncbiRefSeq.txt.gz` but filtered to the RefSeq Select tier. We only
+/// need the `name` field; coordinates come from the full `ncbiRefSeq`
+/// file via [`parse_coords`].
 fn load_select_set(path: &Path) -> Result<HashSet<String>> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader: Box<dyn BufRead> = if path.extension().is_some_and(|ext| ext == "gz") {
@@ -84,6 +89,9 @@ fn load_select_set(path: &Path) -> Result<HashSet<String>> {
         Box::new(BufReader::new(file))
     };
 
+    const NAME_IDX: usize = 1;
+    const MIN_FIELDS: usize = 16;
+
     let mut set: HashSet<String> = HashSet::new();
     for (line_no, line_result) in reader.lines().enumerate() {
         let line = line_result.context("reading ncbiRefSeqSelect line")?;
@@ -91,27 +99,33 @@ fn load_select_set(path: &Path) -> Result<HashSet<String>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let mut parts = trimmed.splitn(3, '\t');
-        let bin = parts.next();
-        let name = parts.next();
-        let extra = parts.next();
-        match (bin, name, extra) {
-            (Some(_bin), Some(name), None) if !name.is_empty() => {
-                set.insert(name.to_string());
-            }
-            _ => bail!(
-                "ncbiRefSeqSelect at {} line {}: expected `bin\\tname` (2 fields), got {:?}",
+        let fields: Vec<&str> = trimmed.split('\t').collect();
+        if fields.len() < MIN_FIELDS {
+            bail!(
+                "ncbiRefSeqSelect at {} line {}: expected genePred-extended row \
+                 (>= {} fields), got {} fields: {:?}",
                 path.display(),
                 line_no + 1,
+                MIN_FIELDS,
+                fields.len(),
                 trimmed,
-            ),
+            );
         }
+        let name = fields[NAME_IDX];
+        if name.is_empty() {
+            bail!(
+                "ncbiRefSeqSelect at {} line {}: empty name field",
+                path.display(),
+                line_no + 1,
+            );
+        }
+        set.insert(name.to_string());
     }
 
     if set.is_empty() {
         bail!(
-            "ncbiRefSeqSelect at {} is empty -- expected ~19,000 RefSeq Select \
-             accessions for hg19",
+            "ncbiRefSeqSelect at {} is empty -- expected several thousand RefSeq \
+             Select accessions for hg19",
             path.display()
         );
     }
@@ -142,7 +156,7 @@ fn parse_coords(
     const TX_START_IDX: usize = 4;
     const TX_END_IDX: usize = 5;
     const NAME2_IDX: usize = 12;
-    const MIN_FIELDS: usize = 13;
+    const MIN_FIELDS: usize = 16;
 
     let mut rows: Vec<CrossValidationRow> = Vec::new();
     let mut parse_errors: Vec<String> = Vec::new();
@@ -268,7 +282,10 @@ mod tests {
     fn select_set_loads_versioned_accessions() {
         let select = write_temp(
             ".select.txt",
-            "1\tNM_000546.5\n1\tNM_006772.2\n# comment line\n2\tNM_007294.4\n",
+            &(ncbi_refseq_row("NM_000546.5", "chr17", "+", 100, 1000, "TP53")
+                + "# comment line\n"
+                + &ncbi_refseq_row("NM_006772.2", "chr1", "+", 200, 2000, "GENE_X")
+                + &ncbi_refseq_row("NM_007294.4", "chr17", "+", 300, 3000, "BRCA1")),
         );
         let set = load_select_set(select.path()).unwrap();
         assert_eq!(set.len(), 3);
@@ -278,26 +295,22 @@ mod tests {
     }
 
     #[test]
-    fn select_set_rejects_single_column_form() {
-        // Strict: a single-column file is malformed. Catching this at
-        // parse time prevents a typo'd path from silently producing a
-        // tier-empty Select set.
-        let select = write_temp(".select.txt", "NM_000546.5\nNM_006772.2\n");
-        let err = load_select_set(select.path()).expect_err("single-column must be rejected");
+    fn select_set_rejects_short_rows() {
+        // UCSC ships ncbiRefSeqSelect.txt.gz as a genePred-extended dump
+        // (>=16 columns). A 2-column row signals a different file and
+        // should fail loudly rather than producing an empty Select set.
+        let select = write_temp(".select.txt", "1\tNM_000546.5\n");
+        let err = load_select_set(select.path()).expect_err("short row must be rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("expected `bin"), "msg: {msg}");
-    }
-
-    #[test]
-    fn select_set_rejects_three_column_form() {
-        let select = write_temp(".select.txt", "1\tNM_000546.5\textra\n");
-        let err = load_select_set(select.path()).expect_err("three-column must be rejected");
-        assert!(format!("{err:#}").contains("expected `bin"));
+        assert!(msg.contains("genePred-extended"), "msg: {msg}");
     }
 
     #[test]
     fn coords_filter_to_select_set_only() {
-        let select = write_temp(".select.txt", "1\tNM_SELECT.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_SELECT.1", "chr1", "+", 100, 1000, "GENE_A"),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &(ncbi_refseq_row("NM_SELECT.1", "chr1", "+", 100, 1000, "GENE_A")
@@ -321,7 +334,10 @@ mod tests {
 
     #[test]
     fn coords_skip_chrm_with_warning() {
-        let select = write_temp(".select.txt", "1\tNM_MITO.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_MITO.1", "chrM", "+", 100, 200, "MT-CO1"),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &ncbi_refseq_row("NM_MITO.1", "chrM", "+", 100, 200, "MT-CO1"),
@@ -333,8 +349,11 @@ mod tests {
 
     #[test]
     fn coords_surface_short_rows_as_parse_errors() {
-        let select = write_temp(".select.txt", "1\tNM_SELECT.1\n");
-        // 5 fields — well short of MIN_FIELDS (13).
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_SELECT.1", "chr1", "+", 100, 1000, "GENE_A"),
+        );
+        // 5 fields — well short of MIN_FIELDS (16).
         let coords = write_temp(".ncbiRefSeq.txt", "0\tNM_SELECT.1\tchr1\t+\t100\n");
         let parsed = parse(coords.path(), select.path()).unwrap();
         assert!(parsed.rows.is_empty());
@@ -344,7 +363,10 @@ mod tests {
 
     #[test]
     fn coords_surface_bad_strand_as_parse_error() {
-        let select = write_temp(".select.txt", "1\tNM_SEL.1\n");
+        let select = write_temp(
+            ".select.txt",
+            &ncbi_refseq_row("NM_SEL.1", "chr1", "+", 100, 200, "GENE"),
+        );
         let coords = write_temp(
             ".ncbiRefSeq.txt",
             &ncbi_refseq_row("NM_SEL.1", "chr1", "?", 100, 200, "GENE"),
