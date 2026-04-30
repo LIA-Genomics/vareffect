@@ -2012,6 +2012,7 @@ version = "0.1.3"
 dependencies = [
  "base64",
  "coitrees",
+ "itoa",
  "memmap2",
  "rayon",
  "rmp-serde",

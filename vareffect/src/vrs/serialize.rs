@@ -21,32 +21,65 @@
 //!
 //! For our VRS allele use case the inputs are always ASCII (canonical
 //! base symbols and base64url digests), so the escape edge cases do
-//! not apply. `serde_json::Map` in default configuration is backed by
-//! `BTreeMap`, which iterates in sorted key order, giving us canonical
-//! key ordering for free.
+//! not apply.
+//!
+//! The canonical bytes are produced by writing literal segments and
+//! `itoa`-formatted integers directly into a thread-local `Vec<u8>`,
+//! bypassing any `serde_json::Value` tree construction. This is sound
+//! only because every input string is ASCII alphanumeric (or `-` / `_`
+//! for base64url, or empty for pure deletions) — no character ever
+//! requires JSON escaping. Any future field added to the canonical form
+//! that takes user-controlled string content **must** be JSON-escaped,
+//! or the digests will diverge from `vrs-python` and break downstream
+//! interop. The pinned-byte tests below catch this drift on first run.
 
-use serde_json::{Value, json};
+use std::cell::RefCell;
 
 use super::digest::{ga4gh_identify, sha512t24u};
 use super::sq_digest::bare_digest_from_curie;
+
+// Per-thread scratch buffer used to build canonical VRS blobs without
+// per-call heap churn.
+//
+// SAFETY-INVARIANT: no callee transitively reached while a
+// `borrow_mut()` of this cell is held may itself attempt to compute a
+// VRS ID (i.e. re-enter `vrs1_allele_id` / `vrs2_allele_id`), or the
+// nested `borrow_mut` will panic at runtime. Audited callees today —
+// `sha512t24u`, `ga4gh_identify`, `bare_digest_from_curie` — are all
+// VRS-free.
+thread_local! {
+    static VRS_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Append the minimal-decimal ASCII form of `n` to `buf`.
+///
+/// Uses `itoa::Buffer` (a 40-byte stack array) so this function performs
+/// zero heap allocation. Output is byte-equivalent to `serde_json`'s
+/// integer formatter, which itself routes through `itoa`.
+#[inline]
+fn write_u64(buf: &mut Vec<u8>, n: u64) {
+    let mut itoa_buf = itoa::Buffer::new();
+    buf.extend_from_slice(itoa_buf.format(n).as_bytes());
+}
 
 /// Build the VRS 1.3 SequenceLocation canonical serialization blob.
 ///
 /// `sq_curie` is the full `ga4gh:SQ.<digest>` form; the canonical blob
 /// uses only the bare 32-char digest portion in the `sequence_id`
 /// field (per the CURIE-reduction rule).
-fn vrs1_location_blob(sq_curie: &str, start: u64, end: u64) -> Vec<u8> {
+fn write_vrs1_location(buf: &mut Vec<u8>, sq_curie: &str, start: u64, end: u64) {
+    debug_assert!(
+        sq_curie.is_ascii(),
+        "VRS location writer requires ASCII sq_curie"
+    );
     let bare_sq = bare_digest_from_curie(sq_curie);
-    let val: Value = json!({
-        "interval": {
-            "end":   {"type": "Number", "value": end},
-            "start": {"type": "Number", "value": start},
-            "type":  "SequenceInterval",
-        },
-        "sequence_id": bare_sq,
-        "type": "SequenceLocation",
-    });
-    serde_json::to_vec(&val).expect("VRS 1.3 location JSON serialization")
+    buf.extend_from_slice(br#"{"interval":{"end":{"type":"Number","value":"#);
+    write_u64(buf, end);
+    buf.extend_from_slice(br#"},"start":{"type":"Number","value":"#);
+    write_u64(buf, start);
+    buf.extend_from_slice(br#"},"type":"SequenceInterval"},"sequence_id":""#);
+    buf.extend_from_slice(bare_sq.as_bytes());
+    buf.extend_from_slice(br#"","type":"SequenceLocation"}"#);
 }
 
 /// Build the VRS 1.3 Allele canonical serialization blob.
@@ -55,16 +88,20 @@ fn vrs1_location_blob(sq_curie: &str, start: u64, end: u64) -> Vec<u8> {
 /// SequenceLocation, computed by the caller via the recursive enref
 /// step. The Allele's `location` field substitutes that bare digest
 /// string in place of the inlined object.
-fn vrs1_allele_blob(location_digest: &str, alt: &str) -> Vec<u8> {
-    let val: Value = json!({
-        "location": location_digest,
-        "state": {
-            "sequence": alt,
-            "type": "LiteralSequenceExpression",
-        },
-        "type": "Allele",
-    });
-    serde_json::to_vec(&val).expect("VRS 1.3 allele JSON serialization")
+fn write_vrs1_allele(buf: &mut Vec<u8>, location_digest: &str, alt: &str) {
+    debug_assert!(
+        location_digest.is_ascii(),
+        "VRS allele writer requires ASCII location_digest"
+    );
+    debug_assert!(
+        alt.is_ascii(),
+        "VRS allele writer requires ASCII alt; got non-ASCII bytes"
+    );
+    buf.extend_from_slice(br#"{"location":""#);
+    buf.extend_from_slice(location_digest.as_bytes());
+    buf.extend_from_slice(br#"","state":{"sequence":""#);
+    buf.extend_from_slice(alt.as_bytes());
+    buf.extend_from_slice(br#"","type":"LiteralSequenceExpression"},"type":"Allele"}"#);
 }
 
 /// Compute the full VRS 1.3 Allele identifier (`ga4gh:VA.<digest>`)
@@ -77,10 +114,15 @@ fn vrs1_allele_blob(location_digest: &str, alt: &str) -> Vec<u8> {
 /// - `alt`: ASCII alt sequence after VOCA normalization. Empty string
 ///   for pure deletions.
 pub(super) fn vrs1_allele_id(sq_curie: &str, start: u64, end: u64, alt: &str) -> String {
-    let location_blob = vrs1_location_blob(sq_curie, start, end);
-    let location_digest = sha512t24u(&location_blob);
-    let allele_blob = vrs1_allele_blob(&location_digest, alt);
-    ga4gh_identify("VA", &allele_blob)
+    VRS_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        write_vrs1_location(&mut buf, sq_curie, start, end);
+        let location_digest = sha512t24u(&buf);
+        buf.clear();
+        write_vrs1_allele(&mut buf, &location_digest, alt);
+        ga4gh_identify("VA", &buf)
+    })
 }
 
 /// Build the VRS 2.0 SequenceLocation canonical serialization blob.
@@ -89,45 +131,54 @@ pub(super) fn vrs1_allele_id(sq_curie: &str, start: u64, end: u64, alt: &str) ->
 /// are direct integers on the location, and `sequence_id` is replaced
 /// by a `sequenceReference` object carrying `refgetAccession` (which
 /// uses bare `SQ.<digest>` form per refget v2, no `ga4gh:` namespace).
-fn vrs2_location_blob(sq_curie: &str, start: u64, end: u64) -> Vec<u8> {
+fn write_vrs2_location(buf: &mut Vec<u8>, sq_curie: &str, start: u64, end: u64) {
+    debug_assert!(
+        sq_curie.is_ascii(),
+        "VRS location writer requires ASCII sq_curie"
+    );
     let bare_sq = bare_digest_from_curie(sq_curie);
-    // refget convention: `refgetAccession` is `SQ.<digest>` (no `ga4gh:` prefix).
-    let refget_acc = format!("SQ.{bare_sq}");
-    let val: Value = json!({
-        "end": end,
-        "sequenceReference": {
-            "refgetAccession": refget_acc,
-            "type": "SequenceReference",
-        },
-        "start": start,
-        "type": "SequenceLocation",
-    });
-    serde_json::to_vec(&val).expect("VRS 2.0 location JSON serialization")
+    buf.extend_from_slice(br#"{"end":"#);
+    write_u64(buf, end);
+    buf.extend_from_slice(br#","sequenceReference":{"refgetAccession":"SQ."#);
+    buf.extend_from_slice(bare_sq.as_bytes());
+    buf.extend_from_slice(br#"","type":"SequenceReference"},"start":"#);
+    write_u64(buf, start);
+    buf.extend_from_slice(br#","type":"SequenceLocation"}"#);
 }
 
 /// Build the VRS 2.0 Allele canonical serialization blob.
 ///
-/// Same Allele shape as 1.3 (location → bare digest string, state,
-/// type), but the location's pre-digest blob differs (see
-/// [`vrs2_location_blob`]).
-fn vrs2_allele_blob(location_digest: &str, alt: &str) -> Vec<u8> {
-    let val: Value = json!({
-        "location": location_digest,
-        "state": {
-            "sequence": alt,
-            "type": "LiteralSequenceExpression",
-        },
-        "type": "Allele",
-    });
-    serde_json::to_vec(&val).expect("VRS 2.0 allele JSON serialization")
+/// Same Allele shape as 1.3 (location -> bare digest string, state,
+/// type) — kept as a separate function so future schema drift in the
+/// 2.0 Allele lands locally. The location's pre-digest blob differs
+/// (see [`write_vrs2_location`]).
+fn write_vrs2_allele(buf: &mut Vec<u8>, location_digest: &str, alt: &str) {
+    debug_assert!(
+        location_digest.is_ascii(),
+        "VRS allele writer requires ASCII location_digest"
+    );
+    debug_assert!(
+        alt.is_ascii(),
+        "VRS allele writer requires ASCII alt; got non-ASCII bytes"
+    );
+    buf.extend_from_slice(br#"{"location":""#);
+    buf.extend_from_slice(location_digest.as_bytes());
+    buf.extend_from_slice(br#"","state":{"sequence":""#);
+    buf.extend_from_slice(alt.as_bytes());
+    buf.extend_from_slice(br#"","type":"LiteralSequenceExpression"},"type":"Allele"}"#);
 }
 
 /// Compute the full VRS 2.0 Allele identifier (`ga4gh:VA.<digest>`).
 pub(super) fn vrs2_allele_id(sq_curie: &str, start: u64, end: u64, alt: &str) -> String {
-    let location_blob = vrs2_location_blob(sq_curie, start, end);
-    let location_digest = sha512t24u(&location_blob);
-    let allele_blob = vrs2_allele_blob(&location_digest, alt);
-    ga4gh_identify("VA", &allele_blob)
+    VRS_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        write_vrs2_location(&mut buf, sq_curie, start, end);
+        let location_digest = sha512t24u(&buf);
+        buf.clear();
+        write_vrs2_allele(&mut buf, &location_digest, alt);
+        ga4gh_identify("VA", &buf)
+    })
 }
 
 #[cfg(test)]
@@ -139,35 +190,40 @@ mod tests {
         // Manually-constructed expected blob with keys in sorted order
         // and no whitespace. Any drift in field order or spacing
         // breaks the digest contract.
-        let blob = vrs1_location_blob(
+        let mut buf = Vec::new();
+        write_vrs1_location(
+            &mut buf,
             "ga4gh:SQ.IIB53T8CNeJJdUqzn9V_JnRtQadwWCbl",
             44908821,
             44908822,
         );
         let expected = r#"{"interval":{"end":{"type":"Number","value":44908822},"start":{"type":"Number","value":44908821},"type":"SequenceInterval"},"sequence_id":"IIB53T8CNeJJdUqzn9V_JnRtQadwWCbl","type":"SequenceLocation"}"#;
-        assert_eq!(std::str::from_utf8(&blob).unwrap(), expected);
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), expected);
     }
 
     #[test]
     fn vrs1_allele_blob_substitutes_location_as_bare_digest_string() {
         // The recursive enref step: `location` must be a bare digest
         // STRING in the parent's blob, not an inlined object.
-        let blob = vrs1_allele_blob("esDSArZQC-Sx-96ZZzHnzAVNOc439oE5", "T");
+        let mut buf = Vec::new();
+        write_vrs1_allele(&mut buf, "esDSArZQC-Sx-96ZZzHnzAVNOc439oE5", "T");
         let expected = r#"{"location":"esDSArZQC-Sx-96ZZzHnzAVNOc439oE5","state":{"sequence":"T","type":"LiteralSequenceExpression"},"type":"Allele"}"#;
-        assert_eq!(std::str::from_utf8(&blob).unwrap(), expected);
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), expected);
     }
 
     #[test]
     fn vrs2_location_blob_uses_sequence_reference_object() {
         // 2.0 differs from 1.3: no SequenceInterval wrapper, and
         // `sequenceReference` is an object not a `sequence_id` string.
-        let blob = vrs2_location_blob(
+        let mut buf = Vec::new();
+        write_vrs2_location(
+            &mut buf,
             "ga4gh:SQ.IIB53T8CNeJJdUqzn9V_JnRtQadwWCbl",
             44908821,
             44908822,
         );
         let expected = r#"{"end":44908822,"sequenceReference":{"refgetAccession":"SQ.IIB53T8CNeJJdUqzn9V_JnRtQadwWCbl","type":"SequenceReference"},"start":44908821,"type":"SequenceLocation"}"#;
-        assert_eq!(std::str::from_utf8(&blob).unwrap(), expected);
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), expected);
     }
 
     #[test]
@@ -212,7 +268,7 @@ mod tests {
     // 2026-04-30):
     //
     //   start=55181319, end=55181320, refget=SQ.F-LrLMe1SRpfUZHkQmvkVKFEGaoDeHul
-    //   alt="T"  →  ga4gh:VA.Hy2XU_-rp4IMh6I_1NXNecBo8Qx8n0oE
+    //   alt="T"  ->  ga4gh:VA.Hy2XU_-rp4IMh6I_1NXNecBo8Qx8n0oE
     //
     // These tests pin our canonical-form output to the upstream
     // implementation byte-for-byte; any drift in field order, JSON
@@ -229,22 +285,25 @@ mod tests {
 
     #[test]
     fn vrs2_location_blob_matches_vrs_python_bytes() {
-        let blob = vrs2_location_blob(VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END);
+        let mut buf = Vec::new();
+        write_vrs2_location(&mut buf, VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END);
         let expected = br#"{"end":55181320,"sequenceReference":{"refgetAccession":"SQ.F-LrLMe1SRpfUZHkQmvkVKFEGaoDeHul","type":"SequenceReference"},"start":55181319,"type":"SequenceLocation"}"#;
-        assert_eq!(&blob, expected);
+        assert_eq!(&buf, expected);
     }
 
     #[test]
     fn vrs2_location_digest_matches_vrs_python() {
-        let blob = vrs2_location_blob(VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END);
-        assert_eq!(sha512t24u(&blob), VRS_PY_LOC_DIGEST_2_0);
+        let mut buf = Vec::new();
+        write_vrs2_location(&mut buf, VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END);
+        assert_eq!(sha512t24u(&buf), VRS_PY_LOC_DIGEST_2_0);
     }
 
     #[test]
     fn vrs2_allele_blob_matches_vrs_python_bytes() {
-        let blob = vrs2_allele_blob(VRS_PY_LOC_DIGEST_2_0, VRS_PY_ALT);
+        let mut buf = Vec::new();
+        write_vrs2_allele(&mut buf, VRS_PY_LOC_DIGEST_2_0, VRS_PY_ALT);
         let expected = br#"{"location":"_G2K0qSioM74l_u3OaKR0mgLYdeTL7Xd","state":{"sequence":"T","type":"LiteralSequenceExpression"},"type":"Allele"}"#;
-        assert_eq!(&blob, expected);
+        assert_eq!(&buf, expected);
     }
 
     #[test]
@@ -259,7 +318,67 @@ mod tests {
     //   ga4gh:SL.4t6JnYWqHwYw9WzBT_lmWBb3tLQNalkT
     #[test]
     fn vrs2_location_digest_matches_second_vrs_python_vector() {
-        let blob = vrs2_location_blob(VRS_PY_SQ_CURIE, 44908821, 44908822);
-        assert_eq!(sha512t24u(&blob), "4t6JnYWqHwYw9WzBT_lmWBb3tLQNalkT");
+        let mut buf = Vec::new();
+        write_vrs2_location(&mut buf, VRS_PY_SQ_CURIE, 44908821, 44908822);
+        assert_eq!(sha512t24u(&buf), "4t6JnYWqHwYw9WzBT_lmWBb3tLQNalkT");
+    }
+
+    /// Microbenchmark for the canonical-byte writer + digest path.
+    ///
+    /// Times `vrs2_allele_id` over a fixed iteration count using
+    /// realistic inputs. Run manually with:
+    ///
+    /// ```sh
+    /// cargo test --release -p vareffect --lib \
+    ///   vrs::serialize::tests::microbench_vrs2_allele_id_throughput \
+    ///   -- --ignored --nocapture
+    /// ```
+    ///
+    /// Not part of normal CI — gated `#[ignore]` so it never runs by
+    /// default. The gating tests above are what actually pin
+    /// correctness; this is purely a perf observability tool.
+    #[test]
+    #[ignore]
+    fn microbench_vrs2_allele_id_throughput() {
+        const ITERS: u64 = 1_000_000;
+        let sq = VRS_PY_SQ_CURIE;
+        let alt = VRS_PY_ALT;
+        // Warmup — primes the thread-local buffer.
+        for _ in 0..1_000 {
+            let _ = vrs2_allele_id(sq, VRS_PY_START, VRS_PY_END, alt);
+        }
+        let t0 = std::time::Instant::now();
+        let mut sink = 0usize;
+        for i in 0..ITERS {
+            // Vary inputs so the optimizer can't fold the call.
+            let id = vrs2_allele_id(sq, VRS_PY_START + i, VRS_PY_END + i, alt);
+            sink = sink.wrapping_add(id.len());
+        }
+        let elapsed = t0.elapsed();
+        let per_call_ns = elapsed.as_nanos() as f64 / ITERS as f64;
+        let v_per_sec = ITERS as f64 / elapsed.as_secs_f64();
+        std::hint::black_box(sink);
+        println!(
+            "vrs2_allele_id microbench: {ITERS} calls in {elapsed:?} \
+             ({per_call_ns:.1} ns/call, {v_per_sec:.0} calls/sec)"
+        );
+    }
+
+    #[test]
+    fn buffer_reuse_across_calls_produces_identical_ids() {
+        // Same input twice; the second call reuses the dirty thread-local
+        // buffer (post-clear). Catches "did someone forget a buf.clear()".
+        let id1 = vrs2_allele_id(VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END, VRS_PY_ALT);
+        let id2 = vrs2_allele_id(VRS_PY_SQ_CURIE, VRS_PY_START, VRS_PY_END, VRS_PY_ALT);
+        assert_eq!(id1, id2);
+        assert_eq!(id1, format!("ga4gh:VA.{VRS_PY_VA_DIGEST_2_0}"));
+
+        // Cross-schema reuse: VRS 1.3 then 2.0 with different inputs,
+        // ensuring the buffer is correctly cleared between schemas.
+        let id_v1 = vrs1_allele_id(VRS_PY_SQ_CURIE, 100, 101, "A");
+        let id_v2 = vrs2_allele_id(VRS_PY_SQ_CURIE, 100, 101, "A");
+        assert_ne!(id_v1, id_v2);
+        assert!(id_v1.starts_with("ga4gh:VA."));
+        assert!(id_v2.starts_with("ga4gh:VA."));
     }
 }
