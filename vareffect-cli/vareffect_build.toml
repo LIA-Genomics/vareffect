@@ -43,6 +43,7 @@ fasta_url      = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_0
 fasta_filename = "GRCh38.bin"
 fasta_build    = "GRCh38"
 gff_url                       = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+cross_validation_format       = "mane_summary"
 cross_validation_url          = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.summary.txt.gz"
 cross_validation_input        = "mane_transcript_models_v1.5.summary.tsv.gz"
 transcript_models_filename    = "transcript_models_grch38.bin"
@@ -57,20 +58,36 @@ patch_aliases_filename        = "patch_chrom_aliases_grch38.csv"
 #
 # Source: NCBI RefSeq GRCh37.p13 (`GCF_000001405.25-RS_2024_09`). MANE is
 # GRCh38-only, so GRCh37 transcripts come from NCBI's RefSeq Select set
-# instead — the GFF3 carries `tag=RefSeq Select` on the curated
-# representative transcripts.
+# (`tag=RefSeq Select` on the curated representative transcripts).
 #
-# `cross_validation_url` is intentionally omitted for Stage A: NCBI's
-# GRCh37 publication has no MANE-summary equivalent, and UCSC's
-# `ncbiRefSeq.txt` is not authoritative for RefSeq Select status (Select
-# flags live in the sibling `ncbiRefSeqSelect.txt`). Stage B will add a
-# proper second-source check; until then the build emits an explicit
-# `tracing::warn!` flagging the missing quality gate.
+# Cross-validation: UCSC's hg19 `ncbiRefSeq.txt.gz` plus the sibling
+# `ncbiRefSeqSelect.txt.gz`. UCSC re-derives NCBI's annotation release,
+# so this catches GFF3-attr-parser regressions and coordinate-conversion
+# drift against an independently-implemented parser, but it is not a
+# truly independent biological source.
+#
+# The URLs below point at the *live* UCSC `database/` tables, which
+# track only the latest NCBI annotation release. If the GFF3 release
+# pinned in `gff_url` lags the live UCSC release the validator will
+# fail with systematic version drift; swap the URL for a release-aligned
+# archive snapshot from
+# `https://hgdownload.soe.ucsc.edu/goldenPath/archive/hg19/ncbiRefSeq/<release>/`
+# when that happens.
+#
+# chrM is excluded from this cross-check: UCSC `hg19` chrM is NC_001807
+# (Anderson 1981) while NCBI GRCh37 chrMT is NC_012920.1 (rCRS), so
+# coordinate comparison would systematically false-positive on every
+# chrM transcript.
 [vareffect.grch37]
 fasta_url      = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.25_GRCh37.p13/GCF_000001405.25_GRCh37.p13_genomic.fna.gz"
 fasta_filename = "GRCh37.bin"
 fasta_build    = "GRCh37"
 gff_url                       = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.25_GRCh37.p13/GCF_000001405.25_GRCh37.p13_genomic.gff.gz"
+cross_validation_format       = "ucsc_refseq_select"
+cross_validation_url          = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/ncbiRefSeq.txt.gz"
+cross_validation_input        = "ucsc_ncbiRefSeq_hg19.txt.gz"
+cross_validation_select_url   = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/ncbiRefSeqSelect.txt.gz"
+cross_validation_select_input = "ucsc_ncbiRefSeqSelect_hg19.txt.gz"
 transcript_models_filename    = "transcript_models_grch37.bin"
 transcript_models_basename    = "transcript_models_grch37"
 transcript_models_version     = "GRCh37.p13"

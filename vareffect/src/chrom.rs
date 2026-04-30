@@ -234,20 +234,40 @@ pub fn ucsc_to_refseq(assembly: Assembly, ucsc: &str) -> &str {
 /// function does not need an [`Assembly`] selector.
 ///
 /// Recognized UCSC patterns:
-/// - `chr*_*_fix` — fix patches (e.g. `chr9_KN196479v1_fix`)
-/// - `chr*_*_alt` — alternate haplotypes (e.g. `chr22_KI270879v1_alt`)
-/// - `chr*_*_random` — unlocalized contigs (e.g. `chr1_KI270706v1_random`)
-/// - `chrUn_*` — unplaced scaffolds (e.g. `chrUn_KI270302v1`)
+/// - `chr*_*_fix` — GRCh38 fix patches (e.g. `chr9_KN196479v1_fix`)
+/// - `chr*_*_alt` — GRCh38 alternate haplotypes (e.g. `chr22_KI270879v1_alt`)
+/// - `chr*_*_random` — unlocalized contigs (e.g. `chr1_KI270706v1_random`,
+///   hg19 `chr1_gl000191_random`)
+/// - `chrUn_*` — unplaced scaffolds (e.g. `chrUn_KI270302v1`,
+///   hg19 `chrUn_gl000211`)
+/// - `chr*_*_hap[1-7]` — hg19 MHC alternate haplotypes (e.g.
+///   `chr6_apd_hap1`, `chr6_cox_hap2`, `chr4_ctg9_hap1`,
+///   `chr17_ctg5_hap1`). hg19's MHC region carries seven haplotypes
+///   (`apd`/`cox`/`dbb`/`mann`/`mcf`/`qbl`/`ssto`); the suffix range
+///   `_hap1`..`_hap7` covers the full set.
 pub fn is_patch_sequence(chrom: &str) -> bool {
     // RefSeq forms (used by MANE summary TSV and other NCBI products).
     if chrom.starts_with("NW_") || chrom.starts_with("NT_") {
         return true;
     }
-    // UCSC forms (used by the MANE GFF3 column 1 for alt/fix contigs).
-    chrom.ends_with("_alt")
+    // UCSC forms shared between hg19 and hg38.
+    if chrom.ends_with("_alt")
         || chrom.ends_with("_fix")
         || chrom.ends_with("_random")
         || chrom.starts_with("chrUn_")
+    {
+        return true;
+    }
+    // hg19 MHC alt haplotypes: `_hap1` .. `_hap7`. Allocation-free
+    // suffix check — `format!("_hap{h}")` would alloc seven Strings on
+    // every call and this sits on the cross-validation hot path.
+    if let Some((_, suffix)) = chrom.rsplit_once("_hap")
+        && suffix.len() == 1
+        && matches!(suffix.as_bytes()[0], b'1'..=b'7')
+    {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -512,6 +532,36 @@ mod tests {
         assert!(!is_patch_sequence("chrX"));
         assert!(!is_patch_sequence("chrY"));
         assert!(!is_patch_sequence("chrM"));
+    }
+
+    #[test]
+    fn is_patch_sequence_detects_hg19_haplotype_contigs() {
+        // hg19 MHC region — 7 alternate haplotypes named with the
+        // `_hap1`..`_hap7` suffix.
+        assert!(is_patch_sequence("chr6_apd_hap1"));
+        assert!(is_patch_sequence("chr6_cox_hap2"));
+        assert!(is_patch_sequence("chr6_dbb_hap3"));
+        assert!(is_patch_sequence("chr6_mann_hap4"));
+        assert!(is_patch_sequence("chr6_mcf_hap5"));
+        assert!(is_patch_sequence("chr6_qbl_hap6"));
+        assert!(is_patch_sequence("chr6_ssto_hap7"));
+        // hg19 also carries `_hap1` for chr4 (ctg9) and chr17 (ctg5).
+        assert!(is_patch_sequence("chr4_ctg9_hap1"));
+        assert!(is_patch_sequence("chr17_ctg5_hap1"));
+        // hg19 random contigs use the `gl\d+_random` form already covered
+        // by the existing `_random` suffix; lock the behavior in.
+        assert!(is_patch_sequence("chr1_gl000191_random"));
+        assert!(is_patch_sequence("chr17_gl000204_random"));
+        // hg19 unplaced scaffolds use `chrUn_gl\d+`, covered by the
+        // `chrUn_` prefix.
+        assert!(is_patch_sequence("chrUn_gl000211"));
+        assert!(is_patch_sequence("chrUn_gl000247"));
+        // `_hap8` and beyond don't exist on hg19; reject so future
+        // accidental input doesn't slip through.
+        assert!(!is_patch_sequence("chr6_hypothetical_hap8"));
+        assert!(!is_patch_sequence("chr6_hypothetical_hap0"));
+        // Primary chroms still negative.
+        assert!(!is_patch_sequence("chr6"));
     }
 
     #[test]

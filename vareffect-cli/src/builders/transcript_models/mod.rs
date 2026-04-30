@@ -45,7 +45,8 @@ use vareffect::{
     Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier, TranslationalException,
 };
 
-use cross_validate::cross_validate_summary;
+pub(crate) use cross_validate::CrossValidationSource;
+use cross_validate::cross_validate;
 use gff3_attrs::{
     extract_attr, extract_divergence_flag, extract_ensembl_from_dbxref, extract_hgnc_from_dbxref,
     extract_protein_id_from_cds_attrs, extract_refseq_acc_from_dbxref, extract_transcript_from_id,
@@ -91,24 +92,33 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
     "telomerase_RNA",
 ];
 
-/// Build the transcript model store from a MANE GFF3 file.
+/// Build the transcript model store from a RefSeq / MANE GFF3 file.
 ///
 /// # Arguments
 ///
-/// * `input` -- Path to `MANE.GRCh38.vX.X.refseq_genomic.gff.gz` (or an
-///   uncompressed `.gff3`).
-/// * `summary_input` -- Optional path to `MANE.GRCh38.vX.X.summary.txt.gz`.
-///   When provided, every built transcript is cross-validated against the
-///   summary's chrom, strand, position, gene symbol, and tier. Mismatches
-///   are fatal build errors.
-/// * `patch_aliases_input` -- Path to `patch_chrom_aliases.csv` produced by
+/// * `input` -- Path to the GFF3 (e.g. `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`
+///   for GRCh38, `GCF_000001405.25_GRCh37.p13_genomic.gff.gz` for GRCh37).
+///   Can be gzipped or plain.
+/// * `cross_validation_source` -- Optional second-source for build-time
+///   cross-validation. `Some(ManeSummary)` for GRCh38; `Some(UcscRefseqSelect)`
+///   for GRCh37. Mismatches against the source are fatal build errors.
+///   `None` skips cross-validation with a build-log warning.
+/// * `patch_aliases_input` -- Path to the per-assembly
+///   `patch_chrom_aliases_*.csv` produced by
 ///   [`crate::builders::patch_chrom_aliases::build_from_assembly_report`].
-///   Required when `summary_input` is `Some`; reconciles `NW_*`/`NT_*`
-///   summary accessions against UCSC patch chrom names.
-/// * `output_dir` -- Directory for the output files
-///   (`transcript_models.bin`, `transcript_models.bin.sha256`,
-///   `transcript_models.manifest.json`).
-/// * `version` -- MANE release version string (e.g. `"1.5"`).
+///   Required when `cross_validation_source` is `Some`; reconciles
+///   `NW_*`/`NT_*` accessions against UCSC patch chrom names.
+/// * `output_dir` -- Directory for the output files (`<basename>.bin`,
+///   `<basename>.bin.sha256`, `<basename>.manifest.json`).
+/// * `version` -- Upstream data version string (e.g. `"1.5"` for MANE,
+///   `"GRCh37.p13"` for the NCBI RefSeq GRCh37 release).
+/// * `assembly` -- Reference build identifier for chrom-table selection
+///   and manifest persistence.
+/// * `admit_tags` -- Tag-list driving GFF3 admission
+///   ([`ADMIT_TAGS_MANE`] for GRCh38, [`ADMIT_TAGS_REFSEQ_SELECT`] for
+///   GRCh37).
+/// * `output_basename` -- File-stem (no extension) for the output bin /
+///   sha256 / manifest sibling files.
 ///
 /// # Returns
 ///
@@ -116,14 +126,14 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
 ///
 /// # Errors
 ///
-/// Returns an error if the GFF3 cannot be read, the summary TSV
-/// cross-validation fails, the patch-alias CSV cannot be read, or the
-/// output files cannot be written. Also errors if `summary_input` is
-/// provided without a matching `patch_aliases_input`.
+/// Returns an error if the GFF3 cannot be read, cross-validation fails,
+/// the patch-alias CSV cannot be read, or the output files cannot be
+/// written. Also errors if `cross_validation_source` is provided
+/// without a matching `patch_aliases_input`.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     input: &Path,
-    summary_input: Option<&Path>,
+    cross_validation_source: Option<CrossValidationSource>,
     patch_aliases_input: Option<&Path>,
     output_dir: &Path,
     version: &str,
@@ -133,10 +143,10 @@ pub fn build(
 ) -> Result<(BuildOutput, usize)> {
     let transcripts = parse_gff3(input, assembly, admit_tags)?;
 
-    if let Some(summary_path) = summary_input {
+    if let Some(source) = cross_validation_source.as_ref() {
         let aliases_path = patch_aliases_input.ok_or_else(|| {
             anyhow::anyhow!(
-                "--summary-input requires --patch-chrom-aliases so patch-contig \
+                "cross_validation_source requires patch_aliases_input so patch-contig \
                  cross-validation can resolve `NW_*`/`NT_*` accessions"
             )
         })?;
@@ -147,21 +157,13 @@ pub fn build(
                     aliases_path.display()
                 )
             })?;
-        cross_validate_summary(&transcripts, summary_path, &aliases, assembly).with_context(
-            || {
-                format!(
-                    "cross-validating GFF3 build against {}",
-                    summary_path.display()
-                )
-            },
-        )?;
+        cross_validate(&transcripts, &aliases, assembly, source)
+            .with_context(|| format!("cross-validating {assembly} GFF3 build"))?;
     } else {
         tracing::warn!(
             store = "transcript_models",
             assembly = %assembly,
-            "no cross-validation source configured for {assembly} build; \
-             this is the documented gap for GRCh37 RefSeq Select — Stage B \
-             will introduce a dispatching validator"
+            "no cross-validation source configured for {assembly} build",
         );
     }
 

@@ -39,17 +39,24 @@ and every feature that is intentionally out of scope for the core crate.
   reliable — vareffect therefore does NOT raise a clinical warning.
 - **Cross-validation:** GRCh38 builds are second-source-checked against
   the MANE summary TSV at build time, with mismatches failing the
-  build. GRCh37 ships with **no second-source check** in Stage A —
-  NCBI's GRCh37 publication has no MANE-summary equivalent, and UCSC's
-  `ncbiRefSeq.txt` is not authoritative for RefSeq Select status (Select
-  flags live in the sibling `ncbiRefSeqSelect.txt`). Stage B will add a
-  proper validator. Until then the build emits an explicit
-  `tracing::warn!` flagging the gap; ClinVar concordance stats for
-  GRCh37 land in Stage C.
+  build. GRCh37 builds are checked against UCSC's hg19 `ncbiRefSeq.txt`
+  + `ncbiRefSeqSelect.txt` pair. UCSC re-derives NCBI's annotation
+  release, so the GRCh37 cross-check catches GFF3 attribute-parser
+  regressions and coordinate-conversion drift but does not catch
+  divergence between two independent biological databases.
+
+  **chrM is excluded from the GRCh37 UCSC cross-check.** UCSC `hg19`
+  chrM is `NC_001807` (the original 1981 Anderson reference), while
+  NCBI GRCh37 chrMT is `NC_012920.1` (the rCRS). The two references
+  differ by ~10 bp plus indels, so naive coordinate comparison would
+  systematically false-positive on every chrM transcript. The UCSC
+  parser skips chrM rows at parse time with a build-log warning; the
+  ~37 affected mitochondrial transcripts (MT-RNR1, MT-CO1, …) are
+  validated separately via downstream ClinVar concordance.
 - **Validation date:** last full concordance run 2026-04-11 — 6 / 6 test
   files pass (see [Validation methodology](#validation-methodology) for the
-  per-file variant counts). GRCh37 concordance numbers will land with
-  Stage C of the GRCh37 rollout.
+  per-file variant counts). GRCh37 concordance numbers will land with a
+  separate ClinVar / VEP pass.
 
 ## Intentional divergences
 
@@ -128,9 +135,8 @@ requests welcome.
   for callers who need VEP's pre-release-109 behaviour.
 - **CHM13 and non-human assemblies.** The crate accepts an `Assembly`
   selector; adding new variants requires a hardcoded NC_* accession
-  table per assembly plus a transcript-source pipeline. (GRCh38 and
-  GRCh37 are both supported as of the dual-assembly rollout — see
-  Stage A in the change log.)
+  table per assembly plus a transcript-source pipeline. GRCh38 and
+  GRCh37 are both supported.
 - **Multi-allele VCF splitting** — VCF `ALT` columns can carry multiple
   comma-separated alternate alleles. `vareffect` expects one ref / one alt
   per `annotate` call; callers must split beforehand. A convenience

@@ -98,10 +98,11 @@ impl VareffectSection {
 
 /// Per-assembly `[vareffect.<build>]` sub-table.
 ///
-/// Field names match the TOML keys verbatim. Only `cross_validation_url`
-/// / `cross_validation_input` are optional — Stage A omits them on the
-/// GRCh37 entry by design (no authoritative second source identified
-/// yet; see plan §6).
+/// Field names match the TOML keys verbatim. Cross-validation fields
+/// are optional as a group: omit all of them to skip cross-validation
+/// entirely (with a build-log warning). When `cross_validation_format`
+/// is set, the per-format required fields are enforced by
+/// [`AssemblyEntry::cross_validation_resolved`].
 #[derive(Debug, Deserialize)]
 pub struct AssemblyEntry {
     // Reference FASTA
@@ -116,12 +117,27 @@ pub struct AssemblyEntry {
     // Transcript models
     /// URL to the GFF3 release file (MANE for GRCh38, NCBI RefSeq for GRCh37).
     pub gff_url: String,
-    /// URL to the cross-validation source (MANE summary TSV / future
-    /// GRCh37 second source). `None` skips cross-validation with a build
-    /// log warning.
+    /// Format of the cross-validation source. `"mane_summary"`
+    /// (GRCh38) or `"ucsc_refseq_select"` (GRCh37). Required whenever
+    /// any other `cross_validation_*` field is set; absence means
+    /// "cross-validation skipped".
+    #[serde(default)]
+    pub cross_validation_format: Option<CrossValidationFormat>,
+    /// URL to the primary cross-validation source. Either the MANE
+    /// summary TSV (for `format = "mane_summary"`) or UCSC's
+    /// `ncbiRefSeq.txt.gz` (for `format = "ucsc_refseq_select"`).
     pub cross_validation_url: Option<String>,
-    /// Cache filename for the cross-validation source in `raw_dir`.
+    /// Cache filename for the primary cross-validation source in
+    /// `raw_dir`.
     pub cross_validation_input: Option<String>,
+    /// URL to the UCSC `ncbiRefSeqSelect.txt.gz` sidecar. Required
+    /// for `format = "ucsc_refseq_select"`; rejected for
+    /// `format = "mane_summary"`.
+    #[serde(default)]
+    pub cross_validation_select_url: Option<String>,
+    /// Cache filename for the UCSC Select sidecar.
+    #[serde(default)]
+    pub cross_validation_select_input: Option<String>,
     /// Output filename for the per-assembly transcript models bin.
     pub transcript_models_filename: String,
     /// File-stem (no extension) for the transcript models build, used
@@ -145,6 +161,131 @@ pub struct AssemblyEntry {
     pub patch_aliases_filename: String,
 }
 
+/// Cross-validation source extracted from an [`AssemblyEntry`] after all
+/// per-format required fields are confirmed present. The setup pipeline
+/// pattern-matches on this enum, eliminating `expect("validated")`
+/// scattered across the call site.
+#[derive(Debug, Clone)]
+pub enum ResolvedCvSource {
+    /// MANE summary TSV. GRCh38-only.
+    ManeSummary { url: String, filename: String },
+    /// UCSC `ncbiRefSeq.txt.gz` + `ncbiRefSeqSelect.txt.gz` pair.
+    UcscRefseqSelect {
+        coords_url: String,
+        coords_filename: String,
+        select_url: String,
+        select_filename: String,
+    },
+}
+
+impl AssemblyEntry {
+    /// Validate cross-field invariants and return the resolved source.
+    ///
+    /// Returns `Ok(None)` when no cross-validation field is set
+    /// (cross-validation skipped). Returns `Ok(Some(source))` when the
+    /// configuration is valid for the declared
+    /// `cross_validation_format`. Errors when:
+    ///
+    /// 1. Any `cross_validation_*` field is set but
+    ///    `cross_validation_format` is absent — the format must be
+    ///    explicit so the wrong backend can't run on a typo'd file.
+    /// 2. `format = UcscRefseqSelect` with any of the four UCSC
+    ///    required fields missing.
+    /// 3. `format = ManeSummary` with `cross_validation_select_url` or
+    ///    `cross_validation_select_input` set — the MANE backend never
+    ///    reads them.
+    /// 4. `cross_validation_url` set without `cross_validation_input`,
+    ///    or vice versa.
+    /// 5. `cross_validation_select_url` set without
+    ///    `cross_validation_select_input`, or vice versa.
+    pub fn cross_validation_resolved(&self) -> anyhow::Result<Option<ResolvedCvSource>> {
+        let url_paired =
+            self.cross_validation_url.is_some() == self.cross_validation_input.is_some();
+        if !url_paired {
+            anyhow::bail!(
+                "cross_validation_url and cross_validation_input must be set together \
+                 (or both absent)"
+            );
+        }
+        let select_paired = self.cross_validation_select_url.is_some()
+            == self.cross_validation_select_input.is_some();
+        if !select_paired {
+            anyhow::bail!(
+                "cross_validation_select_url and cross_validation_select_input must \
+                 be set together (or both absent)"
+            );
+        }
+
+        let any_cv_field_set =
+            self.cross_validation_url.is_some() || self.cross_validation_select_url.is_some();
+
+        match self.cross_validation_format {
+            None => {
+                if any_cv_field_set {
+                    anyhow::bail!(
+                        "cross_validation_* fields are set but cross_validation_format \
+                         is missing -- the format must be explicit (\"mane_summary\" or \
+                         \"ucsc_refseq_select\")"
+                    );
+                }
+                Ok(None)
+            }
+            Some(CrossValidationFormat::ManeSummary) => {
+                if self.cross_validation_select_url.is_some()
+                    || self.cross_validation_select_input.is_some()
+                {
+                    anyhow::bail!(
+                        "cross_validation_format=mane_summary forbids \
+                         cross_validation_select_url / cross_validation_select_input \
+                         (the MANE backend reads only the single summary TSV)"
+                    );
+                }
+                let (Some(url), Some(filename)) = (
+                    self.cross_validation_url.as_ref(),
+                    self.cross_validation_input.as_ref(),
+                ) else {
+                    anyhow::bail!(
+                        "cross_validation_format=mane_summary requires \
+                         cross_validation_url and cross_validation_input"
+                    );
+                };
+                Ok(Some(ResolvedCvSource::ManeSummary {
+                    url: url.clone(),
+                    filename: filename.clone(),
+                }))
+            }
+            Some(CrossValidationFormat::UcscRefseqSelect) => {
+                let mut missing: Vec<&'static str> = Vec::new();
+                if self.cross_validation_url.is_none() {
+                    missing.push("cross_validation_url");
+                }
+                if self.cross_validation_input.is_none() {
+                    missing.push("cross_validation_input");
+                }
+                if self.cross_validation_select_url.is_none() {
+                    missing.push("cross_validation_select_url");
+                }
+                if self.cross_validation_select_input.is_none() {
+                    missing.push("cross_validation_select_input");
+                }
+                if !missing.is_empty() {
+                    anyhow::bail!(
+                        "cross_validation_format=ucsc_refseq_select requires all four \
+                         UCSC source fields -- missing: {}",
+                        missing.join(", ")
+                    );
+                }
+                Ok(Some(ResolvedCvSource::UcscRefseqSelect {
+                    coords_url: self.cross_validation_url.clone().unwrap(),
+                    coords_filename: self.cross_validation_input.clone().unwrap(),
+                    select_url: self.cross_validation_select_url.clone().unwrap(),
+                    select_filename: self.cross_validation_select_input.clone().unwrap(),
+                }))
+            }
+        }
+    }
+}
+
 /// Selects which `tag=` values the GFF3 transcript builder admits.
 ///
 /// The user-facing config exposes this as a string enum
@@ -160,6 +301,22 @@ pub enum TranscriptSource {
     /// on later GRCh38 releases too, but MANE is preferred there).
     #[serde(rename = "refseq_select")]
     RefSeqSelect,
+}
+
+/// Format of the cross-validation source. Drives backend selection in
+/// `crate::builders::transcript_models::cross_validate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum CrossValidationFormat {
+    /// NCBI MANE summary TSV. Single-file source. GRCh38-only.
+    #[serde(rename = "mane_summary")]
+    ManeSummary,
+    /// UCSC `ncbiRefSeq.txt.gz` + `ncbiRefSeqSelect.txt.gz` pair. Used
+    /// for GRCh37 because no NCBI tabular RefSeq Select release exists.
+    /// chrM transcripts are skipped at parse time due to the UCSC
+    /// `hg19` chrM (NC_001807) vs GRCh37 chrMT (NC_012920.1) reference
+    /// divergence.
+    #[serde(rename = "ucsc_refseq_select")]
+    UcscRefseqSelect,
 }
 
 /// Locate the config file for `vareffect-cli`.
@@ -347,5 +504,161 @@ patch_aliases_filename = "patch_chrom_aliases_grch38.csv"
             config.vareffect.grch38.as_ref().unwrap().fasta_build,
             "GRCh38"
         );
+    }
+
+    /// Build a minimal valid `AssemblyEntry` whose tests can mutate.
+    fn entry_template() -> AssemblyEntry {
+        AssemblyEntry {
+            fasta_url: "https://example.com/genome.fna.gz".into(),
+            fasta_filename: "X.bin".into(),
+            fasta_build: "X".into(),
+            gff_url: "https://example.com/x.gff.gz".into(),
+            cross_validation_format: None,
+            cross_validation_url: None,
+            cross_validation_input: None,
+            cross_validation_select_url: None,
+            cross_validation_select_input: None,
+            transcript_models_filename: "x.bin".into(),
+            transcript_models_basename: "x".into(),
+            transcript_models_version: "1".into(),
+            transcript_source: TranscriptSource::Mane,
+            assembly_report_url: "https://example.com/r.txt".into(),
+            assembly_report_input: "r.txt".into(),
+            patch_aliases_filename: "x.csv".into(),
+        }
+    }
+
+    #[test]
+    fn cv_resolved_returns_none_when_omitted() {
+        let entry = entry_template();
+        let resolved = entry
+            .cross_validation_resolved()
+            .expect("omitted cross-validation must validate");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn cv_resolved_rejects_url_without_format() {
+        // Url+input set but format absent — the inference shortcut would
+        // silently run the MANE backend on whatever the URL points at.
+        // The format must be explicit.
+        let entry = AssemblyEntry {
+            cross_validation_url: Some("https://example.com/s.tsv.gz".into()),
+            cross_validation_input: Some("s.tsv.gz".into()),
+            ..entry_template()
+        };
+        let err = entry
+            .cross_validation_resolved()
+            .expect_err("missing format must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cross_validation_format"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cv_resolved_returns_mane_summary_when_explicit() {
+        let entry = AssemblyEntry {
+            cross_validation_format: Some(CrossValidationFormat::ManeSummary),
+            cross_validation_url: Some("https://example.com/s.tsv.gz".into()),
+            cross_validation_input: Some("s.tsv.gz".into()),
+            ..entry_template()
+        };
+        match entry.cross_validation_resolved().unwrap() {
+            Some(ResolvedCvSource::ManeSummary { url, filename }) => {
+                assert_eq!(url, "https://example.com/s.tsv.gz");
+                assert_eq!(filename, "s.tsv.gz");
+            }
+            other => panic!("expected ManeSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cv_resolved_returns_ucsc_refseq_select_when_full() {
+        let entry = AssemblyEntry {
+            cross_validation_format: Some(CrossValidationFormat::UcscRefseqSelect),
+            cross_validation_url: Some("https://example.com/ncbiRefSeq.txt.gz".into()),
+            cross_validation_input: Some("ncbiRefSeq.txt.gz".into()),
+            cross_validation_select_url: Some("https://example.com/ncbiRefSeqSelect.txt.gz".into()),
+            cross_validation_select_input: Some("ncbiRefSeqSelect.txt.gz".into()),
+            ..entry_template()
+        };
+        match entry.cross_validation_resolved().unwrap() {
+            Some(ResolvedCvSource::UcscRefseqSelect {
+                coords_url,
+                coords_filename,
+                select_url,
+                select_filename,
+            }) => {
+                assert_eq!(coords_url, "https://example.com/ncbiRefSeq.txt.gz");
+                assert_eq!(coords_filename, "ncbiRefSeq.txt.gz");
+                assert_eq!(select_url, "https://example.com/ncbiRefSeqSelect.txt.gz");
+                assert_eq!(select_filename, "ncbiRefSeqSelect.txt.gz");
+            }
+            other => panic!("expected UcscRefseqSelect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cv_resolved_rejects_ucsc_refseq_select_with_missing_select_url() {
+        let entry = AssemblyEntry {
+            cross_validation_format: Some(CrossValidationFormat::UcscRefseqSelect),
+            cross_validation_url: Some("https://example.com/ncbiRefSeq.txt.gz".into()),
+            cross_validation_input: Some("ncbiRefSeq.txt.gz".into()),
+            // select_url / select_input intentionally omitted.
+            ..entry_template()
+        };
+        let err = entry
+            .cross_validation_resolved()
+            .expect_err("missing UCSC Select sidecar must fail validation");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cross_validation_select_url"), "msg: {msg}");
+        assert!(msg.contains("cross_validation_select_input"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cv_resolved_rejects_mane_summary_with_select_sidecar_set() {
+        // Config typo: UCSC fields copied into a MANE section. Reject
+        // loudly so the wrong backend doesn't run on the wrong files.
+        let entry = AssemblyEntry {
+            cross_validation_format: Some(CrossValidationFormat::ManeSummary),
+            cross_validation_url: Some("https://example.com/summary.tsv.gz".into()),
+            cross_validation_input: Some("summary.tsv.gz".into()),
+            cross_validation_select_url: Some("https://example.com/select.txt.gz".into()),
+            cross_validation_select_input: Some("select.txt.gz".into()),
+            ..entry_template()
+        };
+        let err = entry
+            .cross_validation_resolved()
+            .expect_err("MANE+select must be rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("forbids"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cv_resolved_rejects_unpaired_url_input() {
+        let entry = AssemblyEntry {
+            cross_validation_url: Some("https://example.com/s.tsv.gz".into()),
+            // cross_validation_input intentionally omitted.
+            ..entry_template()
+        };
+        let err = entry
+            .cross_validation_resolved()
+            .expect_err("unpaired url/input must fail");
+        assert!(format!("{err:#}").contains("must be set together"));
+    }
+
+    #[test]
+    fn cv_resolved_rejects_unpaired_select_url_input() {
+        let entry = AssemblyEntry {
+            cross_validation_format: Some(CrossValidationFormat::UcscRefseqSelect),
+            cross_validation_url: Some("https://example.com/s.txt.gz".into()),
+            cross_validation_input: Some("s.txt.gz".into()),
+            cross_validation_select_url: Some("https://example.com/sel.txt.gz".into()),
+            // select_input omitted.
+            ..entry_template()
+        };
+        let err = entry
+            .cross_validation_resolved()
+            .expect_err("unpaired select url/input must fail");
+        assert!(format!("{err:#}").contains("set together"));
     }
 }

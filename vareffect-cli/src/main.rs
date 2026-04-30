@@ -172,10 +172,11 @@ enum Command {
         /// `GCF_000001405.25_GRCh37.p13_genomic.gff.gz`.
         #[arg(long)]
         input: PathBuf,
-        /// Optional path to a cross-validation source. For GRCh38:
-        /// `MANE.GRCh38.vX.X.summary.txt.gz`. GRCh37 has no Stage A
-        /// equivalent — pass `None` and the build emits a documented
-        /// warning about the missing quality gate.
+        /// Optional path to a MANE summary cross-validation source
+        /// (`MANE.GRCh38.vX.X.summary.txt.gz`). MANE-only — UCSC
+        /// cross-validation requires two sources and is wired through
+        /// `setup`. When omitted, the build emits a warning about the
+        /// missing quality gate.
         #[arg(long)]
         summary_input: Option<PathBuf>,
         /// Path to the per-assembly `patch_chrom_aliases_*.csv`
@@ -292,10 +293,17 @@ fn main() -> Result<()> {
                 Assembly::GRCh38 => "transcript_models_grch38".to_string(),
                 Assembly::GRCh37 => "transcript_models_grch37".to_string(),
             });
+            // build-transcripts uses MANE summary only; UCSC validation
+            // requires two source files and is wired through `setup`.
+            let cross_validation_source = summary_input.as_deref().map(|p| {
+                builders::transcript_models::CrossValidationSource::ManeSummary {
+                    summary_path: p.to_path_buf(),
+                }
+            });
             let start = Instant::now();
             let (out, size) = builders::transcript_models::build(
                 &input,
-                summary_input.as_deref(),
+                cross_validation_source,
                 patch_chrom_aliases.as_deref(),
                 &output,
                 &version,

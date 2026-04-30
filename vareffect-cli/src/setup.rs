@@ -24,8 +24,9 @@ use console::style;
 
 use crate::builders;
 use crate::builders::reference_genome::{self, GenomeOutcome};
+use crate::builders::transcript_models::CrossValidationSource;
 use crate::common::format_size;
-use crate::config::{self, AssemblyEntry, TranscriptSource};
+use crate::config::{self, AssemblyEntry, ResolvedCvSource, TranscriptSource};
 use vareffect::Assembly;
 
 /// Selection passed in by the CLI: build a single assembly, or every
@@ -174,6 +175,17 @@ fn run_one_assembly(
         style(format!("=== Building {assembly} ===")).bold().cyan()
     );
 
+    // Fail-fast on misconfigured cross-validation, before any network
+    // download. The result is recomputed inside the transcript-models
+    // block where it's actually used; cross_validation_resolved is pure
+    // string manipulation, so the second call is free.
+    entry.cross_validation_resolved().with_context(|| {
+        format!(
+            "validating [vareffect.{}] cross-validation config",
+            assembly
+        )
+    })?;
+
     // Sanity-check that `fasta_url` matches the declared `fasta_build`.
     if !entry.fasta_url.contains(&entry.fasta_build) {
         bail!(
@@ -259,14 +271,40 @@ fn run_one_assembly(
         let gff_path = raw_dir.join(&gff_filename);
         ensure_cached(http_client, &entry.gff_url, &gff_path, "RefSeq GFF3")?;
 
-        let cross_validation_path = if let Some(input) = &entry.cross_validation_input {
-            let path = raw_dir.join(input);
-            if let Some(url) = &entry.cross_validation_url {
-                ensure_cached(http_client, url, &path, "cross-validation source")?;
+        // Download each required file into the raw cache and build the
+        // typed `CrossValidationSource` the transcript-models builder
+        // consumes. Validation already ran above; this re-resolution
+        // can't fail.
+        let cv_resolved = entry
+            .cross_validation_resolved()
+            .expect("validated at run_one_assembly entry");
+        let cross_validation_source: Option<CrossValidationSource> = match cv_resolved {
+            None => None,
+            Some(ResolvedCvSource::ManeSummary { url, filename }) => {
+                let summary_path = raw_dir.join(&filename);
+                ensure_cached(http_client, &url, &summary_path, "MANE summary TSV")?;
+                Some(CrossValidationSource::ManeSummary { summary_path })
             }
-            Some(path)
-        } else {
-            None
+            Some(ResolvedCvSource::UcscRefseqSelect {
+                coords_url,
+                coords_filename,
+                select_url,
+                select_filename,
+            }) => {
+                let coords_path = raw_dir.join(&coords_filename);
+                let select_path = raw_dir.join(&select_filename);
+                ensure_cached(http_client, &coords_url, &coords_path, "UCSC ncbiRefSeq")?;
+                ensure_cached(
+                    http_client,
+                    &select_url,
+                    &select_path,
+                    "UCSC ncbiRefSeqSelect",
+                )?;
+                Some(CrossValidationSource::UcscRefseqSelect {
+                    coords_path,
+                    select_path,
+                })
+            }
         };
 
         let admit_tags = match entry.transcript_source {
@@ -278,7 +316,7 @@ fn run_one_assembly(
         let aliases_ref = aliases_path.as_deref();
         let (out, size_bytes) = builders::transcript_models::build(
             &gff_path,
-            cross_validation_path.as_deref(),
+            cross_validation_source,
             aliases_ref,
             output_dir,
             &entry.transcript_models_version,
