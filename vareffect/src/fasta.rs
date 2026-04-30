@@ -97,7 +97,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
@@ -356,6 +356,16 @@ pub struct FastaReader {
 
     /// Original `.bin` path, kept for diagnostic messages.
     path: PathBuf,
+
+    /// Per-reader cache of `ga4gh:SQ.<digest>` CURIEs computed for VRS ID
+    /// emission. Read-heavy, write-rare (≤25 inserts ever per reader), so
+    /// `RwLock` over a `HashMap` of `Arc<str>`: cache hits clone the `Arc`
+    /// (one atomic increment, no allocation) under a shared read lock.
+    /// Tied to the reader rather than a process-global static so that two
+    /// readers opened against different references in the same process
+    /// produce digests of their actual bytes, not whichever reader populated
+    /// the global first.
+    vrs_sq_cache: Arc<RwLock<HashMap<String, Arc<str>>>>,
 }
 
 impl FastaReader {
@@ -491,6 +501,7 @@ impl FastaReader {
             patch_aliases,
             assembly,
             path: path.to_path_buf(),
+            vrs_sq_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -517,7 +528,36 @@ impl FastaReader {
             patch_aliases: self.patch_aliases.as_ref().map(Arc::clone),
             assembly: self.assembly,
             path: self.path.clone(),
+            vrs_sq_cache: Arc::clone(&self.vrs_sq_cache),
         })
+    }
+
+    /// Look up — or compute and cache — the per-chromosome value backing the
+    /// VRS `ga4gh:SQ.<digest>` CURIE.
+    ///
+    /// `compute` is invoked at most once per `chrom` per reader; subsequent
+    /// calls return the cached `Arc<str>` under a shared read lock. If
+    /// `compute` returns `None`, nothing is cached and the next call retries.
+    ///
+    /// Used by [`crate::vrs`] — kept out of the public API by being
+    /// `pub(crate)`.
+    pub(crate) fn vrs_sq_cached<F>(&self, chrom: &str, compute: F) -> Option<Arc<str>>
+    where
+        F: FnOnce() -> Option<String>,
+    {
+        if let Ok(cache) = self.vrs_sq_cache.read()
+            && let Some(hit) = cache.get(chrom)
+        {
+            return Some(Arc::clone(hit));
+        }
+        let computed = compute()?;
+        let arc: Arc<str> = Arc::from(computed.into_boxed_str());
+        if let Ok(mut cache) = self.vrs_sq_cache.write() {
+            cache
+                .entry(chrom.to_string())
+                .or_insert_with(|| Arc::clone(&arc));
+        }
+        Some(arc)
     }
 
     /// Fetch a genomic sequence as uppercase ASCII bytes.

@@ -137,6 +137,7 @@ pub mod transcript;
 pub mod types;
 mod var_effect;
 mod vep_json;
+mod vrs;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
@@ -157,7 +158,7 @@ pub use transcript::TranscriptStore;
 pub use types::{
     Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier, TranslationalException,
 };
-pub use var_effect::{VarEffect, VarEffectBuilder};
+pub use var_effect::{AnnotateOptions, VarEffect, VarEffectBuilder};
 
 // Compile-time proof that the runtime types are thread-safe to share across
 // worker tasks. A field that silently breaks `Send + Sync` in a future

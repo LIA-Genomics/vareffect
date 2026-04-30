@@ -62,6 +62,7 @@ use crate::types::Biotype;
 /// consumers (CSQ formatter, VEP-JSON serializer) iterate the warnings
 /// list once instead of de-duplicating per-row.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct AnnotationResult {
     /// Per-transcript consequence rows. Empty only when no overlap was
     /// found and the intergenic-variant fallback was suppressed (which
@@ -71,6 +72,18 @@ pub struct AnnotationResult {
     /// noteworthy happened — clinical-grade callers gate output on this
     /// being empty *or* on every entry being acceptable.
     pub warnings: Vec<Warning>,
+    /// GA4GH VRS 1.3 identifier (`ga4gh:VA.<digest>`) for the fully-
+    /// justified normalized allele. `None` for non-primary contigs,
+    /// no-op variants (`ref == alt`), and the rare cases where VOCA
+    /// expansion would read past chromosome bounds. Matches anyvar /
+    /// ClinGen / ClinVar / MAVEDB on canonical references.
+    pub vrs_id: Option<String>,
+    /// GA4GH VRS 2.0 identifier. Same content addressing as
+    /// [`Self::vrs_id`] but produced under the 2.0 schema (different
+    /// from 1.3 — see VRS 2.0 spec). Emitted alongside 1.3 for forward
+    /// compatibility during the ecosystem migration window. `None`
+    /// under the same conditions as `vrs_id`.
+    pub vrs_id_v2: Option<String>,
 }
 
 impl AnnotationResult {
@@ -81,6 +94,8 @@ impl AnnotationResult {
         Self {
             consequences,
             warnings: Vec::new(),
+            vrs_id: None,
+            vrs_id_v2: None,
         }
     }
 }

@@ -67,6 +67,46 @@ pub struct VarEffect {
     grch37: Option<AssemblyHandles>,
 }
 
+/// Caller-controlled toggles for [`VarEffect::annotate_with_options`].
+///
+/// Constructed via [`Default`] or struct-literal syntax with
+/// `..Default::default()`. New fields may be added in minor releases —
+/// the type is `#[non_exhaustive]` so call sites must use the default
+/// path for forward compatibility.
+///
+/// # Examples
+///
+/// Because the type is `#[non_exhaustive]`, callers from outside this
+/// crate cannot use struct-literal syntax. Default-construct, then set
+/// the fields you want:
+///
+/// ```ignore
+/// // Default: VRS off, behavior matches the simple `annotate(..)`.
+/// let opts = AnnotateOptions::default();
+///
+/// // Opt in to VRS ID emission for cross-pipeline allele indexing.
+/// let mut opts = AnnotateOptions::default();
+/// opts.emit_vrs_ids = true;
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AnnotateOptions {
+    /// If true, compute and attach the GA4GH VRS 1.3 and 2.0 Allele
+    /// identifiers (`vrs_id` / `vrs_id_v2`) to the returned
+    /// [`AnnotationResult`]. Off by default — VRS computation runs the
+    /// VOCA normalizer + four SHA-512 hashes per variant and a one-time
+    /// SHA-512 of the full sequence on each chromosome's first request,
+    /// neither of which is free. Enable when downstream consumers need
+    /// content-addressed allele identifiers (anyvar / ClinGen Allele
+    /// Registry / ClinVar / MAVEDB indexing).
+    ///
+    /// Has no effect for variants on non-primary contigs (patches /
+    /// alts / unlocalized scaffolds) — those have no canonical
+    /// cross-pipeline SQ digest and always return `None` for both ID
+    /// fields regardless of this flag.
+    pub emit_vrs_ids: bool,
+}
+
 impl VarEffect {
     /// Begin building a multi-assembly `VarEffect`. Use the returned
     /// [`VarEffectBuilder`] to attach one or both assemblies, then call
@@ -149,6 +189,38 @@ impl VarEffect {
         ref_allele: &[u8],
         alt_allele: &[u8],
     ) -> Result<AnnotationResult, VarEffectError> {
+        self.annotate_with_options(
+            assembly,
+            chrom,
+            pos,
+            ref_allele,
+            alt_allele,
+            &AnnotateOptions::default(),
+        )
+    }
+
+    /// Annotate a variant with caller-controlled options.
+    ///
+    /// Same contract as [`Self::annotate`], but takes an
+    /// [`AnnotateOptions`] reference for behavior toggles that the
+    /// default-off path would otherwise pay for unconditionally. Use
+    /// this when you need:
+    ///
+    /// * `emit_vrs_ids = true` — compute and attach `vrs_id` /
+    ///   `vrs_id_v2` to the returned [`AnnotationResult`]. Adds roughly
+    ///   13 µs/variant (4× SHA-512 + JSON serialization for the 1.3 +
+    ///   2.0 schemas) on warm-cache, plus a one-time per-chromosome
+    ///   SHA-512 of the full sequence (~5.7 s for all 25 primary
+    ///   contigs of GRCh38) on first request per `FastaReader`.
+    pub fn annotate_with_options(
+        &self,
+        assembly: Assembly,
+        chrom: &str,
+        pos: u64,
+        ref_allele: &[u8],
+        alt_allele: &[u8],
+        options: &AnnotateOptions,
+    ) -> Result<AnnotationResult, VarEffectError> {
         let h = self.handles(assembly)?;
         let consequences = crate::consequence::annotate(
             chrom,
@@ -181,9 +253,17 @@ impl VarEffect {
             }
         }
 
+        let (vrs_id, vrs_id_v2) = if options.emit_vrs_ids {
+            crate::vrs::compute_vrs_ids(assembly, chrom, pos, ref_allele, alt_allele, &h.fasta)
+        } else {
+            (None, None)
+        };
+
         Ok(AnnotationResult {
             consequences,
             warnings,
+            vrs_id,
+            vrs_id_v2,
         })
     }
 
