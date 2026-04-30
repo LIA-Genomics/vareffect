@@ -88,50 +88,54 @@ fn already_leftmost_deletion() {
 
 /// Right-shifted 1bp deletion in a poly-A run should left-align.
 ///
-/// BRCA2 c.1813del is in a poly-A run. A right-shifted representation
-/// should produce the same result as the left-shifted one.
+/// BRCA2 region: GRCh38 chr13:32340303-32340307 reads `GAAAA` — a 4 bp
+/// poly-A immediately following a 'G'. Two right-shifted forms of the
+/// same 1 bp deletion within the run must normalize to the canonical
+/// left-aligned form `("GA","G")` at chr13:32340303.
 #[test]
 #[ignore]
 fn homopolymer_deletion_shifts_left() {
     let ve = open_var_effect();
-    // First, find a poly-A run by checking adjacent bases.
-    // BRCA2 region around chr13:32340301 (GRCh38).
-    // Submit a right-shifted representation and confirm it shifts.
-    //
-    // The leftmost representation should have a smaller or equal pos.
+
+    // Right-shifted: anchor 'A' at 32340306, delete the 'A' at 32340307.
     let result_right = ve
-        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "GA", "G")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_306, "AA", "A")
         .expect("left_align_indel should not error");
+    // Left-aligned canonical form: anchor 'G' at 32340303, delete the
+    // first 'A' at 32340304. Already leftmost — must return None.
     let result_left = ve
-        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_300, "AG", "A")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_303, "GA", "G")
         .expect("left_align_indel should not error");
 
-    // Both representations should normalize to the same coordinates.
-    // At least one of them must have shifted (not None).
-    let norm_right = result_right.unwrap_or((32_340_301, "GA".to_string(), "G".to_string()));
-    let norm_left = result_left.unwrap_or((32_340_300, "AG".to_string(), "A".to_string()));
+    let norm_right = result_right.unwrap_or((32_340_306, "AA".to_string(), "A".to_string()));
+    let norm_left = result_left.unwrap_or((32_340_303, "GA".to_string(), "G".to_string()));
     assert_eq!(
         norm_right, norm_left,
         "two representations of the same deletion must normalize identically"
     );
 }
 
-/// Right-shifted 1bp insertion in a poly-A should left-align.
+/// Right-shifted 1 bp insertion within the same chr13:32340303-32340307
+/// `GAAAA` run must converge with the canonical left-aligned form
+/// `("G","GA")` at chr13:32340303.
 #[test]
 #[ignore]
 fn homopolymer_insertion_shifts_left() {
     let ve = open_var_effect();
-    // Submit two representations of the same insertion and verify
-    // they converge.
+
+    // Right-shifted: anchor 'A' at 32340307, insert an extra 'A' on
+    // the right edge of the run.
     let result_a = ve
-        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_301, "G", "GA")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_307, "A", "AA")
         .expect("left_align_indel should not error");
+    // Left-aligned canonical: anchor 'G' at 32340303, insert the new
+    // 'A' immediately after the 'G'. Already leftmost — must return None.
     let result_b = ve
-        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_300, "A", "AG")
+        .left_align_indel(Assembly::GRCh38, "chr13", 32_340_303, "G", "GA")
         .expect("left_align_indel should not error");
 
-    let norm_a = result_a.unwrap_or((32_340_301, "G".to_string(), "GA".to_string()));
-    let norm_b = result_b.unwrap_or((32_340_300, "A".to_string(), "AG".to_string()));
+    let norm_a = result_a.unwrap_or((32_340_307, "A".to_string(), "AA".to_string()));
+    let norm_b = result_b.unwrap_or((32_340_303, "G".to_string(), "GA".to_string()));
     assert_eq!(
         norm_a, norm_b,
         "two representations of the same insertion must normalize identically"

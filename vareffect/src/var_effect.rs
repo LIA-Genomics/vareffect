@@ -478,36 +478,43 @@ impl VarEffect {
         let mut a: Vec<u8> = alt_allele.as_bytes().to_vec();
 
         loop {
-            if pos <= 1 {
+            if pos <= 1 || r.is_empty() || a.is_empty() {
                 break;
             }
-            let (Some(&r_last), Some(&a_last)) = (r.last(), a.last()) else {
-                break;
+
+            let trimmed = if r.last() == a.last() {
+                r.pop();
+                a.pop();
+                true
+            } else {
+                false
             };
-            if r_last != a_last {
+
+            if r.is_empty() || a.is_empty() {
+                pos -= 1;
+                let prepend = h.fasta.fetch_base(chrom, pos - 1)?;
+                r.insert(0, prepend);
+                a.insert(0, prepend);
+            } else if !trimmed {
                 break;
-            }
-
-            r.pop();
-            a.pop();
-            pos -= 1;
-
-            if r.is_empty() {
-                r.push(h.fasta.fetch_base(chrom, pos - 1)?);
-            }
-            if a.is_empty() {
-                a.push(h.fasta.fetch_base(chrom, pos - 1)?);
             }
         }
 
-        while r.len() > 1 && a.len() > 1 && r[0] == a[0] {
-            r.remove(0);
-            a.remove(0);
+        let mut prefix_skip = 0usize;
+        while r.len() - prefix_skip > 1
+            && a.len() - prefix_skip > 1
+            && r[prefix_skip] == a[prefix_skip]
+        {
+            prefix_skip += 1;
             pos += 1;
         }
 
-        let new_ref = String::from_utf8(r).map_err(|_| VarEffectError::InvalidAllele)?;
-        let new_alt = String::from_utf8(a).map_err(|_| VarEffectError::InvalidAllele)?;
+        let new_ref = std::str::from_utf8(&r[prefix_skip..])
+            .map_err(|_| VarEffectError::InvalidAllele)?
+            .to_string();
+        let new_alt = std::str::from_utf8(&a[prefix_skip..])
+            .map_err(|_| VarEffectError::InvalidAllele)?
+            .to_string();
 
         if pos == orig_pos && new_ref == orig_ref && new_alt == orig_alt {
             Ok(None)
