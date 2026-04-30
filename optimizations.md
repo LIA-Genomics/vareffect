@@ -219,41 +219,27 @@ acids), eliding the middle with `...`.
 
 ---
 
-## VRS-side optimizations (orthogonal — only relevant when `emit_vrs_ids: true`)
+## VRS-side optimizations (orthogonal — only relevant when VRS is enabled)
 
 The VRS pipeline currently costs ~13 us per variant on warm cache, which is
 why GRCh38 throughput drops from 134k -> 49k v/s when VRS is enabled. The
-opt-in `AnnotateOptions::emit_vrs_ids` flag eliminates this for clients that
-do not need VRS, but the cost is still worth attacking when it is on.
+opt-in `AnnotateOptions::emit_vrs_v1` / `emit_vrs_v2` flags eliminate this
+for clients that do not need VRS, but the cost is still worth attacking
+when it is on.
 
-### V1. Eager parallel SQ-digest fill at `FastaReader` construction
+### V1. Eager parallel SQ-digest fill — DONE
 
-**File:** `vareffect/src/fasta.rs::open_with_patch_aliases_and_assembly` /
-`vareffect/src/vrs/sq_digest.rs`
+Shipped as `VarEffect::warm_vrs_cache(assembly)`. Fans the 25 primary-contig
+SHA-512 hashes across rayon's pool out of the hot path. Lazy fill remains
+the default; eager warm is opt-in for callers about to enter a VRS-emitting
+batch.
 
-The per-`FastaReader` SQ cache fills lazily on the first variant per chrom.
-First call pays a SHA-512 over the full chromosome (~150-180 ms for chr1,
-total ~5.7 s for all 25 GRCh38 primaries on this hardware). For long jobs
-this amortizes invisibly; for short jobs it dominates (this is exactly why
-GRCh37 large-concordance looks abnormally slow at 1 975 v/s — small dataset,
-fixed fill cost).
+### V2. Per-schema VRS opt-in — DONE
 
-**Fix.** Optionally pre-fill in parallel via rayon at open time, gated on a
-constructor flag (`open_with_assembly_warm_vrs(...)`). The 25 chrom hashes
-fan out across cores in <1 s. Pay it once at process start, then VRS-on
-throughput is dominated by the per-variant ~13 us forever after.
-
-### V2. Drop VRS 1.3 (or make it independently opt-in)
-
-**File:** `vareffect/src/vrs/mod.rs::compute_vrs_ids_inner`
-
-Each variant runs the canonical-form pipeline twice — once for 1.3, once
-for 2.0. The two forms differ in location-blob shape but both costs are
-real (4 SHA-512 hashes + JSON serialization total). ClinGen / ClinVar are
-already on 2.0; 1.3 is documented as transitional.
-
-**Fix.** Make 1.3 opt-in via a second `emit_vrs_id_v1: bool` on
-`AnnotateOptions`, default false. ~50 % of VRS overhead disappears.
+Shipped as independent `emit_vrs_v1` / `emit_vrs_v2` flags on
+`AnnotateOptions` (replacing the single master `emit_vrs_ids`). Each
+schema's serialize step is gated on its own flag; the shared upstream
+(VOCA + SQ digest) runs once even when both are on.
 
 ### V3. Direct-to-bytes serialization
 
@@ -285,9 +271,8 @@ For the indel-heavy GRCh37 path the user is investigating, the order is:
    only when the per-transcript cost is already minimized.
 7. **#6** any time; correctness benefit independent of perf.
 
-For VRS-on workflows, **V1** (eager parallel fill) is the highest ROI —
-removes the GRCh37 short-job cliff entirely. **V2** is a second free win
-once the ecosystem is fully on 2.0. **V3** is the polish layer.
+For VRS-on workflows, V1 and V2 have shipped. **V3** (direct-to-bytes
+serialization) is the remaining polish layer.
 
 ## Validation
 

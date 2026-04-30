@@ -84,27 +84,45 @@ pub struct VarEffect {
 /// // Default: VRS off, behavior matches the simple `annotate(..)`.
 /// let opts = AnnotateOptions::default();
 ///
-/// // Opt in to VRS ID emission for cross-pipeline allele indexing.
+/// // Opt in to the canonical VRS 2.0 Allele identifier.
 /// let mut opts = AnnotateOptions::default();
-/// opts.emit_vrs_ids = true;
+/// opts.emit_vrs_v2 = true;
+///
+/// // Opt in to both schemas for callers indexing against legacy VRS 1.3
+/// // consumers as well.
+/// let mut opts = AnnotateOptions::default();
+/// opts.emit_vrs_v1 = true;
+/// opts.emit_vrs_v2 = true;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AnnotateOptions {
-    /// If true, compute and attach the GA4GH VRS 1.3 and 2.0 Allele
-    /// identifiers (`vrs_id` / `vrs_id_v2`) to the returned
-    /// [`AnnotationResult`]. Off by default — VRS computation runs the
-    /// VOCA normalizer + four SHA-512 hashes per variant and a one-time
-    /// SHA-512 of the full sequence on each chromosome's first request,
-    /// neither of which is free. Enable when downstream consumers need
-    /// content-addressed allele identifiers (anyvar / ClinGen Allele
-    /// Registry / ClinVar / MAVEDB indexing).
+    /// If true, compute and attach the GA4GH VRS 1.3 Allele identifier
+    /// (`vrs_id`) to the returned [`AnnotationResult`]. Off by default.
     ///
-    /// Has no effect for variants on non-primary contigs (patches /
-    /// alts / unlocalized scaffolds) — those have no canonical
-    /// cross-pipeline SQ digest and always return `None` for both ID
-    /// fields regardless of this flag.
-    pub emit_vrs_ids: bool,
+    /// VRS 1.3 is the legacy schema; most of the GA4GH ecosystem (anyvar,
+    /// ClinGen Allele Registry, ClinVar) is now on 2.0. Enable this flag
+    /// only when indexing against a consumer that still requires the 1.3
+    /// form.
+    ///
+    /// Has no effect for variants on non-primary contigs (patches / alts
+    /// / unlocalized scaffolds) — those have no canonical cross-pipeline
+    /// SQ digest and always return `None` regardless of this flag.
+    pub emit_vrs_v1: bool,
+
+    /// If true, compute and attach the GA4GH VRS 2.0 Allele identifier
+    /// (`vrs_id_v2`) to the returned [`AnnotationResult`]. Off by default.
+    ///
+    /// VRS 2.0 is the canonical schema used by anyvar, ClinGen Allele
+    /// Registry, ClinVar, and MAVEDB. This is the flag to set when
+    /// downstream consumers need content-addressed allele identifiers.
+    ///
+    /// Either flag (or both) triggers the shared VRS upstream — VOCA
+    /// normalizer plus a one-time SHA-512 of the full sequence on each
+    /// chromosome's first request — so per-variant cost is dominated by
+    /// the schemas you actually request. Has no effect for variants on
+    /// non-primary contigs.
+    pub emit_vrs_v2: bool,
 }
 
 impl VarEffect {
@@ -149,6 +167,39 @@ impl VarEffect {
     /// Borrow the [`FastaReader`] for the given assembly.
     pub fn fasta(&self, assembly: Assembly) -> Result<&FastaReader, VarEffectError> {
         Ok(&self.handles(assembly)?.fasta)
+    }
+
+    /// Eagerly fill the per-chromosome VRS SQ-digest cache for
+    /// `assembly` in parallel.
+    ///
+    /// VRS ID emission needs the `ga4gh:SQ.<digest>` of every chromosome
+    /// the variant lands on. Those digests are computed lazily on first
+    /// use and cached on the matching [`FastaReader`]. The lazy fill
+    /// pays a SHA-512 over the full chromosome (~150–180 ms each, ~5.7 s
+    /// total for the 25 GRCh38 primary contigs) the first time a variant
+    /// touches that chrom.
+    ///
+    /// For long-running jobs that lazy cost amortizes invisibly. For
+    /// short jobs (CLI invocations on small VCFs, fresh process starts,
+    /// latency-sensitive batches) it dominates. Calling
+    /// `warm_vrs_cache` up front fans the SHA-512 work across rayon's
+    /// pool and front-loads the cost out of the hot path.
+    ///
+    /// Has no effect on annotation correctness — the resulting digests
+    /// are byte-identical to the lazy fill, since they are
+    /// content-addressed over the same FASTA bytes. Skip this call if
+    /// you do not enable [`AnnotateOptions::emit_vrs_v1`] or
+    /// [`AnnotateOptions::emit_vrs_v2`]; you would pay the warm cost for
+    /// a cache that is never read.
+    ///
+    /// # Errors
+    ///
+    /// [`VarEffectError::AssemblyNotLoaded`] if the matching slot was
+    /// not populated by the builder.
+    pub fn warm_vrs_cache(&self, assembly: Assembly) -> Result<(), VarEffectError> {
+        let h = self.handles(assembly)?;
+        crate::vrs::warm_cache(&h.fasta);
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -206,12 +257,18 @@ impl VarEffect {
     /// default-off path would otherwise pay for unconditionally. Use
     /// this when you need:
     ///
-    /// * `emit_vrs_ids = true` — compute and attach `vrs_id` /
-    ///   `vrs_id_v2` to the returned [`AnnotationResult`]. Adds roughly
-    ///   13 µs/variant (4× SHA-512 + JSON serialization for the 1.3 +
-    ///   2.0 schemas) on warm-cache, plus a one-time per-chromosome
-    ///   SHA-512 of the full sequence (~5.7 s for all 25 primary
-    ///   contigs of GRCh38) on first request per `FastaReader`.
+    /// * `emit_vrs_v1 = true` — compute and attach the VRS 1.3 Allele
+    ///   identifier (`vrs_id`) to the returned [`AnnotationResult`].
+    /// * `emit_vrs_v2 = true` — compute and attach the canonical VRS 2.0
+    ///   Allele identifier (`vrs_id_v2`).
+    ///
+    /// Either flag triggers the shared VRS upstream: VOCA normalizer plus
+    /// a one-time per-chromosome SHA-512 of the full sequence (~5.7 s for
+    /// all 25 primary contigs of GRCh38) on first request per
+    /// `FastaReader`. Per-variant cost on warm cache is roughly 6.5 µs
+    /// per requested schema (~13 µs when both are on). For short jobs,
+    /// call [`Self::warm_vrs_cache`] up front to amortize the
+    /// per-chromosome SHA-512 cost out of the hot path.
     pub fn annotate_with_options(
         &self,
         assembly: Assembly,
@@ -253,8 +310,10 @@ impl VarEffect {
             }
         }
 
-        let (vrs_id, vrs_id_v2) = if options.emit_vrs_ids {
-            crate::vrs::compute_vrs_ids(assembly, chrom, pos, ref_allele, alt_allele, &h.fasta)
+        let (vrs_id, vrs_id_v2) = if options.emit_vrs_v1 || options.emit_vrs_v2 {
+            crate::vrs::compute_vrs_ids(
+                assembly, chrom, pos, ref_allele, alt_allele, &h.fasta, options,
+            )
         } else {
             (None, None)
         };

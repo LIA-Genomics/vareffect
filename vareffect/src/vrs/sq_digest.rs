@@ -25,6 +25,8 @@
 
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::chrom::{Assembly, ucsc_to_refseq};
 use crate::fasta::FastaReader;
 
@@ -80,6 +82,28 @@ pub(super) fn sq_curie(assembly: Assembly, chrom: &str, fasta: &FastaReader) -> 
 /// reduces existing CURIEs to their digest portion before hashing.
 pub(super) fn bare_digest_from_curie(curie: &str) -> &str {
     curie.strip_prefix("ga4gh:SQ.").unwrap_or(curie)
+}
+
+/// Eagerly fill the per-`FastaReader` SQ-digest cache for every primary
+/// contig in parallel, fanning the SHA-512 work across rayon's pool.
+///
+/// Concurrency is safe because:
+/// - The compute closure inside [`FastaReader::vrs_sq_cached`] runs
+///   outside the cache's write lock, so parallel SHA-512 work does not
+///   serialize on lock acquisition.
+/// - Concurrent inserts on the same key are deduplicated via
+///   `entry().or_insert_with(...)`. Our fan-out gives each rayon task a
+///   unique chrom, so this is belt-and-suspenders rather than load-
+///   bearing.
+///
+/// Per-chrom failures (chrom absent from this reader's index, e.g. a
+/// trimmed test fixture) are silently dropped — the same swallow-and-
+/// continue semantics as the lazy fill path.
+pub(super) fn warm_cache(fasta: &FastaReader) {
+    let assembly = fasta.assembly();
+    PRIMARY_UCSC_CHROMS.par_iter().for_each(|chrom| {
+        let _ = sq_curie(assembly, chrom, fasta);
+    });
 }
 
 #[cfg(test)]

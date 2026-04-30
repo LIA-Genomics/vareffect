@@ -25,6 +25,7 @@ targets = [
 base64        = { workspace = true }
 coitrees      = { workspace = true }
 memmap2       = { workspace = true }
+rayon         = { workspace = true }
 rmp-serde     = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
@@ -32,5 +33,4 @@ sha2          = { workspace = true }
 thiserror     = { workspace = true }
 
 [dev-dependencies]
-rayon    = { workspace = true }
 tempfile = { workspace = true }

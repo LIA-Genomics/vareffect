@@ -31,14 +31,27 @@ use std::path::Path;
 
 use vareffect::{AnnotateOptions, Assembly, FastaReader, TranscriptStore, VarEffect};
 
-/// Options used by every test in this file: VRS emission enabled.
+/// Options used by most tests in this file: both VRS schemas enabled.
 /// `AnnotateOptions` is `#[non_exhaustive]` so we mutate via field
 /// access on a default-constructed value rather than struct-literal
 /// syntax (which is rejected for non-exhaustive types from outside the
 /// defining crate).
 fn vrs_on() -> AnnotateOptions {
     let mut o = AnnotateOptions::default();
-    o.emit_vrs_ids = true;
+    o.emit_vrs_v1 = true;
+    o.emit_vrs_v2 = true;
+    o
+}
+
+fn only_v1() -> AnnotateOptions {
+    let mut o = AnnotateOptions::default();
+    o.emit_vrs_v1 = true;
+    o
+}
+
+fn only_v2() -> AnnotateOptions {
+    let mut o = AnnotateOptions::default();
+    o.emit_vrs_v2 = true;
     o
 }
 
@@ -287,5 +300,59 @@ fn different_chroms_get_different_vrs_ids_at_same_coords() {
         id_chr19, id_chr1,
         "chr1 and chr19 must produce different VRS IDs even at the same coordinate \
          (regression check for cross-chrom SQ-digest aliasing)"
+    );
+}
+
+#[ignore]
+#[test]
+fn only_v2_emitted_when_only_v2_requested() {
+    let ve = build_var_effect();
+    let (r, a) = snv_on_chr19(&ve, 55_181_319);
+    let result = ve
+        .annotate_with_options(
+            Assembly::GRCh38,
+            "chr19",
+            55_181_319,
+            &[r],
+            &[a],
+            &only_v2(),
+        )
+        .expect("annotate with only v2");
+
+    assert!(
+        result.vrs_id.is_none(),
+        "VRS 1.3 ID must be None when only v2 requested, got {:?}",
+        result.vrs_id,
+    );
+    assert!(
+        result.vrs_id_v2.is_some(),
+        "VRS 2.0 ID must be Some when v2 requested",
+    );
+}
+
+#[ignore]
+#[test]
+fn only_v1_emitted_when_only_v1_requested() {
+    let ve = build_var_effect();
+    let (r, a) = snv_on_chr19(&ve, 55_181_319);
+    let result = ve
+        .annotate_with_options(
+            Assembly::GRCh38,
+            "chr19",
+            55_181_319,
+            &[r],
+            &[a],
+            &only_v1(),
+        )
+        .expect("annotate with only v1");
+
+    assert!(
+        result.vrs_id.is_some(),
+        "VRS 1.3 ID must be Some when v1 requested",
+    );
+    assert!(
+        result.vrs_id_v2.is_none(),
+        "VRS 2.0 ID must be None when only v1 requested, got {:?}",
+        result.vrs_id_v2,
     );
 }
