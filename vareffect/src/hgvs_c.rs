@@ -324,7 +324,7 @@ fn is_duplication(
         }
     };
 
-    let ref_seq = fasta.fetch_sequence(chrom, fetch_start, fetch_end)?;
+    let ref_seq = fasta.fetch_sequence_slice(chrom, fetch_start, fetch_end)?;
     Ok(ref_seq == inserted_bases)
 }
 

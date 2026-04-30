@@ -186,13 +186,13 @@ pub(crate) fn fetch_cds_sequence(
             Strand::Minus => (seg.genomic_end - local_end, seg.genomic_end - local_start),
         };
 
-        let chunk = fasta.fetch_sequence(chrom, gstart, gend)?;
+        let chunk = fasta.fetch_sequence_slice(chrom, gstart, gend)?;
         match transcript.strand {
-            Strand::Plus => seq.extend_from_slice(&chunk),
+            Strand::Plus => seq.extend_from_slice(chunk),
             Strand::Minus => {
                 // Plus-strand ascending genomic bytes → reverse complement
                 // for coding strand in 5'→3' transcript order.
-                let rc = crate::codon::reverse_complement(&chunk);
+                let rc = crate::codon::reverse_complement(chunk);
                 seq.extend_from_slice(&rc);
             }
         }

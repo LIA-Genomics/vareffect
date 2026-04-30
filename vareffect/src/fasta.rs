@@ -560,16 +560,21 @@ impl FastaReader {
         Some(arc)
     }
 
-    /// Fetch a genomic sequence as uppercase ASCII bytes.
+    /// Fetch a genomic sequence as a borrowed slice into the underlying mmap.
     ///
-    /// Coordinates are 0-based half-open `[start, end)`. The returned
-    /// sequence is the plus-strand reference — strand-aware complementing
-    /// is the caller's responsibility (see `crate::types::Strand`).
+    /// Coordinates are 0-based half-open `[start, end)`. The returned slice
+    /// is the plus-strand reference — strand-aware complementing is the
+    /// caller's responsibility (see `crate::types::Strand`).
     ///
     /// The flat binary stores uppercase bases only, so the returned bytes
     /// are always uppercase IUPAC nucleotide codes (typically `A`/`C`/`G`/
     /// `T`/`N`, occasionally ambiguity codes like `M`/`R`/`Y` in some
     /// GRCh38 patch regions).
+    ///
+    /// This is a zero-copy view into the memory-mapped genome — no
+    /// allocation, no memcpy. Prefer this over [`Self::fetch_sequence`]
+    /// for read-only scans (3' shift probes, duplication checks, codon
+    /// stitching) that don't need to outlive the borrow.
     ///
     /// # Errors
     ///
@@ -577,12 +582,12 @@ impl FastaReader {
     ///   genome index.
     /// * [`VarEffectError::CoordinateOutOfRange`] if `start >= end` or `end`
     ///   exceeds the chromosome length.
-    pub fn fetch_sequence(
+    pub fn fetch_sequence_slice(
         &self,
         chrom: &str,
         start: u64,
         end: u64,
-    ) -> Result<Vec<u8>, VarEffectError> {
+    ) -> Result<&[u8], VarEffectError> {
         let translated = self.translate_chrom(chrom);
 
         let &(offset, length) =
@@ -604,7 +609,25 @@ impl FastaReader {
         // Bounds validated — mmap indexing cannot panic.
         let slice_start = (offset + start) as usize;
         let slice_end = (offset + end) as usize;
-        Ok(self.mmap[slice_start..slice_end].to_vec())
+        Ok(&self.mmap[slice_start..slice_end])
+    }
+
+    /// Fetch a genomic sequence as uppercase ASCII bytes (owned copy).
+    ///
+    /// Coordinates are 0-based half-open `[start, end)`. See
+    /// [`Self::fetch_sequence_slice`] for a zero-copy alternative when
+    /// ownership is not required.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::fetch_sequence_slice`].
+    pub fn fetch_sequence(
+        &self,
+        chrom: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, VarEffectError> {
+        Ok(self.fetch_sequence_slice(chrom, start, end)?.to_vec())
     }
 
     /// Fetch a genomic sequence as raw ASCII bytes.

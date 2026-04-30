@@ -60,7 +60,7 @@ pub(crate) fn compute_3prime_shift_deletion(
             if fetch_end <= del_end {
                 return Ok(0); // no room to shift
             }
-            let seq = fasta.fetch_sequence(chrom, del_start, fetch_end)?;
+            let seq = fasta.fetch_sequence_slice(chrom, del_start, fetch_end)?;
             let dl = del_len as usize;
             let mut shift = 0usize;
             // seq[shift] = ref[del_start + shift]
@@ -89,7 +89,7 @@ pub(crate) fn compute_3prime_shift_deletion(
             if fetch_start >= del_start {
                 return Ok(0); // no room to shift
             }
-            let seq = fasta.fetch_sequence(chrom, fetch_start, del_end)?;
+            let seq = fasta.fetch_sequence_slice(chrom, fetch_start, del_end)?;
             let ds = (del_start - fetch_start) as usize;
             let de = (del_end - fetch_start) as usize;
             let mut shift = 0usize;
@@ -157,7 +157,7 @@ pub(crate) fn compute_3prime_shift_insertion(
             if fetch_end <= ins_pos {
                 return Ok(0);
             }
-            let seq = fasta.fetch_sequence(chrom, ins_pos, fetch_end)?;
+            let seq = fasta.fetch_sequence_slice(chrom, ins_pos, fetch_end)?;
             let mut shift = 0usize;
             while shift < seq.len() {
                 if seq[shift] != inserted_bases[shift % ins_len] {
@@ -189,7 +189,7 @@ pub(crate) fn compute_3prime_shift_insertion(
             if fetch_start >= ins_pos {
                 return Ok(0);
             }
-            let seq = fasta.fetch_sequence(chrom, fetch_start, ins_pos)?;
+            let seq = fasta.fetch_sequence_slice(chrom, fetch_start, ins_pos)?;
             let mut shift = 0usize;
             while shift < seq.len() {
                 // Walk backward from ins_pos - 1: seq[seq.len() - 1 - shift]
