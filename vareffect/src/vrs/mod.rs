@@ -138,22 +138,25 @@ mod tests {
     }
 
     fn both_on() -> AnnotateOptions {
-        let mut o = AnnotateOptions::default();
-        o.emit_vrs_v1 = true;
-        o.emit_vrs_v2 = true;
-        o
+        AnnotateOptions {
+            emit_vrs_v1: true,
+            emit_vrs_v2: true,
+            ..Default::default()
+        }
     }
 
     fn only_v1() -> AnnotateOptions {
-        let mut o = AnnotateOptions::default();
-        o.emit_vrs_v1 = true;
-        o
+        AnnotateOptions {
+            emit_vrs_v1: true,
+            ..Default::default()
+        }
     }
 
     fn only_v2() -> AnnotateOptions {
-        let mut o = AnnotateOptions::default();
-        o.emit_vrs_v2 = true;
-        o
+        AnnotateOptions {
+            emit_vrs_v2: true,
+            ..Default::default()
+        }
     }
 
     #[test]
