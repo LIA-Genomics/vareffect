@@ -227,21 +227,21 @@ opt-in `AnnotateOptions::emit_vrs_v1` / `emit_vrs_v2` flags eliminate this
 for clients that do not need VRS, but the cost is still worth attacking
 when it is on.
 
-### V1. Eager parallel SQ-digest fill — DONE
+### Eager parallel SQ-digest fill (shipped)
 
 Shipped as `VarEffect::warm_vrs_cache(assembly)`. Fans the 25 primary-contig
 SHA-512 hashes across rayon's pool out of the hot path. Lazy fill remains
 the default; eager warm is opt-in for callers about to enter a VRS-emitting
 batch.
 
-### V2. Per-schema VRS opt-in — DONE
+### Per-schema VRS opt-in (shipped)
 
 Shipped as independent `emit_vrs_v1` / `emit_vrs_v2` flags on
 `AnnotateOptions` (replacing the single master `emit_vrs_ids`). Each
 schema's serialize step is gated on its own flag; the shared upstream
 (VOCA + SQ digest) runs once even when both are on.
 
-### V3. Direct-to-bytes serialization
+### Direct-to-bytes serialization
 
 **File:** `vareffect/src/vrs/serialize.rs`
 
@@ -271,8 +271,8 @@ For the indel-heavy GRCh37 path the user is investigating, the order is:
    only when the per-transcript cost is already minimized.
 7. **#6** any time; correctness benefit independent of perf.
 
-For VRS-on workflows, V1 and V2 have shipped. **V3** (direct-to-bytes
-serialization) is the remaining polish layer.
+For VRS-on workflows, the SQ-digest warm and per-schema opt-in have
+shipped. Direct-to-bytes serialization is the remaining polish layer.
 
 ## Validation
 

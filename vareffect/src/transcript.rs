@@ -64,10 +64,10 @@ pub struct TranscriptStore {
 /// about. Other fields (sha256, build_at, etc.) are silently ignored.
 #[derive(Debug, Deserialize)]
 struct StoreManifest {
-    /// Reference build identifier — `"GRCh38"` or `"GRCh37"`. Pre-Stage-A
-    /// builds did not record this; loaders treat absence as a hard error
-    /// rather than defaulting to GRCh38, since defaulting would let a
-    /// GRCh37 dataset load under the wrong chrom table.
+    /// Reference build identifier — `"GRCh38"` or `"GRCh37"`. Loaders
+    /// treat absence as a hard error rather than defaulting to GRCh38,
+    /// since defaulting would let a GRCh37 dataset load under the wrong
+    /// chrom table.
     assembly: Option<String>,
 }
 
@@ -85,7 +85,7 @@ impl TranscriptStore {
     /// * [`VarEffectError::Deserialize`] if the MessagePack payload is
     ///   malformed or the wrong type.
     /// * [`VarEffectError::AssemblyMissingFromManifest`] if the sibling
-    ///   manifest exists but has no `assembly` field — pre-Stage-A binaries
+    ///   manifest exists but has no `assembly` field — older binaries
     ///   must be rebuilt via `vareffect setup`. Defaulting to GRCh38 here
     ///   would let a GRCh37 dataset load under the wrong chrom table.
     /// * [`VarEffectError::Malformed`] if the manifest's `assembly` value is

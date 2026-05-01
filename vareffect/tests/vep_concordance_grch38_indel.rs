@@ -58,10 +58,6 @@ use std::path::Path;
 
 use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure (same pattern as vep_concordance_snv.rs)
-// ---------------------------------------------------------------------------
-
 /// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
 /// falls back to `data/vareffect/transcript_models_grch38.bin` under the
 /// workspace root (derived from `CARGO_MANIFEST_DIR`).
@@ -100,10 +96,6 @@ fn load_fasta() -> FastaReader {
     )
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
-
-// ---------------------------------------------------------------------------
-// Expected output fixture
-// ---------------------------------------------------------------------------
 
 /// Expected output for one indel/MNV variant, derived from the VEP REST API.
 /// All coordinate fields use VEP conventions (1-based for CDS/cDNA/protein
@@ -158,15 +150,7 @@ struct Expected {
     hgvs_p: Option<&'static str>,
 }
 
-// ---------------------------------------------------------------------------
-// Ground truth from VEP REST API (GRCh38, refseq=1, numbers=1)
-// ---------------------------------------------------------------------------
-
 const VARIANTS: &[Expected] = &[
-    // -----------------------------------------------------------------------
-    // Category 1: Frameshifts (5 variants)
-    // -----------------------------------------------------------------------
-
     // #1 — BRCA1 c.68_69del: minus-strand 2bp deletion (185delAG), ClinVar 17662
     // VEP query: NM_007294.4:c.68_69del
     // Genomic: chr17:43124028-43124029 (1-based), deleted CT on plus strand
@@ -304,10 +288,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 2: Inframe indels (3 variants)
-    // -----------------------------------------------------------------------
-
     // #6 — CFTR c.1521_1523del (deltaF508): plus-strand 3bp inframe del, ClinVar 7105
     // VEP query: NM_000492.4:c.1521_1523del
     // Genomic: chr7:117559592-117559594 (1-based), deleted CTT on plus strand
@@ -389,10 +369,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 3: Splice site overlap (5 variants)
-    // -----------------------------------------------------------------------
-
     // #9 — TP53 c.782+1del: splice donor deletion (minus-strand)
     // VEP query: NM_000546.6:c.782+1del
     // Genomic: chr17:7674180 (1-based), deleted C on plus strand (G on coding)
@@ -532,10 +508,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: Some(&["frameshift_variant"]),
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 4: Boundary-spanning deletions (2 variants)
-    // -----------------------------------------------------------------------
-
     // #14 — BRCA2 c.680_681+3del: exon-into-intron boundary deletion (donor)
     // VEP query: NM_000059.4:c.680_681+3del
     // Genomic: chr13:32329491-32329495 (1-based), deleted CTGTA, plus strand
@@ -598,10 +570,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 5: MNVs / delins (3 variants)
-    // -----------------------------------------------------------------------
-
     // #16 — TP53 c.742_743delinsTT: 2bp MNV within single codon (R248 region)
     // VEP query: NM_000546.6:c.742_743delinsTT
     // Genomic: chr17:7674220-7674221 (1-based), plus strand CG -> AA
@@ -687,10 +655,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 6: Non-CDS indels (3 variants)
-    // -----------------------------------------------------------------------
-
     // #19 — TP53 c.-20del: 5'UTR deletion (minus-strand)
     // VEP query: NM_000546.6:c.-20del
     // Genomic: chr17:7676614 (1-based), deleted G on plus strand (C on coding)
@@ -773,10 +737,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 7: Edge cases (4 variants)
-    // -----------------------------------------------------------------------
-
     // #22 — TP53 c.1_3del: start codon deletion (minus-strand)
     // VEP query: NM_000546.6:c.1_3del
     // Genomic: chr17:7676592-7676594 (1-based), deleted CAT on plus strand
@@ -889,10 +849,6 @@ const VARIANTS: &[Expected] = &[
         vep_consequence: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 8: Hard cases (3 variants)
-    // -----------------------------------------------------------------------
-
     // #26 — BRCA2 c.6275_6276del: plus-strand 2bp frameshift, ClinVar rs11571658
     // VEP query: NM_000059.4:c.6275_6276del
     // Genomic: chr13:32340630-32340631 (1-based), deleted TT on plus strand
@@ -979,10 +935,6 @@ const VARIANTS: &[Expected] = &[
         hgvs_p: None,
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Comparison logic
-// ---------------------------------------------------------------------------
 
 /// Compare a single variant's `annotate()` output against expected VEP values.
 /// Returns a list of field-level mismatches (empty = pass).
@@ -1120,10 +1072,6 @@ fn check_variant(ve: &VarEffect, exp: &Expected) -> Result<Vec<String>, String> 
 
     Ok(mismatches)
 }
-
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
 
 /// Run all 28 VEP concordance variants. Each variant is annotated with
 /// [`annotate()`] (the full VCF-input dispatcher) and compared field-by-field

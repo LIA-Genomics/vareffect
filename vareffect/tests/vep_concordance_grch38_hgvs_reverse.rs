@@ -48,10 +48,6 @@ use std::path::Path;
 
 use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect, VarEffectError};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure
-// ---------------------------------------------------------------------------
-
 /// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
 /// falls back to `data/vareffect/transcript_models_grch38.bin` under the
 /// workspace root (derived from `CARGO_MANIFEST_DIR`).
@@ -91,10 +87,6 @@ fn load_fasta() -> FastaReader {
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Expected output fixture
-// ---------------------------------------------------------------------------
-
 /// Expected output for one reverse-mapped variant.
 #[allow(dead_code)]
 struct ExpectedReverse {
@@ -116,14 +108,7 @@ struct ExpectedReverse {
     round_trip: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Ground truth from VEP REST API + Ensembl sequence API
-// ---------------------------------------------------------------------------
-
 const VARIANTS: &[ExpectedReverse] = &[
-    // -----------------------------------------------------------------------
-    // Category A: CDS substitutions -- plus and minus strand
-    // -----------------------------------------------------------------------
     //
     // VEP allele_string is coding-strand. For minus-strand, complement to get
     // the genomic plus-strand alleles that vareffect produces.
@@ -160,9 +145,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "A-cds-sub",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category B: CDS deletions
-    // -----------------------------------------------------------------------
     //
     // VCF convention: anchor base at (deleted_start - 1). Anchor bases
     // verified via Ensembl sequence API.
@@ -190,9 +172,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "B-cds-del",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category C: CDS duplications
-    // -----------------------------------------------------------------------
     //
     // HGVS dup -> VCF insertion. VEP allele_string for dups is coding-strand.
     // Plus strand: anchor = last dup base (gend).
@@ -225,9 +204,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "C-cds-dup",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category D: CDS insertions
-    // -----------------------------------------------------------------------
     //
     // VCF: anchor = min(g_left, g_right). Inserted bases on coding strand;
     // for plus-strand genes, coding = genomic.
@@ -257,9 +233,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "D-cds-ins",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category B (cont): large CDS deletion
-    // -----------------------------------------------------------------------
     ExpectedReverse {
         label: "#10 EGFR E746_A750del (plus, 15-base)",
         hgvs_input: "NM_005228.5:c.2235_2249del",
@@ -272,9 +245,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "B-cds-del",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category E: Intronic substitutions -- all 4 strand x side combinations
-    // -----------------------------------------------------------------------
     ExpectedReverse {
         label: "#11 TP53 splice donor c.672+1 (minus)",
         hgvs_input: "NM_000546.6:c.672+1G>A",
@@ -319,9 +289,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "E-intronic",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category F: UTR substitutions
-    // -----------------------------------------------------------------------
     //
     // Note: original spec had wrong ref alleles for #15-17. Corrected alleles
     // come from VEP error messages disclosing the actual reference bases.
@@ -369,9 +336,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         category: "F-utr",
         round_trip: false,
     },
-    // -----------------------------------------------------------------------
-    // Category G: Round-trip validation
-    // -----------------------------------------------------------------------
     //
     // Same variants as #1 and #6, but with round_trip enabled: resolve ->
     // annotate -> find transcript -> compare hgvs_c with original input.
@@ -396,10 +360,6 @@ const VARIANTS: &[ExpectedReverse] = &[
         round_trip: true,
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Test runner
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

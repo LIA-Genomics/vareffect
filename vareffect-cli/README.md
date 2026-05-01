@@ -213,8 +213,8 @@ vareffect build-transcripts \
 
 ## Disk requirements
 
-| Phase | Disk |
-|-------|------|
+| When | Disk |
+|------|------|
 | During first `setup` | ~7 GB peak |
 | After `setup` (runtime only) | ~3 GB |
 

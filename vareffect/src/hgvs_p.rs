@@ -113,10 +113,6 @@ pub(crate) fn format_hgvs_p_snv(
     None
 }
 
-// ---------------------------------------------------------------------------
-// Indel / complex-variant primitives
-// ---------------------------------------------------------------------------
-
 /// Concatenate three-letter amino acid codes for a slice of one-letter codes.
 ///
 /// # Examples
@@ -259,10 +255,6 @@ fn fetch_3prime_utr_coding_seq(
 
     Ok(utr_seq)
 }
-
-// ---------------------------------------------------------------------------
-// Indel / complex-variant formatters
-// ---------------------------------------------------------------------------
 
 /// Generate HGVS p. notation for a frameshift variant.
 ///
@@ -923,10 +915,6 @@ fn truncate_at_stop(aas: &[u8]) -> &[u8] {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,10 +1035,6 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // -----------------------------------------------------------------------
-    // Primitives
-    // -----------------------------------------------------------------------
-
     #[test]
     fn format_aa_sequence_basic() {
         assert_eq!(format_aa_sequence(b"GSK"), "GlySerLys");
@@ -1101,10 +1085,6 @@ mod tests {
         let ref_prot3 = b"MWSSSSHD";
         assert_eq!(apply_protein_3prime_rule(ref_prot3, 2, 2), 4);
     }
-
-    // -----------------------------------------------------------------------
-    // Inframe deletion
-    // -----------------------------------------------------------------------
 
     #[test]
     fn inframe_del_single() {
@@ -1159,10 +1139,6 @@ mod tests {
         assert_eq!(result.as_deref(), Some("p.Met1?"));
     }
 
-    // -----------------------------------------------------------------------
-    // Inframe insertion
-    // -----------------------------------------------------------------------
-
     #[test]
     fn inframe_ins_simple() {
         // ref=[K], alt=[K,Q,S,K], protein_start=2, right_flanking=M
@@ -1192,10 +1168,6 @@ mod tests {
         );
         assert_eq!(result.as_deref(), Some("p.Pro2_Ile3insGlyTer"));
     }
-
-    // -----------------------------------------------------------------------
-    // Delins / MNV
-    // -----------------------------------------------------------------------
 
     #[test]
     fn delins_shrink() {

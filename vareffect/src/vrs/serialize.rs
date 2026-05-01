@@ -259,9 +259,6 @@ mod tests {
         assert!(id.starts_with("ga4gh:VA."));
     }
 
-    // -----------------------------------------------------------------
-    // Cross-implementation correctness (vrs-python golden vectors)
-    // -----------------------------------------------------------------
     //
     // Inputs and expected bytes/digests below are copied verbatim from
     // vrs-python's `tests/test_vrs.py::test_vr` (commit on `main` as of

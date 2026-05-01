@@ -218,10 +218,6 @@ fn serialize_and_finalize_with_assembly(
     Ok((output, data_len))
 }
 
-// ---------------------------------------------------------------------------
-// GFF3 parsing
-// ---------------------------------------------------------------------------
-
 /// Parse a NCBI RefSeq / MANE GFF3 file into `Vec<TranscriptModel>`,
 /// sorted by accession for deterministic MessagePack output.
 ///
@@ -855,10 +851,6 @@ fn biotype_for(accession: &str, gene_biotype: Option<&str>) -> Biotype {
         Biotype::Unknown
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -44,10 +44,6 @@ use std::path::PathBuf;
 
 use vareffect::{Assembly, ConsequenceResult, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure
-// ---------------------------------------------------------------------------
-
 /// Build a `VarEffect` instance with the GRCh37 store + reference loaded
 /// from env vars.
 fn open_grch37() -> VarEffect {
@@ -92,10 +88,6 @@ fn find_result_for_transcript<'a>(
         .map(|r| (r, true))
 }
 
-// ---------------------------------------------------------------------------
-// Expected fixture struct
-// ---------------------------------------------------------------------------
-
 /// Expected output for one variant–transcript pair, derived from the VEP
 /// REST API. Coordinate fields use VEP's conventions (1-based for
 /// CDS/cDNA/protein); `pos` is 0-based per vareffect's annotate API.
@@ -125,10 +117,6 @@ struct Expected {
     /// non-CDS variants.
     hgvs_p: Option<&'static str>,
 }
-
-// ---------------------------------------------------------------------------
-// Ground truth from VEP REST API (GRCh37, captured 2026-04-30)
-// ---------------------------------------------------------------------------
 
 const VARIANTS: &[Expected] = &[
     // #1 — TP53 R175L: minus-strand missense at the c.524 position.
@@ -203,10 +191,6 @@ const VARIANTS: &[Expected] = &[
         hgvs_p: Some("p.Arg273Ser"),
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Comparison
-// ---------------------------------------------------------------------------
 
 fn check_variant(ve: &VarEffect, exp: &Expected) -> Result<Vec<String>, String> {
     let result = ve
@@ -309,10 +293,6 @@ fn check_variant(ve: &VarEffect, exp: &Expected) -> Result<Vec<String>, String> 
 
     Ok(mismatches)
 }
-
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

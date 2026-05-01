@@ -197,7 +197,6 @@ fn run_one_assembly(
         );
     }
 
-    // -- Step 1/3: Flat binary reference genome -------------------------
     if !models_only {
         eprintln!(
             "{}",
@@ -222,7 +221,6 @@ fn run_one_assembly(
         eprintln!();
     }
 
-    // -- Step 2/3: Patch-chrom aliases ---------------------------------
     let aliases_path = if !fasta_only {
         eprintln!("{}", style("[2/3] Patch-chrom aliases").bold());
 
@@ -258,7 +256,6 @@ fn run_one_assembly(
         None
     };
 
-    // -- Step 3/3: Transcript models ------------------------------------
     if !fasta_only {
         eprintln!("{}", style("[3/3] Transcript models").bold());
 

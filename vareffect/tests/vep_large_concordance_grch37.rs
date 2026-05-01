@@ -53,10 +53,6 @@ use std::time::Instant;
 use rayon::prelude::*;
 use vareffect::{Assembly, ConsequenceResult, FastaReader, TranscriptStore, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Paths and constants
-// ---------------------------------------------------------------------------
-
 const CONSEQUENCE_THRESHOLD: f64 = 0.95;
 
 const GRANULAR_SPLICE_TERMS: &[&str] = &[
@@ -88,10 +84,6 @@ fn mismatches_log_path() -> PathBuf {
         .join("vep_large_concordance_grch37_mismatches.log")
 }
 
-// ---------------------------------------------------------------------------
-// Bring-up
-// ---------------------------------------------------------------------------
-
 fn load_store() -> TranscriptStore {
     let path = std::env::var("GRCH37_TRANSCRIPTS").unwrap_or_else(|_| {
         workspace_root()
@@ -118,10 +110,6 @@ fn load_fasta() -> FastaReader {
     )
     .unwrap_or_else(|e| panic!("failed to open GRCh37 FASTA at {path}: {e}"))
 }
-
-// ---------------------------------------------------------------------------
-// TSV parsing
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct VepGroundTruth {
@@ -189,10 +177,6 @@ fn parse_tsv(path: &Path) -> Vec<VepGroundTruth> {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Comparison
-// ---------------------------------------------------------------------------
 
 fn normalize_vep_consequences(terms: &[String]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -320,10 +304,6 @@ fn compare_variant(vep: &VepGroundTruth, ve_results: &[ConsequenceResult]) -> Ou
         detail,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Stats and reporting
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Stats {
@@ -517,20 +497,12 @@ fn print_report(stats: &Stats, elapsed_secs: f64, num_threads: usize) {
     eprintln!("============================================================");
 }
 
-// ---------------------------------------------------------------------------
-// Per-row outcome emitted by the parallel phase
-// ---------------------------------------------------------------------------
-
 enum RowResult {
     SkippedNoRefseq,
     VareffectError,
     VareffectPanic { lineno: usize, message: String },
     Completed { lineno: usize, outcome: Outcome },
 }
-
-// ---------------------------------------------------------------------------
-// Test entry point
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

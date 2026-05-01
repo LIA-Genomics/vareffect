@@ -23,10 +23,6 @@ use crate::locate::helpers::{
 use crate::locate::{LocateIndex, SpliceSide, VariantLocation, locate_variant};
 use crate::types::{Strand, TranscriptModel};
 
-// ---------------------------------------------------------------------------
-// HgvsPosition — internal representation of a c./n. position component
-// ---------------------------------------------------------------------------
-
 /// HGVS c./n. position before string formatting.
 ///
 /// Intronic positions are NOT represented here; they are formatted by
@@ -54,10 +50,6 @@ impl fmt::Display for HgvsPosition {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Intronic position formatting
-// ---------------------------------------------------------------------------
-
 /// Format an HGVS position string, including intronic offset if present.
 ///
 /// For exonic positions: returns e.g. `"742"`, `"-15"`, `"*42"`.
@@ -72,10 +64,6 @@ fn format_position(anchor: &HgvsPosition, intronic_offset: Option<i64>) -> Strin
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Exon boundary anchor computation
-// ---------------------------------------------------------------------------
 
 /// Compute the HGVS anchor position for an exon boundary flanking an intron.
 ///
@@ -163,10 +151,6 @@ fn exon_boundary_hgvs_anchor(
         Ok(HgvsPosition::Cds(cds.cds_offset + 1))
     }
 }
-
-// ---------------------------------------------------------------------------
-// VariantLocation -> HGVS position string
-// ---------------------------------------------------------------------------
 
 /// Convert a `VariantLocation` to a formatted HGVS position string.
 ///
@@ -280,10 +264,6 @@ fn position_for_genomic(
     position_for_variant_location(&loc, transcript, index)
 }
 
-// ---------------------------------------------------------------------------
-// Duplication detection
-// ---------------------------------------------------------------------------
-
 /// Check if an insertion should be described as a duplication.
 ///
 /// An insertion is a dup when the inserted sequence matches the reference
@@ -328,10 +308,6 @@ fn is_duplication(
     Ok(ref_seq == inserted_bases)
 }
 
-// ---------------------------------------------------------------------------
-// Coding-strand allele formatting
-// ---------------------------------------------------------------------------
-
 /// Convert a single VCF (plus-strand) base to coding-strand uppercase char.
 fn coding_strand_base(base: u8, strand: Strand) -> char {
     let b = match strand {
@@ -354,10 +330,6 @@ fn coding_strand_seq(bases: &[u8], strand: Strand) -> String {
             .collect(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public formatting functions
-// ---------------------------------------------------------------------------
 
 /// Format HGVS c./n. notation for an SNV.
 ///
@@ -597,10 +569,6 @@ pub(crate) fn format_delins_hgvs(
         )))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
 
 /// Format a duplication notation.
 fn format_duplication(

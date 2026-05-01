@@ -63,10 +63,6 @@ use std::time::Instant;
 use rayon::prelude::*;
 use vareffect::{Assembly, ConsequenceResult, FastaReader, TranscriptStore, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Paths and constants
-// ---------------------------------------------------------------------------
-
 /// Hard lower bound on consequence concordance. Below this the test fails.
 /// Tighten to 0.99 once divergences are triaged.
 const CONSEQUENCE_THRESHOLD: f64 = 0.95;
@@ -111,10 +107,6 @@ fn store_accessions_path() -> PathBuf {
         .join("store_accessions.txt")
 }
 
-// ---------------------------------------------------------------------------
-// Test infrastructure (copied from vep_concordance_indel.rs for consistency)
-// ---------------------------------------------------------------------------
-
 fn load_store() -> TranscriptStore {
     let path = std::env::var("GRCH38_TRANSCRIPTS").unwrap_or_else(|_| {
         workspace_root()
@@ -141,10 +133,6 @@ fn load_fasta() -> FastaReader {
     )
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
-
-// ---------------------------------------------------------------------------
-// TSV parsing
-// ---------------------------------------------------------------------------
 
 /// One row of ground truth from the Python generator.
 ///
@@ -234,10 +222,6 @@ fn parse_tsv(path: &Path) -> Vec<VepGroundTruth> {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Comparison
-// ---------------------------------------------------------------------------
 
 /// Normalise VEP's consequence set into vareffect's vocabulary.
 ///
@@ -406,10 +390,6 @@ fn compare_variant(vep: &VepGroundTruth, ve_results: &[ConsequenceResult]) -> Ou
         detail,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Stats {
@@ -616,14 +596,10 @@ fn mismatch_pattern_key(cmp: &Comparison) -> String {
     dims.join("+")
 }
 
-// ---------------------------------------------------------------------------
-// Parallel annotation result
-// ---------------------------------------------------------------------------
-
-/// Per-row result produced during the parallel annotation phase.
+/// Per-row result from the parallel annotation pass.
 ///
 /// Carries all data needed for sequential stats accumulation so the parallel
-/// phase is pure map (no shared mutable state).
+/// pass is pure map (no shared mutable state).
 enum RowResult {
     /// VEP returned no RefSeq transcript for this variant.
     SkippedNoRefseq,
@@ -634,10 +610,6 @@ enum RowResult {
     /// Annotation succeeded; `outcome` carries the comparison result.
     Completed { lineno: usize, outcome: Outcome },
 }
-
-// ---------------------------------------------------------------------------
-// Test entry point
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]
@@ -700,10 +672,7 @@ fn vep_large_concordance_grch38() {
 
     let start = Instant::now();
 
-    // Phase 1 — Parallel annotation + comparison.
-    //
-    // Each row is independently annotated and compared. The VarEffect
-    // instance is read-only (`Send + Sync` via Arc<Mmap>, Arc<[T]>),
+    // VarEffect is read-only (`Send + Sync` via Arc<Mmap>, Arc<[T]>),
     // so `&ve` is safely shared across rayon worker threads.
     let row_results: Vec<RowResult> = pool.install(|| {
         ground_truth
@@ -749,7 +718,6 @@ fn vep_large_concordance_grch38() {
     // Restore the default panic hook now that the scan is done.
     panic::set_hook(prev_hook);
 
-    // Phase 2 — Sequential stats accumulation.
     let mut stats = Stats {
         total_tsv_rows: ground_truth.len(),
         ..Stats::default()

@@ -133,10 +133,6 @@ impl VarEffect {
         VarEffectBuilder::default()
     }
 
-    // -----------------------------------------------------------------
-    // Slot-aware accessors
-    // -----------------------------------------------------------------
-
     fn handles(&self, assembly: Assembly) -> Result<&AssemblyHandles, VarEffectError> {
         let (slot, name) = match assembly {
             Assembly::GRCh38 => (self.grch38.as_ref(), "grch38"),
@@ -201,10 +197,6 @@ impl VarEffect {
         crate::vrs::warm_cache(&h.fasta);
         Ok(())
     }
-
-    // -----------------------------------------------------------------
-    // Variant annotation
-    // -----------------------------------------------------------------
 
     /// Annotate a variant against every overlapping transcript in the
     /// requested assembly's transcript store.
@@ -399,10 +391,6 @@ impl VarEffect {
         crate::hgvs_reverse::resolve_hgvs_c_with_meta(hgvs, &h.transcripts, &h.fasta)
     }
 
-    // -----------------------------------------------------------------
-    // FastaReader forwarders (slot-aware)
-    // -----------------------------------------------------------------
-
     /// Fetch a single base at the given 0-based position from the chosen
     /// assembly's reference. ~5 ns with the mmap backend.
     pub fn fetch_base(
@@ -455,10 +443,6 @@ impl VarEffect {
             })
             .and_then(|h| h.fasta.chrom_length(chrom))
     }
-
-    // -----------------------------------------------------------------
-    // FASTA-driven helpers (slot-aware)
-    // -----------------------------------------------------------------
 
     /// Anchor-prepend HGVS-style indel alleles to VCF form using the chosen
     /// assembly's reference genome.
@@ -582,10 +566,6 @@ impl VarEffect {
         }
     }
 
-    // -----------------------------------------------------------------
-    // TranscriptStore forwarders (slot-aware)
-    // -----------------------------------------------------------------
-
     /// Direct lookup by full versioned accession in the chosen assembly's
     /// store (e.g. `"NM_000546.6"`).
     pub fn get_by_accession(
@@ -615,10 +595,6 @@ impl VarEffect {
             .query_overlap(chrom, start, end))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// Builder for [`VarEffect`]. Use [`VarEffect::builder`] to obtain one,
 /// attach assemblies via [`VarEffectBuilder::with_grch38`] /

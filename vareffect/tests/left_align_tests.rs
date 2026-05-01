@@ -36,10 +36,6 @@ fn open_var_effect() -> VarEffect {
         .expect("builder")
 }
 
-// -----------------------------------------------------------------------
-// SNV / MNV passthrough — the algorithm's loop condition is the guard
-// -----------------------------------------------------------------------
-
 /// SNVs: rightmost bases differ immediately, shift loop never fires.
 #[test]
 #[ignore]
@@ -64,10 +60,6 @@ fn mnv_passthrough() {
     assert_eq!(result, None, "MNV should pass through unchanged");
 }
 
-// -----------------------------------------------------------------------
-// Already-leftmost — no shift needed
-// -----------------------------------------------------------------------
-
 /// A deletion NOT in a repetitive region should return None.
 #[test]
 #[ignore]
@@ -81,10 +73,6 @@ fn already_leftmost_deletion() {
         .expect("left_align_indel should not error");
     assert_eq!(result, None, "non-repeat deletion should be unchanged");
 }
-
-// -----------------------------------------------------------------------
-// Homopolymer shifts — the core use case
-// -----------------------------------------------------------------------
 
 /// Right-shifted 1bp deletion in a poly-A run should left-align.
 ///
@@ -142,10 +130,6 @@ fn homopolymer_insertion_shifts_left() {
     );
 }
 
-// -----------------------------------------------------------------------
-// Complex input that is really an indel post-trim
-// -----------------------------------------------------------------------
-
 /// `ref=ACG, alt=AG` — shared rightmost G triggers the shift loop,
 /// exposing a 1bp deletion of C. The algorithm handles this without
 /// a separate post-trim guard.
@@ -166,10 +150,6 @@ fn complex_becomes_deletion_after_shift() {
     // depending on the repeat context. The important thing is it
     // doesn't return None thinking it's an MNV.
 }
-
-// -----------------------------------------------------------------------
-// Idempotency — running twice gives the same result
-// -----------------------------------------------------------------------
 
 #[test]
 #[ignore]
@@ -193,10 +173,6 @@ fn idempotent() {
     // If first returned None, it was already leftmost — also idempotent.
 }
 
-// -----------------------------------------------------------------------
-// Boundary: position 1
-// -----------------------------------------------------------------------
-
 #[test]
 #[ignore]
 fn position_one_boundary() {
@@ -211,10 +187,6 @@ fn position_one_boundary() {
         result
     );
 }
-
-// -----------------------------------------------------------------------
-// VCF anchor base preserved after normalization
-// -----------------------------------------------------------------------
 
 #[test]
 #[ignore]

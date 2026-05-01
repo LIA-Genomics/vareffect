@@ -33,10 +33,6 @@ use std::path::Path;
 
 use vareffect::{Assembly, FastaReader, TranscriptStore, annotate_snv};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure
-// ---------------------------------------------------------------------------
-
 /// Load the GRCh38 transcript store.
 ///
 /// Reads the path from `GRCH38_TRANSCRIPTS` (matching the GRCh37 sibling's
@@ -82,10 +78,6 @@ fn load_fasta() -> FastaReader {
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Expected VEP output fixture
-// ---------------------------------------------------------------------------
-
 /// Expected output for one variant-transcript pair, derived from the VEP REST
 /// API. All coordinate fields use VEP's conventions (1-based for CDS/cDNA/
 /// protein positions). The `pos` field is 0-based (vareffect convention).
@@ -125,15 +117,7 @@ struct Expected {
     hgvs_p: Option<&'static str>,
 }
 
-// ---------------------------------------------------------------------------
-// Ground truth from VEP REST API (GRCh38, refseq=1, numbers=1)
-// ---------------------------------------------------------------------------
-
 const VARIANTS: &[Expected] = &[
-    // -----------------------------------------------------------------------
-    // Category 1: Coding consequences (10 variants)
-    // -----------------------------------------------------------------------
-
     // #1 — TP53 R248W: minus-strand missense, hotspot
     // VEP query: 17:7674221/A
     Expected {
@@ -338,10 +322,6 @@ const VARIANTS: &[Expected] = &[
         intron: None,
         hgvs_p: Some("p.Ser261Arg"),
     },
-    // -----------------------------------------------------------------------
-    // Category 2: Splice and non-coding consequences (6 variants)
-    // -----------------------------------------------------------------------
-
     // #11 — Splice donor +1 (intronic, exon 7 donor side)
     // VEP query: 17:7674180/T
     Expected {
@@ -465,10 +445,6 @@ const VARIANTS: &[Expected] = &[
         intron: None,
         hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category 3: Edge cases (4 variants)
-    // -----------------------------------------------------------------------
-
     // #17 — 3' UTR (exon 11, after stop codon)
     // VEP query: 17:7669580/A
     Expected {
@@ -553,10 +529,6 @@ const VARIANTS: &[Expected] = &[
         hgvs_p: None,
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Comparison logic
-// ---------------------------------------------------------------------------
 
 /// Compare a single variant's `annotate_snv` output against the expected VEP
 /// values. Returns a list of field-level mismatches (empty = pass).
@@ -672,10 +644,6 @@ fn check_variant(
 
     Ok(mismatches)
 }
-
-// ---------------------------------------------------------------------------
-// Test
-// ---------------------------------------------------------------------------
 
 /// Run all 20 VEP concordance variants. Each variant is annotated with
 /// [`annotate_snv`] and compared field-by-field against VEP ground truth.

@@ -44,10 +44,6 @@ use std::path::Path;
 
 use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure (same pattern as vep_concordance_hgvs.rs)
-// ---------------------------------------------------------------------------
-
 /// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
 /// falls back to `data/vareffect/transcript_models_grch38.bin` under the
 /// workspace root (derived from `CARGO_MANIFEST_DIR`).
@@ -87,10 +83,6 @@ fn load_fasta() -> FastaReader {
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Expected output fixture
-// ---------------------------------------------------------------------------
-
 /// Expected output for one variant. Only `Some` fields are asserted;
 /// `None` fields are skipped.
 #[allow(dead_code)]
@@ -126,15 +118,7 @@ struct ExpectedAnnotation {
     category: &'static str,
 }
 
-// ---------------------------------------------------------------------------
-// Ground truth from VEP REST API + manual NMD computation
-// ---------------------------------------------------------------------------
-
 const VARIANTS: &[ExpectedAnnotation] = &[
-    // -----------------------------------------------------------------------
-    // Category A: 3' normalization — resolved divergences (2 variants)
-    // -----------------------------------------------------------------------
-
     // #1 — BRCA1 c.5266dup (5382insC): minus-strand single-base dup.
     //   CRITICAL: Ashkenazi founder variant. Tests `is_duplication()` on
     //   minus-strand (5' = higher genomic coords). VCF inserts G on plus
@@ -188,10 +172,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_nmd: None,
         category: "A: 3' norm (ins→dup, plus)",
     },
-    // -----------------------------------------------------------------------
-    // Category B: 3' normalization — deletions (2 variants)
-    // -----------------------------------------------------------------------
-
     // #3 — BRCA2 c.1813del: plus-strand single-base deletion in coding region.
     //   Tests 3' shift for a deletion in a mono-A run (if adjacent bases match).
     //   Source: hgvs test #11.
@@ -229,10 +209,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_nmd: None,
         category: "B: 3' norm (del, no shift, regression)",
     },
-    // -----------------------------------------------------------------------
-    // Category C: 3' normalization — insertions (2 variants)
-    // -----------------------------------------------------------------------
-
     // #5 — BRCA2 c.5946_5947insAA: plus-strand 2bp non-dup insertion.
     //   The 5' flanking 2 bases are "GT", which do not match "AA" → stays ins.
     //   Tests that non-dup insertions are not incorrectly converted.
@@ -274,10 +250,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_nmd: None,
         category: "C: 3' norm (ins, non-repeat, regression)",
     },
-    // -----------------------------------------------------------------------
-    // Category D: intergenic_variant (3 variants)
-    // -----------------------------------------------------------------------
-
     // #7 — Gene desert (chr5 PIK3R1-MAST4 gap): ~5 Mb gene desert.
     //   No RefSeq MANE transcripts overlap this position in the store.
     //   Must return exactly 1 ConsequenceResult with IntergenicVariant.
@@ -330,10 +302,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_nmd: None,
         category: "D: NOT intergenic (negative control)",
     },
-    // -----------------------------------------------------------------------
-    // Category E: predicts_nmd (8 variants)
-    // -----------------------------------------------------------------------
-
     // #10 — TP53 R196X: stop_gained early in CDS, NMD predicted.
     //   CDS position 586, in exon 5 (~seg[4]). Distance to last junction
     //   (1101) = 515 >> 50. NMD = true.
@@ -497,10 +465,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_nmd: Some(true),
         category: "E: NMD (boundary, dist=51, true)",
     },
-    // -----------------------------------------------------------------------
-    // Category F: Combined / synonymous (1 variant)
-    // -----------------------------------------------------------------------
-
     // #18 — TP53 R248R: synonymous variant, no NMD.
     //   predicts_nmd should only be true for PTC-producing variants
     //   (stop_gained, frameshift_variant). A synonymous SNV at any CDS
@@ -523,10 +487,6 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         category: "F: synonymous (no NMD)",
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Comparison logic
-// ---------------------------------------------------------------------------
 
 /// Compare a single variant's `annotate()` output against expected values.
 /// Returns `Ok(empty vec)` on full match, `Ok(non-empty)` with mismatch
@@ -636,10 +596,6 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>
 
     Ok(mismatches)
 }
-
-// ---------------------------------------------------------------------------
-// Test runner
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

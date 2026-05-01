@@ -79,13 +79,11 @@ struct Counters {
 pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     let start = Instant::now();
 
-    // -- 1. Configure rayon thread pool -----------------------------------
     rayon::ThreadPoolBuilder::new()
         .num_threads(config.threads)
         .build_global()
         .context("configuring rayon thread pool")?;
 
-    // -- 2. Load VarEffect ------------------------------------------------
     tracing::info!(assembly = %config.assembly, "loading vareffect data");
     let load_start = Instant::now();
     let mut builder = VarEffect::builder();
@@ -111,11 +109,9 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         load_elapsed.as_secs_f64() * 1000.0
     );
 
-    // -- 3. Open I/O ------------------------------------------------------
     let reader = vcf::open_reader(config.input)?;
     let mut writer = vcf::open_writer(config.output)?;
 
-    // -- 4. Progress bar --------------------------------------------------
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
@@ -124,11 +120,9 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     pb.enable_steady_tick(std::time::Duration::from_millis(200));
     pb.set_message("processing headers");
 
-    // -- 5. Process headers -----------------------------------------------
     let mut lines = reader.lines();
     process_headers(&mut lines, &mut writer)?;
 
-    // -- 6. Chunked parallel annotation -----------------------------------
     let annotate_start = Instant::now();
     let counters = Counters {
         annotated: AtomicU64::new(0),
@@ -160,7 +154,6 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
 
     writer.flush().context("flushing output")?;
 
-    // -- 7. Summary -------------------------------------------------------
     let annotate_elapsed = annotate_start.elapsed();
     let total_elapsed = start.elapsed();
     let annotated = counters.annotated.load(Ordering::Relaxed);

@@ -148,8 +148,8 @@ pub(super) const PROTEIN_ACCESSION_PREFIXES: &[&str] = &["NP_", "YP_", "XP_"];
 /// of mRNA `Note=` attributes contain it; 0 don't). One pattern is
 /// therefore enough.
 ///
-/// Future drift in NCBI's wording surfaces as a Stage C concordance
-/// regression rather than a silent miss: the Stage C ClinVar-concordance
+/// Future drift in NCBI's wording surfaces as a ClinVar-concordance
+/// regression rather than a silent miss: the ClinVar self-concordance
 /// suite asserts the divergent-set fraction lands in [4 %, 6 %] of the
 /// GRCh37 store, matching NCBI's published ~5 % figure for RefSeq Select.
 pub(super) const DIVERGENCE_NOTE_PATTERN: &str = "compared to this genomic sequence";

@@ -30,10 +30,6 @@ use crate::locate::LocateIndex;
 use crate::transcript::TranscriptStore;
 use crate::types::{Biotype, Strand, TranscriptModel};
 
-// ---------------------------------------------------------------------------
-// Public output type
-// ---------------------------------------------------------------------------
-
 /// A genomic variant in VCF-style coordinates.
 ///
 /// All coordinates are 0-based (matching the internal convention used
@@ -65,10 +61,6 @@ pub struct ResolvedHgvsC {
     /// Accession (with version) actually used from the transcript store.
     pub resolved_accession: String,
 }
-
-// ---------------------------------------------------------------------------
-// Parsed HGVS c. types
-// ---------------------------------------------------------------------------
 
 /// A single c. position component (the numeric part of an HGVS c. position).
 ///
@@ -119,10 +111,6 @@ struct ParsedHgvsC {
     /// The variant change type and associated data.
     change: HgvsCChange,
 }
-
-// ---------------------------------------------------------------------------
-// Parser
-// ---------------------------------------------------------------------------
 
 /// Parse an HGVS c. notation string into structured components.
 ///
@@ -381,10 +369,6 @@ fn validate_base(b: u8, input: &str) -> Result<(), VarEffectError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Position-to-genomic mapper
-// ---------------------------------------------------------------------------
-
 /// Resolve an HGVS c. position to a 0-based genomic coordinate.
 ///
 /// Handles CDS, 5'UTR, 3'UTR, and intronic positions. Requires a
@@ -639,10 +623,6 @@ fn resolve_3utr(
     })
 }
 
-// ---------------------------------------------------------------------------
-// VCF coordinate construction
-// ---------------------------------------------------------------------------
-
 /// Convert a coding-strand base to plus-strand.
 fn to_plus_strand_base(base: u8, strand: Strand) -> u8 {
     match strand {
@@ -849,10 +829,6 @@ fn build_delins(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Transcript lookup
-// ---------------------------------------------------------------------------
-
 /// Look up a transcript by accession, with version-tolerant fallback.
 ///
 /// 1. Exact match (e.g. `"NM_000546.6"`) — return immediately.
@@ -905,10 +881,6 @@ fn lookup_transcript<'a>(
         accession: accession.to_string(),
     })
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Resolve an HGVS c. notation string to VCF-style genomic coordinates.
 ///
@@ -980,18 +952,12 @@ pub(crate) fn resolve_hgvs_c(
     resolve_hgvs_c_with_meta(hgvs, store, fasta).map(|r| r.variant)
 }
 
-// ===========================================================================
-// Tests
-// ===========================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fasta::write_genome_binary;
     use crate::test_fixtures::{minus_strand_coding, plus_strand_coding};
     use tempfile::TempDir;
-
-    // -- Parser tests (no I/O) -----------------------------------------------
 
     #[test]
     fn parse_cds_substitution() {
@@ -1190,8 +1156,6 @@ mod tests {
         // Insertion requires two flanking positions.
         assert!(parse_hgvs_c("NM_000546.6:c.76insT").is_err());
     }
-
-    // -- Position resolver tests (synthetic transcript) ----------------------
 
     // Helper: build a TranscriptStore from a single transcript.
     fn single_tx_store(tx: TranscriptModel) -> TranscriptStore {
@@ -1392,8 +1356,6 @@ mod tests {
         ));
     }
 
-    // -- VCF construction tests (need synthetic FASTA) -----------------------
-
     /// Build a synthetic FASTA covering the test fixture chromosomes.
     ///
     /// chr1:  [0, 6000)  — covers plus_strand_coding (tx [1000,5000))
@@ -1590,8 +1552,6 @@ mod tests {
         assert_eq!(result.alt_allele, vec![b'T', b'T']);
     }
 
-    // -- Transcript lookup tests ---------------------------------------------
-
     #[test]
     fn lookup_versioned() {
         let store = single_tx_store(plus_strand_coding());
@@ -1685,8 +1645,6 @@ mod tests {
         assert_eq!(drifted.variant, exact.variant);
     }
 
-    // -- Integration tests (require real store + FASTA) ----------------------
-
     #[test]
     #[ignore]
     fn reverse_map_tp53_missense() {
@@ -1760,8 +1718,6 @@ mod tests {
             csq.consequences,
         );
     }
-
-    // -- Integration test helpers --------------------------------------------
 
     #[cfg(test)]
     fn load_store() -> TranscriptStore {

@@ -1,4 +1,4 @@
-//! Stage C — GRCh37 ClinVar self-concordance harness.
+//! GRCh37 ClinVar self-concordance harness.
 //!
 //! This test reads the dual-coordinate ClinVar pairing TSV produced by
 //! `vareffect/scripts/generate_clinvar_pairs.py` and verifies that
@@ -47,8 +47,8 @@
 //!
 //! chrM transcripts get *no* special exclusion — both ClinVar VCFs use
 //! `NC_012920.1` (the rCRS), and the chrom module already routes them
-//! identically across builds. The ~37 chrM transcripts that Stage B's
-//! UCSC cross-validation couldn't compare (UCSC `hg19` chrM is the 1981
+//! identically across builds. The ~37 chrM transcripts that the UCSC
+//! cross-validation couldn't compare (UCSC `hg19` chrM is the 1981
 //! Anderson reference, NCBI is the rCRS) are validated here.
 
 use std::any::Any;
@@ -61,10 +61,6 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use vareffect::{AnnotationResult, Assembly, ConsequenceResult, VarEffect};
-
-// ---------------------------------------------------------------------------
-// Paths and constants
-// ---------------------------------------------------------------------------
 
 /// Hard lower bound on each per-metric concordance rate. Below this the
 /// test fails. Set to 0.99 because both sides are vareffect — divergence
@@ -97,10 +93,6 @@ fn mismatches_log_path() -> PathBuf {
         .join("data")
         .join("grch37_clinvar_mismatches.log")
 }
-
-// ---------------------------------------------------------------------------
-// VarEffect bring-up
-// ---------------------------------------------------------------------------
 
 fn open_var_effect() -> VarEffect {
     let g37_fasta = std::env::var("GRCH37_FASTA").expect(
@@ -158,10 +150,6 @@ fn divergent_accessions_with_assertion(ve: &VarEffect) -> HashSet<String> {
     );
     set
 }
-
-// ---------------------------------------------------------------------------
-// TSV parsing
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Pair {
@@ -226,10 +214,6 @@ fn parse_tsv(path: &Path) -> Vec<Pair> {
     }
     out
 }
-
-// ---------------------------------------------------------------------------
-// Comparison
-// ---------------------------------------------------------------------------
 
 /// Compare a single (accession, GRCh37 row, GRCh38 row) triplet on the
 /// three concordance dimensions. Returns `None` when everything matches
@@ -300,10 +284,6 @@ fn compare_transcript(
         detail,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-row outcome and reporting structs
-// ---------------------------------------------------------------------------
 
 enum RowResult {
     /// `VarEffect::annotate` returned `Err` on either side.
@@ -384,10 +364,6 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
         "<non-string panic payload>".to_owned()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Annotation (parallel)
-// ---------------------------------------------------------------------------
 
 fn annotate_one_side(
     ve: &VarEffect,
@@ -505,10 +481,6 @@ fn process_pair(
         no_overlap_grch38,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Reporting
-// ---------------------------------------------------------------------------
 
 fn print_report(stats: &Stats, elapsed_secs: f64, num_threads: usize) {
     let tested = stats.transcripts_compared;
@@ -657,10 +629,6 @@ fn write_mismatches_log(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Test entry point
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

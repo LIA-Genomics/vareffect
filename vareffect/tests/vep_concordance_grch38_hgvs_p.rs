@@ -35,10 +35,6 @@ use std::path::Path;
 
 use vareffect::{Assembly, FastaReader, TranscriptStore, VarEffect};
 
-// ---------------------------------------------------------------------------
-// Test infrastructure (same pattern as vep_concordance_hgvs.rs)
-// ---------------------------------------------------------------------------
-
 /// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
 /// falls back to `data/vareffect/transcript_models_grch38.bin` under the
 /// workspace root (derived from `CARGO_MANIFEST_DIR`).
@@ -78,10 +74,6 @@ fn load_fasta() -> FastaReader {
     .unwrap_or_else(|e| panic!("failed to open GRCh38 FASTA at {path}: {e}"))
 }
 
-// ---------------------------------------------------------------------------
-// Expected output fixture
-// ---------------------------------------------------------------------------
-
 /// Expected HGVS p. output for one variant-transcript pair.
 #[allow(dead_code)]
 struct ExpectedP {
@@ -115,10 +107,6 @@ struct ExpectedP {
 // ---------------------------------------------------------------------------
 
 const VARIANTS: &[ExpectedP] = &[
-    // -----------------------------------------------------------------------
-    // Category A: Missense (3 variants)
-    // -----------------------------------------------------------------------
-
     // #1 -- TP53 R248W: minus-strand missense, hotspot
     // VEP: NP_000537.3:p.Arg248Trp
     ExpectedP {
@@ -161,10 +149,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category B: Synonymous (1 variant)
-    // -----------------------------------------------------------------------
-
     // #4 -- TP53 R248R: synonymous SNV
     // VEP: NP_000537.3:p.Arg248=
     ExpectedP {
@@ -179,10 +163,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category C: Stop gained / nonsense (1 variant)
-    // -----------------------------------------------------------------------
-
     // #5 -- TP53 R196X: stop gained
     // VEP: NP_000537.3:p.Arg196Ter
     ExpectedP {
@@ -197,10 +177,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category D: Start lost (2 variants)
-    // -----------------------------------------------------------------------
-
     // #6 -- TP53 start_lost SNV (ATG -> GTG on coding strand)
     // VEP: NP_000537.3:p.Met1?
     ExpectedP {
@@ -229,10 +205,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category E: Stop lost / extension (2 variants)
-    // -----------------------------------------------------------------------
-
     // #8 -- TP53 stop_lost SNV (TGA -> TGT): extension with exact distance
     // VEP: NP_000537.3:p.Ter394CysextTer9
     ExpectedP {
@@ -261,10 +233,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category F: Stop retained (1 variant)
-    // -----------------------------------------------------------------------
-
     // #10 -- TP53 stop_retained (TGA -> TAA, both stop)
     // VEP: NP_000537.3:p.Ter394=
     ExpectedP {
@@ -279,10 +247,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category G: Frameshift (6 variants)
-    // -----------------------------------------------------------------------
-
     // #11 -- BRCA1 c.68_69del: minus-strand 2bp deletion, Ashkenazi founder
     // VEP: NP_009225.1:p.Glu23ValfsTer17
     // NM_007294.4 retired from VEP; notation from ClinVar + VEP NM_001407*.1
@@ -368,10 +332,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category H: Inframe deletion (2 variants)
-    // -----------------------------------------------------------------------
-
     // #17 -- CFTR deltaF508: canonical single-AA inframe deletion
     // VEP: NP_000483.3:p.Phe508del
     ExpectedP {
@@ -400,10 +360,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category I: Inframe insertion (2 variants)
-    // -----------------------------------------------------------------------
-
     // #19 -- EGFR c.2310_2311insGGT: non-dup inframe insertion
     // VEP: NP_005219.2:p.Asp770_Asn771insGly
     // Genomic: chr7:55181319 (1-based), plus-strand, anchor C
@@ -439,10 +395,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: Some("p.Tyr772_Ala775dup"),
     },
-    // -----------------------------------------------------------------------
-    // Category J: Delins / MNV (3 variants)
-    // -----------------------------------------------------------------------
-
     // #21 -- TP53 c.742_743delinsTT: 2bp MNV within single codon -> missense
     // VEP: NP_000537.3:p.Arg248Leu
     ExpectedP {
@@ -486,10 +438,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category K: Non-CDS variants -> None (4 variants)
-    // -----------------------------------------------------------------------
-
     // #24 -- TP53 splice_donor +1 (intronic)
     // VEP: no hgvsp field
     ExpectedP {
@@ -546,10 +494,6 @@ const VARIANTS: &[ExpectedP] = &[
         vep_divergence: false,
         vep_hgvs_p: None,
     },
-    // -----------------------------------------------------------------------
-    // Category L: Edge cases (3 variants)
-    // -----------------------------------------------------------------------
-
     // #28 -- ACVRL1 c.525+1del: splice donor deletion (VEP #519 divergence)
     // VEP divergence: VEP returns frameshift_variant, vareffect correctly
     // returns splice_donor_variant. No protein notation for splice.
@@ -602,10 +546,6 @@ const VARIANTS: &[ExpectedP] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
-// Comparison logic
-// ---------------------------------------------------------------------------
-
 /// Compare a single variant's `annotate()` HGVS p. output against the expected
 /// VEP value. Returns `Ok(None)` on match, `Ok(Some(mismatch))` on field
 /// mismatch, or `Err(msg)` on transcript-not-found / annotate error.
@@ -648,10 +588,6 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedP) -> Result<Option<String>, Stri
         )))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Test runner
-// ---------------------------------------------------------------------------
 
 #[test]
 #[ignore]

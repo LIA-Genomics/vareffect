@@ -105,10 +105,6 @@ use serde::{Deserialize, Serialize};
 use crate::chrom::Assembly;
 use crate::error::VarEffectError;
 
-// ---------------------------------------------------------------------------
-// Index types (serialized as MessagePack in .bin.idx)
-// ---------------------------------------------------------------------------
-
 /// Current format version for [`GenomeBinIndex`]. Increment on breaking
 /// changes to the on-disk layout. Public so `vareffect-cli` uses the same
 /// constant — there must be a single source of truth for reader/writer
@@ -148,10 +144,6 @@ pub struct ContigEntry {
     /// Sequence length in bytes (= number of bases).
     pub length: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// Build a flat binary genome from raw contig sequences.
 ///
@@ -295,10 +287,6 @@ pub fn is_iupac_nucleotide(b: u8) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Contig naming detection
-// ---------------------------------------------------------------------------
-
 /// On-disk contig naming style. Detected by scanning the [`GenomeBinIndex`]
 /// contig names at [`FastaReader::open_with_assembly`] time; drives the translation ladder
 /// inside [`FastaReader::translate_chrom`].
@@ -315,10 +303,6 @@ pub(crate) enum ContigNaming {
     /// Contigs are bare Ensembl names (`1`, `MT`, `X`, `Y`).
     EnsemblBare,
 }
-
-// ---------------------------------------------------------------------------
-// FastaReader
-// ---------------------------------------------------------------------------
 
 /// Memory-mapped reference genome reader for random-access sequence retrieval.
 ///
@@ -735,10 +719,6 @@ impl FastaReader {
             .map(|&(_, length)| length)
     }
 
-    // ---------------------------------------------------------------
-    // Internal helpers
-    // ---------------------------------------------------------------
-
     /// Translate a caller-supplied UCSC chromosome name into the raw index
     /// name. The three-branch dispatcher covers every supported on-disk
     /// naming; see [`ContigNaming`] for the detection logic.
@@ -859,10 +839,6 @@ fn append_idx_extension(path: &Path) -> PathBuf {
     os.push(".idx");
     PathBuf::from(os)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

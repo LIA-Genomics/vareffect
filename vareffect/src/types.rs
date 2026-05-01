@@ -298,9 +298,6 @@ pub struct TranscriptModel {
     /// vs. genome sequence disagreement. Annotation tools should record it
     /// for downstream protein-level reasoning but should NOT raise a
     /// clinical divergence warning.
-    ///
-    /// `#[serde(default)]` for backwards compatibility with pre-Stage-A
-    /// stores; missing values default to `None`.
     #[serde(default)]
     pub translational_exception: Option<TranslationalException>,
 }
