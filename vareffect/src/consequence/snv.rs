@@ -1,7 +1,7 @@
 //! SNV (single-nucleotide variant) consequence annotation.
 
 use super::helpers::{
-    build_alt_codon, build_base_result, compute_cdna_position_exonic,
+    AnnotateCtx, CodonSite, build_alt_codon, build_base_result, compute_cdna_position_exonic,
     compute_cdna_position_for_cds, fetch_ref_codon, finalize_consequences,
     is_incomplete_terminal_codon,
 };
@@ -90,6 +90,13 @@ pub(super) fn annotate_snv_verified(
     let hgvs_c =
         hgvs_c::format_snv_hgvs(pos, ref_base, alt_base, &location, transcript, locate_index)?;
 
+    let ctx = AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    };
+
     let mut result = match location {
         VariantLocation::CdsExon {
             exon_index,
@@ -99,16 +106,15 @@ pub(super) fn annotate_snv_verified(
             is_splice_region,
             ..
         } => annotate_cds_snv(
-            chrom,
+            &ctx,
             alt_base,
-            transcript,
-            locate_index,
-            fasta,
-            exon_index,
-            cds_offset,
-            codon_number,
-            codon_position,
-            is_splice_region,
+            CodonSite {
+                exon_index,
+                cds_offset,
+                codon_number,
+                codon_position,
+                is_splice_region,
+            },
         ),
 
         VariantLocation::SpliceDonor { intron_index, .. } => {
@@ -237,19 +243,24 @@ pub(super) fn annotate_snv_verified(
 }
 
 /// Annotate a CDS exon SNV: codon extraction, translation, AA comparison.
-#[allow(clippy::too_many_arguments)]
 fn annotate_cds_snv(
-    chrom: &str,
+    ctx: &AnnotateCtx<'_>,
     alt_base: u8,
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
-    exon_index: u16,
-    cds_offset: u32,
-    codon_number: u32,
-    codon_position: u8,
-    is_splice_region: bool,
+    site: CodonSite,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let CodonSite {
+        exon_index,
+        cds_offset,
+        codon_number,
+        codon_position,
+        is_splice_region,
+    } = site;
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
     let codon_start_offset = cds_offset - codon_position as u32;
 
     if is_incomplete_terminal_codon(cds_offset, index) {
@@ -265,7 +276,6 @@ fn annotate_cds_snv(
 
     let ref_codon = fetch_ref_codon(codon_start_offset, chrom, transcript, index, fasta)?;
 
-    // Complement the VCF ALT for minus-strand to get coding-strand base
     let coding_alt = match transcript.strand {
         Strand::Plus => alt_base,
         Strand::Minus => complement(alt_base),
@@ -276,7 +286,6 @@ fn annotate_cds_snv(
     let ref_aa = translate_codon_for_transcript(&ref_codon, is_mito);
     let alt_aa = translate_codon_for_transcript(&alt_codon, is_mito);
 
-    // Ambiguous codons (ref contains N)
     if ref_aa == b'X' || alt_aa == b'X' {
         let mut consequences = vec![Consequence::CodingSequenceVariant];
         if is_splice_region {

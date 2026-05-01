@@ -1,4 +1,5 @@
 use super::complex::{annotate_complex_delins, annotate_mnv};
+use super::helpers::AnnotateCtx;
 use super::helpers::trim_alleles;
 use super::*;
 use crate::fasta::{FastaReader, write_genome_binary};
@@ -1168,7 +1169,13 @@ fn delins_cds_frameshift() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // Delete 4bp, insert 2bp at CDS offset 3. Net -2 -> frameshift.
-    let result = annotate_complex_delins("chr1", 1503, b"CGTC", b"AT", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_complex_delins(&ctx, 1503, b"CGTC", b"AT").unwrap();
     assert!(
         result
             .consequences
@@ -1184,8 +1191,13 @@ fn delins_cds_inframe() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // Delete 3bp, insert 6bp. Net +3 -> inframe delins.
-    let result =
-        annotate_complex_delins("chr1", 1503, b"CGT", b"AAAAAA", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_complex_delins(&ctx, 1503, b"CGT", b"AAAAAA").unwrap();
     assert!(
         result
             .consequences
@@ -1201,7 +1213,13 @@ fn delins_splice_overlap() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // Delete [1999, 2002), replace with 1bp. Overlaps donor +1/+2.
-    let result = annotate_complex_delins("chr1", 1999, b"AAA", b"T", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_complex_delins(&ctx, 1999, b"AAA", b"T").unwrap();
     assert!(
         result
             .consequences
@@ -1217,7 +1235,13 @@ fn mnv_single_codon_missense() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // 2-base MNV at CDS offset 3-4 (codon 2). REF=CG, ALT=TA.
-    let result = annotate_mnv("chr1", 1503, b"CG", b"TA", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_mnv(&ctx, 1503, b"CG", b"TA").unwrap();
     assert!(
         result.consequences.contains(&Consequence::MissenseVariant)
             || result.consequences.contains(&Consequence::StopGained),
@@ -1232,7 +1256,13 @@ fn mnv_two_codons() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // CDS offset 5-6 spans codon boundary between codon 1 (3-5) and codon 2 (6-8).
-    let result = annotate_mnv("chr1", 1505, b"TC", b"AA", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_mnv(&ctx, 1505, b"TC", b"AA").unwrap();
     let has_coding = result.consequences.contains(&Consequence::MissenseVariant)
         || result.consequences.contains(&Consequence::StopGained)
         || result
@@ -1251,7 +1281,13 @@ fn mnv_creates_stop() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // CGT at 1503-1505 -> TAA (stop). 3-base MNV.
-    let result = annotate_mnv("chr1", 1503, b"CGT", b"TAA", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_mnv(&ctx, 1503, b"CGT", b"TAA").unwrap();
     assert!(
         result.consequences.contains(&Consequence::StopGained),
         "MNV creating stop: {:?}",
@@ -1265,7 +1301,13 @@ fn mnv_synonymous() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     // CGT -> AGA: all 3 bases change, both Arg. Synonymous 3-base MNV.
-    let result = annotate_mnv("chr1", 1503, b"CGT", b"AGA", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr1",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_mnv(&ctx, 1503, b"CGT", b"AGA").unwrap();
     assert!(
         result
             .consequences
@@ -1297,7 +1339,13 @@ fn minus_strand_mnv() {
     let tx = minus_strand_coding();
     let idx = build_index(&tx);
     // 2-base MNV at 19498-19499 (CDS offset 0-1, codon 0)
-    let result = annotate_mnv("chr17", 19498, b"AT", b"CC", &tx, &idx, &fasta).unwrap();
+    let ctx = AnnotateCtx {
+        chrom: "chr17",
+        transcript: &tx,
+        index: &idx,
+        fasta: &fasta,
+    };
+    let result = annotate_mnv(&ctx, 19498, b"AT", b"CC").unwrap();
     let has_coding = result.consequences.contains(&Consequence::MissenseVariant)
         || result.consequences.contains(&Consequence::StartLost)
         || result.consequences.contains(&Consequence::StopGained);

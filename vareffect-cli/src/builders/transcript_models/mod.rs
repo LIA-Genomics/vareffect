@@ -128,23 +128,38 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
 ///
 /// Tuple of ([`BuildOutput`], serialized byte count).
 ///
+/// Inputs for [`build`]. Bundles the GFF3 source path, cross-validation
+/// configuration, output paths, and metadata for a single assembly's
+/// transcript-store build.
+pub struct BuildOptions<'a> {
+    pub input: &'a Path,
+    pub cross_validation_source: Option<CrossValidationSource>,
+    pub patch_aliases_input: Option<&'a Path>,
+    pub output_dir: &'a Path,
+    pub version: &'a str,
+    pub assembly: Assembly,
+    pub admit_tags: &'a [AdmitTag],
+    pub output_basename: &'a str,
+}
+
 /// # Errors
 ///
 /// Returns an error if the GFF3 cannot be read, cross-validation fails,
 /// the patch-alias CSV cannot be read, or the output files cannot be
 /// written. Also errors if `cross_validation_source` is provided
 /// without a matching `patch_aliases_input`.
-#[allow(clippy::too_many_arguments)]
-pub fn build(
-    input: &Path,
-    cross_validation_source: Option<CrossValidationSource>,
-    patch_aliases_input: Option<&Path>,
-    output_dir: &Path,
-    version: &str,
-    assembly: Assembly,
-    admit_tags: &[AdmitTag],
-    output_basename: &str,
-) -> Result<(BuildOutput, usize)> {
+pub fn build(opts: BuildOptions<'_>) -> Result<(BuildOutput, usize)> {
+    let BuildOptions {
+        input,
+        cross_validation_source,
+        patch_aliases_input,
+        output_dir,
+        version,
+        assembly,
+        admit_tags,
+        output_basename,
+    } = opts;
+
     let transcripts = parse_gff3(input, assembly, admit_tags)?;
 
     if let Some(source) = cross_validation_source.as_ref() {

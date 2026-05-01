@@ -503,14 +503,17 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(complex::annotate_mnv(
+                let ctx = helpers::AnnotateCtx {
                     chrom,
+                    transcript: tx,
+                    index: idx,
+                    fasta,
+                };
+                results.push(complex::annotate_mnv(
+                    &ctx,
                     trimmed_pos,
                     trimmed_ref,
                     trimmed_alt,
-                    tx,
-                    idx,
-                    fasta,
                 )?);
             }
             results
@@ -522,14 +525,17 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(complex::annotate_complex_delins(
+                let ctx = helpers::AnnotateCtx {
                     chrom,
+                    transcript: tx,
+                    index: idx,
+                    fasta,
+                };
+                results.push(complex::annotate_complex_delins(
+                    &ctx,
                     trimmed_pos,
                     trimmed_ref,
                     trimmed_alt,
-                    tx,
-                    idx,
-                    fasta,
                 )?);
             }
             results

@@ -273,24 +273,26 @@ fn fetch_3prime_utr_coding_seq(
 ///
 /// # Arguments
 ///
+/// * `ctx` — chromosome, transcript, locate index, and FASTA reader bundle
 /// * `cds_offset_start` — 0-based CDS offset where the variant begins
 /// * `cds_offset_end` — 0-based exclusive end (equal to start for insertions)
 /// * `inserted_coding_bases` — coding-strand bases inserted at the variant
 ///   site (empty slice for pure deletions)
-/// * `chrom`, `transcript`, `index`, `fasta` — for downstream CDS/UTR fetch
 /// * `dna_shift` — HGVS 3' normalization shift in CDS bases (0 for
 ///   deletions / delins; `> 0` for insertions in repeat regions)
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn format_hgvs_p_frameshift(
+    ctx: &crate::consequence::helpers::AnnotateCtx<'_>,
     cds_offset_start: u32,
     cds_offset_end: u32,
     inserted_coding_bases: &[u8],
-    chrom: &str,
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
     dna_shift: u32,
 ) -> Result<Option<String>, VarEffectError> {
+    let crate::consequence::helpers::AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
     let total_cds = index.total_cds_length();
     let is_mito = transcript.chrom == "chrM";
 

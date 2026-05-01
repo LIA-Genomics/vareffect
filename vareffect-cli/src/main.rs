@@ -310,16 +310,17 @@ fn main() -> Result<()> {
                 }
             });
             let start = Instant::now();
-            let (out, size) = builders::transcript_models::build(
-                &input,
-                cross_validation_source,
-                patch_chrom_aliases.as_deref(),
-                &output,
-                &version,
-                asm,
-                admit_tags,
-                &basename,
-            )?;
+            let (out, size) =
+                builders::transcript_models::build(builders::transcript_models::BuildOptions {
+                    input: &input,
+                    cross_validation_source,
+                    patch_aliases_input: patch_chrom_aliases.as_deref(),
+                    output_dir: &output,
+                    version: &version,
+                    assembly: asm,
+                    admit_tags,
+                    output_basename: &basename,
+                })?;
             print_build_header();
             print_build_summary(&basename, &out, size, start);
         }

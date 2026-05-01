@@ -177,18 +177,13 @@ impl SummaryColumns {
     }
 
     fn required_field_count(&self) -> usize {
-        [
-            self.refseq_nuc,
-            self.symbol,
-            self.mane_status,
-            self.grch38_chr,
-            self.chr_start,
-            self.chr_end,
-            self.chr_strand,
-        ]
-        .into_iter()
-        .max()
-        .unwrap()
+        self.refseq_nuc
+            .max(self.symbol)
+            .max(self.mane_status)
+            .max(self.grch38_chr)
+            .max(self.chr_start)
+            .max(self.chr_end)
+            .max(self.chr_strand)
             + 1
     }
 

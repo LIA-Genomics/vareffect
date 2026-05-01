@@ -99,16 +99,16 @@ pub fn run(
     eprintln!();
 
     for (assembly, entry) in &targets {
-        run_one_assembly(
-            &http_client,
-            *assembly,
+        run_one_assembly(AssemblyRun {
+            http_client: &http_client,
+            assembly: *assembly,
             entry,
-            &config,
-            &output_dir,
-            &raw_dir,
+            config: &config,
+            output_dir: &output_dir,
+            raw_dir: &raw_dir,
             fasta_only,
             models_only,
-        )?;
+        })?;
     }
 
     eprintln!(
@@ -156,20 +156,33 @@ fn resolve_targets(
     Ok(out)
 }
 
+/// Inputs for [`run_one_assembly`]. Bundles the per-assembly config entry,
+/// shared HTTP client, output directories, and the partial-build flags.
+struct AssemblyRun<'a> {
+    http_client: &'a reqwest::blocking::Client,
+    assembly: Assembly,
+    entry: &'a AssemblyEntry,
+    config: &'a config::VareffectConfig,
+    output_dir: &'a Path,
+    raw_dir: &'a Path,
+    fasta_only: bool,
+    models_only: bool,
+}
+
 /// Build all artifacts for a single assembly. Mirrors the previous
 /// monolithic flow but takes the per-assembly entry as an argument so
 /// the orchestrator can fan out across multiple builds.
-#[allow(clippy::too_many_arguments)]
-fn run_one_assembly(
-    http_client: &reqwest::blocking::Client,
-    assembly: Assembly,
-    entry: &AssemblyEntry,
-    config: &config::VareffectConfig,
-    output_dir: &Path,
-    raw_dir: &Path,
-    fasta_only: bool,
-    models_only: bool,
-) -> Result<()> {
+fn run_one_assembly(run: AssemblyRun<'_>) -> Result<()> {
+    let AssemblyRun {
+        http_client,
+        assembly,
+        entry,
+        config,
+        output_dir,
+        raw_dir,
+        fasta_only,
+        models_only,
+    } = run;
     eprintln!(
         "{}",
         style(format!("=== Building {assembly} ===")).bold().cyan()
@@ -310,18 +323,18 @@ fn run_one_assembly(
         };
 
         let build_start = Instant::now();
-        let aliases_ref = aliases_path.as_deref();
-        let (out, size_bytes) = builders::transcript_models::build(
-            &gff_path,
-            cross_validation_source,
-            aliases_ref,
-            output_dir,
-            &entry.transcript_models_version,
-            assembly,
-            admit_tags,
-            &entry.transcript_models_basename,
-        )
-        .with_context(|| format!("building transcript models for {assembly}"))?;
+        let (out, size_bytes) =
+            builders::transcript_models::build(builders::transcript_models::BuildOptions {
+                input: &gff_path,
+                cross_validation_source,
+                patch_aliases_input: aliases_path.as_deref(),
+                output_dir,
+                version: &entry.transcript_models_version,
+                assembly,
+                admit_tags,
+                output_basename: &entry.transcript_models_basename,
+            })
+            .with_context(|| format!("building transcript models for {assembly}"))?;
 
         eprintln!(
             "  {}  wrote {} ({} records, {} in {}s)",

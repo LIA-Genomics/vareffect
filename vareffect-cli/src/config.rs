@@ -254,34 +254,44 @@ impl AssemblyEntry {
                     filename: filename.clone(),
                 }))
             }
-            Some(CrossValidationFormat::UcscRefseqSelect) => {
-                let mut missing: Vec<&'static str> = Vec::new();
-                if self.cross_validation_url.is_none() {
-                    missing.push("cross_validation_url");
-                }
-                if self.cross_validation_input.is_none() {
-                    missing.push("cross_validation_input");
-                }
-                if self.cross_validation_select_url.is_none() {
-                    missing.push("cross_validation_select_url");
-                }
-                if self.cross_validation_select_input.is_none() {
-                    missing.push("cross_validation_select_input");
-                }
-                if !missing.is_empty() {
+            Some(CrossValidationFormat::UcscRefseqSelect) => match (
+                self.cross_validation_url.clone(),
+                self.cross_validation_input.clone(),
+                self.cross_validation_select_url.clone(),
+                self.cross_validation_select_input.clone(),
+            ) {
+                (
+                    Some(coords_url),
+                    Some(coords_filename),
+                    Some(select_url),
+                    Some(select_filename),
+                ) => Ok(Some(ResolvedCvSource::UcscRefseqSelect {
+                    coords_url,
+                    coords_filename,
+                    select_url,
+                    select_filename,
+                })),
+                (a, b, c, d) => {
+                    let mut missing: Vec<&'static str> = Vec::new();
+                    if a.is_none() {
+                        missing.push("cross_validation_url");
+                    }
+                    if b.is_none() {
+                        missing.push("cross_validation_input");
+                    }
+                    if c.is_none() {
+                        missing.push("cross_validation_select_url");
+                    }
+                    if d.is_none() {
+                        missing.push("cross_validation_select_input");
+                    }
                     anyhow::bail!(
                         "cross_validation_format=ucsc_refseq_select requires all four \
                          UCSC source fields -- missing: {}",
                         missing.join(", ")
-                    );
+                    )
                 }
-                Ok(Some(ResolvedCvSource::UcscRefseqSelect {
-                    coords_url: self.cross_validation_url.clone().unwrap(),
-                    coords_filename: self.cross_validation_input.clone().unwrap(),
-                    select_url: self.cross_validation_select_url.clone().unwrap(),
-                    select_filename: self.cross_validation_select_input.clone().unwrap(),
-                }))
-            }
+            },
         }
     }
 }
