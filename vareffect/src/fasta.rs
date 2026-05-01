@@ -38,15 +38,15 @@
 //!   `vareffect-cli setup` from the NCBI GRCh38.p14 assembly. The reader
 //!   translates primary chroms via [`crate::chrom::ucsc_to_refseq`] and
 //!   patch contigs via an optional runtime alias CSV loaded through
-//!   [`FastaReader::open_with_patch_aliases`].
+//!   [`FastaReader::open_with_patch_aliases_and_assembly`].
 //! - **UCSC-prefixed** (`chr1`, `chrM`, ...) — pass-through translation.
 //! - **Ensembl bare** (`1`, `MT`, ...) — the reader strips the `chr` prefix
 //!   and maps `chrM -> MT`.
 //!
 //! Patch contigs (`chr9_KN196479v1_fix`, `chr22_KI270879v1_alt`, ...) can
-//! only be served against an NCBI-naming binary when a
-//! `patch_chrom_aliases.csv` is supplied via
-//! [`FastaReader::open_with_patch_aliases`].
+//! only be served against an NCBI-naming binary when a per-assembly
+//! `patch_chrom_aliases_grch{37,38}.csv` is supplied via
+//! [`FastaReader::open_with_patch_aliases_and_assembly`].
 //!
 //! # Thread safety
 //!
@@ -70,19 +70,24 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use vareffect::FastaReader;
+//! use vareffect::{Assembly, FastaReader};
 //!
 //! // Open the flat binary genome produced by `vareffect-cli setup`.
-//! let reader = FastaReader::open(Path::new("data/vareffect/GRCh38.bin"))?;
+//! // The assembly must be supplied explicitly — there is no default.
+//! let reader = FastaReader::open_with_assembly(
+//!     Path::new("data/vareffect/GRCh38.bin"),
+//!     Assembly::GRCh38,
+//! )?;
 //!
 //! // TP53 c.742C>T lives at chr17:7674221 (1-based VCF) = chr17:7674220 (0-based).
 //! let base = reader.fetch_base("chr17", 7674220)?;
 //! assert_eq!(base, b'C');
 //!
 //! // Patch-contig reads against an NCBI-source binary need the alias CSV.
-//! let reader = FastaReader::open_with_patch_aliases(
+//! let reader = FastaReader::open_with_patch_aliases_and_assembly(
 //!     Path::new("data/vareffect/GRCh38.bin"),
-//!     Some(Path::new("data/vareffect/patch_chrom_aliases.csv")),
+//!     Some(Path::new("data/vareffect/patch_chrom_aliases_grch38.csv")),
+//!     Assembly::GRCh38,
 //! )?;
 //! # Ok::<(), vareffect::VarEffectError>(())
 //! ```
@@ -92,16 +97,13 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
+use crate::chrom::Assembly;
 use crate::error::VarEffectError;
-
-// ---------------------------------------------------------------------------
-// Index types (serialized as MessagePack in .bin.idx)
-// ---------------------------------------------------------------------------
 
 /// Current format version for [`GenomeBinIndex`]. Increment on breaking
 /// changes to the on-disk layout. Public so `vareffect-cli` uses the same
@@ -115,7 +117,7 @@ compile_error!("vareffect requires a 64-bit target (genome files may exceed 4 GB
 /// Flat binary genome index.
 ///
 /// Serialized as MessagePack and stored alongside the `.bin` file with an
-/// `.idx` suffix. Read once at [`FastaReader::open`] time.
+/// `.idx` suffix. Read once at [`FastaReader::open_with_assembly`] time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenomeBinIndex {
     /// Format version. Must equal [`GENOME_BIN_INDEX_VERSION`] at open time.
@@ -142,10 +144,6 @@ pub struct ContigEntry {
     /// Sequence length in bytes (= number of bases).
     pub length: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Builder
-// ---------------------------------------------------------------------------
 
 /// Build a flat binary genome from raw contig sequences.
 ///
@@ -289,12 +287,8 @@ pub fn is_iupac_nucleotide(b: u8) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Contig naming detection
-// ---------------------------------------------------------------------------
-
 /// On-disk contig naming style. Detected by scanning the [`GenomeBinIndex`]
-/// contig names at [`FastaReader::open`] time; drives the translation ladder
+/// contig names at [`FastaReader::open_with_assembly`] time; drives the translation ladder
 /// inside [`FastaReader::translate_chrom`].
 ///
 /// Detection priority: `NC_*` -> `NcbiRefSeq` beats a later `chr*` ->
@@ -310,14 +304,10 @@ pub(crate) enum ContigNaming {
     EnsemblBare,
 }
 
-// ---------------------------------------------------------------------------
-// FastaReader
-// ---------------------------------------------------------------------------
-
 /// Memory-mapped reference genome reader for random-access sequence retrieval.
 ///
-/// Construct with [`FastaReader::open`] (or
-/// [`FastaReader::open_with_patch_aliases`] when patch-contig lookups against
+/// Construct with [`FastaReader::open_with_assembly`] (or
+/// [`FastaReader::open_with_patch_aliases_and_assembly`] when patch-contig lookups against
 /// an NCBI-source binary are needed), then call
 /// [`FastaReader::fetch_sequence`] to pull bases by `(chrom, start, end)`.
 /// Coordinates are 0-based half-open; chromosome names are UCSC-style.
@@ -339,13 +329,27 @@ pub struct FastaReader {
     naming: ContigNaming,
 
     /// Optional UCSC -> RefSeq patch alias table. Only populated when the
-    /// caller supplies a `patch_chrom_aliases.csv` to
-    /// [`FastaReader::open_with_patch_aliases`] *and* the binary uses
-    /// [`ContigNaming::NcbiRefSeq`].
+    /// caller supplies a per-assembly `patch_chrom_aliases_grch{37,38}.csv`
+    /// to [`FastaReader::open_with_patch_aliases_and_assembly`] *and* the
+    /// binary uses [`ContigNaming::NcbiRefSeq`].
     patch_aliases: Option<Arc<HashMap<String, String>>>,
+
+    /// Reference build the binary represents. Drives the chrom-table
+    /// selection in [`crate::chrom::ucsc_to_refseq`].
+    assembly: Assembly,
 
     /// Original `.bin` path, kept for diagnostic messages.
     path: PathBuf,
+
+    /// Per-reader cache of `ga4gh:SQ.<digest>` CURIEs computed for VRS ID
+    /// emission. Read-heavy, write-rare (≤25 inserts ever per reader), so
+    /// `RwLock` over a `HashMap` of `Arc<str>`: cache hits clone the `Arc`
+    /// (one atomic increment, no allocation) under a shared read lock.
+    /// Tied to the reader rather than a process-global static so that two
+    /// readers opened against different references in the same process
+    /// produce digests of their actual bytes, not whichever reader populated
+    /// the global first.
+    vrs_sq_cache: Arc<RwLock<HashMap<String, Arc<str>>>>,
 }
 
 impl FastaReader {
@@ -354,7 +358,13 @@ impl FastaReader {
     /// This is the common-case constructor for callers that only need
     /// primary-chromosome reads (`chr1`..`chrM`). If the binary uses NCBI
     /// RefSeq naming and you need patch-contig reads as well, use
-    /// [`FastaReader::open_with_patch_aliases`] instead.
+    /// [`FastaReader::open_with_patch_aliases_and_assembly`] instead.
+    ///
+    /// The flat-binary format has no embedded assembly tag, so the caller
+    /// must declare the build (`Assembly::GRCh38` / `Assembly::GRCh37`).
+    /// The reader uses it to select the right chrom-table for
+    /// [`crate::chrom::ucsc_to_refseq`] when translating caller-side UCSC
+    /// chromosome names into the raw index keys.
     ///
     /// The expected on-disk layout is:
     /// - `path` — the `.bin` file (flat binary genome)
@@ -366,8 +376,8 @@ impl FastaReader {
     /// * [`VarEffectError::Io`] on I/O or deserialization errors.
     /// * [`VarEffectError::Malformed`] if the index version is unsupported
     ///   or the `.bin` file size doesn't match the expected size.
-    pub fn open(path: &Path) -> Result<Self, VarEffectError> {
-        Self::open_with_patch_aliases(path, None)
+    pub fn open_with_assembly(path: &Path, assembly: Assembly) -> Result<Self, VarEffectError> {
+        Self::open_with_patch_aliases_and_assembly(path, None, assembly)
     }
 
     /// Open a flat binary genome file, optionally with a patch-contig alias
@@ -379,11 +389,15 @@ impl FastaReader {
     /// UCSC -> RefSeq map for the second tier of the translation ladder.
     /// For any other combination, the argument is silently ignored.
     ///
-    /// See [`FastaReader::open`] for the expected on-disk layout and error
-    /// conditions.
-    pub fn open_with_patch_aliases(
+    /// `assembly` declares which build the binary represents, driving
+    /// the chrom-table selection used by [`crate::chrom::ucsc_to_refseq`].
+    ///
+    /// See [`FastaReader::open_with_assembly`] for the expected on-disk
+    /// layout and error conditions.
+    pub fn open_with_patch_aliases_and_assembly(
         path: &Path,
         patch_aliases_csv: Option<&Path>,
+        assembly: Assembly,
     ) -> Result<Self, VarEffectError> {
         // 1. Locate and parse the .bin.idx sidecar.
         let idx_path = append_idx_extension(path);
@@ -469,8 +483,15 @@ impl FastaReader {
             contigs: Arc::new(contigs),
             naming,
             patch_aliases,
+            assembly,
             path: path.to_path_buf(),
+            vrs_sq_cache: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Reference build the binary was opened against.
+    pub fn assembly(&self) -> Assembly {
+        self.assembly
     }
 
     /// Mint an additional reader handle for the same genome binary.
@@ -489,20 +510,55 @@ impl FastaReader {
             contigs: Arc::clone(&self.contigs),
             naming: self.naming,
             patch_aliases: self.patch_aliases.as_ref().map(Arc::clone),
+            assembly: self.assembly,
             path: self.path.clone(),
+            vrs_sq_cache: Arc::clone(&self.vrs_sq_cache),
         })
     }
 
-    /// Fetch a genomic sequence as uppercase ASCII bytes.
+    /// Look up — or compute and cache — the per-chromosome value backing the
+    /// VRS `ga4gh:SQ.<digest>` CURIE.
     ///
-    /// Coordinates are 0-based half-open `[start, end)`. The returned
-    /// sequence is the plus-strand reference — strand-aware complementing
-    /// is the caller's responsibility (see `crate::types::Strand`).
+    /// `compute` is invoked at most once per `chrom` per reader; subsequent
+    /// calls return the cached `Arc<str>` under a shared read lock. If
+    /// `compute` returns `None`, nothing is cached and the next call retries.
+    ///
+    /// Used by [`crate::vrs`] — kept out of the public API by being
+    /// `pub(crate)`.
+    pub(crate) fn vrs_sq_cached<F>(&self, chrom: &str, compute: F) -> Option<Arc<str>>
+    where
+        F: FnOnce() -> Option<String>,
+    {
+        if let Ok(cache) = self.vrs_sq_cache.read()
+            && let Some(hit) = cache.get(chrom)
+        {
+            return Some(Arc::clone(hit));
+        }
+        let computed = compute()?;
+        let arc: Arc<str> = Arc::from(computed.into_boxed_str());
+        if let Ok(mut cache) = self.vrs_sq_cache.write() {
+            cache
+                .entry(chrom.to_string())
+                .or_insert_with(|| Arc::clone(&arc));
+        }
+        Some(arc)
+    }
+
+    /// Fetch a genomic sequence as a borrowed slice into the underlying mmap.
+    ///
+    /// Coordinates are 0-based half-open `[start, end)`. The returned slice
+    /// is the plus-strand reference — strand-aware complementing is the
+    /// caller's responsibility (see `crate::types::Strand`).
     ///
     /// The flat binary stores uppercase bases only, so the returned bytes
     /// are always uppercase IUPAC nucleotide codes (typically `A`/`C`/`G`/
     /// `T`/`N`, occasionally ambiguity codes like `M`/`R`/`Y` in some
     /// GRCh38 patch regions).
+    ///
+    /// This is a zero-copy view into the memory-mapped genome — no
+    /// allocation, no memcpy. Prefer this over [`Self::fetch_sequence`]
+    /// for read-only scans (3' shift probes, duplication checks, codon
+    /// stitching) that don't need to outlive the borrow.
     ///
     /// # Errors
     ///
@@ -510,12 +566,12 @@ impl FastaReader {
     ///   genome index.
     /// * [`VarEffectError::CoordinateOutOfRange`] if `start >= end` or `end`
     ///   exceeds the chromosome length.
-    pub fn fetch_sequence(
+    pub fn fetch_sequence_slice(
         &self,
         chrom: &str,
         start: u64,
         end: u64,
-    ) -> Result<Vec<u8>, VarEffectError> {
+    ) -> Result<&[u8], VarEffectError> {
         let translated = self.translate_chrom(chrom);
 
         let &(offset, length) =
@@ -537,7 +593,25 @@ impl FastaReader {
         // Bounds validated — mmap indexing cannot panic.
         let slice_start = (offset + start) as usize;
         let slice_end = (offset + end) as usize;
-        Ok(self.mmap[slice_start..slice_end].to_vec())
+        Ok(&self.mmap[slice_start..slice_end])
+    }
+
+    /// Fetch a genomic sequence as uppercase ASCII bytes (owned copy).
+    ///
+    /// Coordinates are 0-based half-open `[start, end)`. See
+    /// [`Self::fetch_sequence_slice`] for a zero-copy alternative when
+    /// ownership is not required.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::fetch_sequence_slice`].
+    pub fn fetch_sequence(
+        &self,
+        chrom: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<u8>, VarEffectError> {
+        Ok(self.fetch_sequence_slice(chrom, start, end)?.to_vec())
     }
 
     /// Fetch a genomic sequence as raw ASCII bytes.
@@ -637,17 +711,13 @@ impl FastaReader {
     /// Return the length of `chrom` in bases, or `None` if the chromosome is
     /// not present in the genome index.
     ///
-    /// O(1) — reads from the contig table built at [`FastaReader::open`] time.
+    /// O(1) — reads from the contig table built at [`FastaReader::open_with_assembly`] time.
     pub fn chrom_length(&self, chrom: &str) -> Option<u64> {
         let translated = self.translate_chrom(chrom);
         self.contigs
             .get(translated.as_ref())
             .map(|&(_, length)| length)
     }
-
-    // ---------------------------------------------------------------
-    // Internal helpers
-    // ---------------------------------------------------------------
 
     /// Translate a caller-supplied UCSC chromosome name into the raw index
     /// name. The three-branch dispatcher covers every supported on-disk
@@ -667,7 +737,7 @@ impl FastaReader {
                 // `ucsc_to_refseq` returns `&'static str` on a hit, so the
                 // `Cow::Borrowed` here has a 'static lifetime — always safe
                 // to coerce into 'a.
-                let primary = crate::chrom::ucsc_to_refseq(chrom);
+                let primary = crate::chrom::ucsc_to_refseq(self.assembly, chrom);
                 if !std::ptr::eq(primary.as_ptr(), chrom.as_ptr()) {
                     // `primary` points into `NC_TO_UCSC`, not into `chrom`
                     // — the pointer compare distinguishes "table hit" from
@@ -707,7 +777,8 @@ impl FastaReader {
     }
 }
 
-/// Load `patch_chrom_aliases.csv` into a UCSC -> RefSeq lookup map.
+/// Load a per-assembly `patch_chrom_aliases_grch{37,38}.csv` into a
+/// UCSC -> RefSeq lookup map.
 ///
 /// The on-disk CSV format is `refseq,ucsc` (see
 /// `vareffect-cli::builders::patch_chrom_aliases`), so this loader inverts
@@ -769,10 +840,6 @@ fn append_idx_extension(path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,13 +851,13 @@ mod tests {
         let bin_path = tmp.path().join("test.bin");
         let idx_path = tmp.path().join("test.bin.idx");
         write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
-        let reader = FastaReader::open(&bin_path).unwrap();
+        let reader = FastaReader::open_with_assembly(&bin_path, Assembly::GRCh38).unwrap();
         (tmp, reader)
     }
 
     /// Write a `refseq,ucsc` alias CSV to a tempdir and return the path.
     fn write_patch_alias_csv(tmp: &TempDir) -> PathBuf {
-        let csv_path = tmp.path().join("patch_chrom_aliases.csv");
+        let csv_path = tmp.path().join("patch_chrom_aliases_grch38.csv");
         let contents = "\
 # GRCh38 patch-contig aliases: RefSeq accession -> UCSC contig name.
 refseq,ucsc
@@ -1027,7 +1094,7 @@ NT_187633.1,chr22_KI270879v1_alt
         let bin_path = tmp.path().join("no_index.bin");
         std::fs::write(&bin_path, b"ACGT").unwrap();
 
-        let err = FastaReader::open(&bin_path).unwrap_err();
+        let err = FastaReader::open_with_assembly(&bin_path, Assembly::GRCh38).unwrap_err();
         assert!(matches!(err, VarEffectError::IndexNotFound { .. }));
     }
 
@@ -1053,7 +1120,7 @@ NT_187633.1,chr22_KI270879v1_alt
         // ...but only write 10 bytes to the bin file.
         std::fs::write(&bin_path, [b'A'; 10]).unwrap();
 
-        let err = FastaReader::open(&bin_path).unwrap_err();
+        let err = FastaReader::open_with_assembly(&bin_path, Assembly::GRCh38).unwrap_err();
         assert!(matches!(err, VarEffectError::Malformed(_)));
     }
 
@@ -1077,7 +1144,7 @@ NT_187633.1,chr22_KI270879v1_alt
         let idx_bytes = rmp_serde::to_vec(&index).unwrap();
         std::fs::write(&idx_path, &idx_bytes).unwrap();
 
-        let err = FastaReader::open(&bin_path).unwrap_err();
+        let err = FastaReader::open_with_assembly(&bin_path, Assembly::GRCh38).unwrap_err();
         assert!(matches!(err, VarEffectError::Malformed(_)));
     }
 
@@ -1129,7 +1196,12 @@ NT_187633.1,chr22_KI270879v1_alt
         write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
 
         let csv_path = write_patch_alias_csv(&tmp);
-        let reader = FastaReader::open_with_patch_aliases(&bin_path, Some(&csv_path)).unwrap();
+        let reader = FastaReader::open_with_patch_aliases_and_assembly(
+            &bin_path,
+            Some(&csv_path),
+            Assembly::GRCh38,
+        )
+        .unwrap();
 
         assert_eq!(reader.naming, ContigNaming::NcbiRefSeq);
         assert!(reader.patch_aliases.is_some());
@@ -1151,7 +1223,12 @@ NT_187633.1,chr22_KI270879v1_alt
         write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
 
         let csv_path = write_patch_alias_csv(&tmp);
-        let reader = FastaReader::open_with_patch_aliases(&bin_path, Some(&csv_path)).unwrap();
+        let reader = FastaReader::open_with_patch_aliases_and_assembly(
+            &bin_path,
+            Some(&csv_path),
+            Assembly::GRCh38,
+        )
+        .unwrap();
 
         assert_eq!(reader.naming, ContigNaming::EnsemblBare);
         assert!(

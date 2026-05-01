@@ -16,10 +16,6 @@
 //! [`translate_codon_for_transcript`] dispatches to the correct table based on
 //! an `is_mitochondrial` flag (derived from `transcript.chrom == "chrM"`).
 
-// ---------------------------------------------------------------------------
-// Internal encoding
-// ---------------------------------------------------------------------------
-
 /// Map an ASCII DNA base to a 2-bit index: A=0, C=1, G=2, T=3.
 /// Returns `None` for any non-ACGT byte (N, ambiguity codes, lowercase).
 fn base_to_index(b: u8) -> Option<usize> {
@@ -40,10 +36,6 @@ fn codon_to_index(codon: &[u8; 3]) -> Option<usize> {
     let c = base_to_index(codon[2])?;
     Some(a * 16 + b * 4 + c)
 }
-
-// ---------------------------------------------------------------------------
-// Standard genetic code (NCBI translation table 1)
-// ---------------------------------------------------------------------------
 
 /// Standard genetic code. Index = `base1*16 + base2*4 + base3` where
 /// A=0, C=1, G=2, T=3. Each entry is the one-letter amino acid code;
@@ -92,10 +84,6 @@ static STANDARD_TABLE: [u8; 64] = [
     b'L', b'F', b'L', b'F', // TT{A,C,G,T}
 ];
 
-// ---------------------------------------------------------------------------
-// Vertebrate mitochondrial genetic code (NCBI translation table 2)
-// ---------------------------------------------------------------------------
-
 /// Vertebrate mitochondrial code. Differs from the standard table at 4 codons:
 /// - `TGA` → `W` (Trp, not stop)
 /// - `AGA` → `*` (stop, not Arg)
@@ -123,10 +111,6 @@ static MITO_TABLE: [u8; 64] = [
     b'W', b'C', b'W', b'C', // TG{A,C,G,T}  ← TGA=W (not stop), TGG=W
     b'L', b'F', b'L', b'F', // TT{A,C,G,T}
 ];
-
-// ---------------------------------------------------------------------------
-// Public translation API
-// ---------------------------------------------------------------------------
 
 /// Translate a 3-base codon to a single amino acid character using the
 /// standard genetic code (NCBI table 1).
@@ -204,10 +188,6 @@ pub fn translate_codon_for_transcript(codon: &[u8; 3], is_mitochondrial: bool) -
     }
 }
 
-// ---------------------------------------------------------------------------
-// DNA complement
-// ---------------------------------------------------------------------------
-
 /// Complement a single DNA base. `A↔T`, `C↔G`. Non-ACGT bytes (e.g., `N`)
 /// pass through unchanged.
 ///
@@ -247,10 +227,6 @@ pub fn complement_in_place(seq: &mut [u8]) {
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement(b)).collect()
 }
-
-// ---------------------------------------------------------------------------
-// Amino acid display helpers
-// ---------------------------------------------------------------------------
 
 /// Convert a one-letter amino acid code to its three-letter abbreviation.
 ///
@@ -296,10 +272,6 @@ pub fn aa_three_letter(one_letter: u8) -> &'static str {
         _ => "Xaa",
     }
 }
-
-// ---------------------------------------------------------------------------
-// VEP-style display formatting
-// ---------------------------------------------------------------------------
 
 /// Format ref/alt codons with VEP's capitalization convention.
 ///
@@ -362,10 +334,6 @@ pub fn format_amino_acids(ref_aa: u8, alt_aa: u8) -> String {
         format!("{}/{}", ref_aa as char, alt_aa as char)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Indel helpers
-// ---------------------------------------------------------------------------
 
 /// Translate a DNA sequence to amino acids, codon by codon.
 ///
@@ -522,10 +490,6 @@ pub fn format_amino_acids_indel(ref_aas: &[u8], alt_aas: &[u8]) -> String {
         result
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -15,19 +15,22 @@ use std::path::Path;
 
 use vareffect::{TranscriptStore, VariantLocation, locate_variant};
 
-/// Load the transcript store from the workspace data directory.
+/// Load the GRCh38 transcript store. Reads `GRCH38_TRANSCRIPTS` if set, else
+/// falls back to `data/vareffect/transcript_models_grch38.bin` under the
+/// workspace root (derived from `CARGO_MANIFEST_DIR`).
 fn load_store() -> TranscriptStore {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("Could not determine workspace root from CARGO_MANIFEST_DIR");
-    let path = workspace_root.join("data/vareffect/transcript_models.bin");
-    TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
+    let path = std::env::var("GRCH38_TRANSCRIPTS").unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("Could not determine workspace root from CARGO_MANIFEST_DIR")
+            .join("data/vareffect/transcript_models_grch38.bin")
+            .to_string_lossy()
+            .into_owned()
+    });
+    TranscriptStore::load_from_path(Path::new(&path)).unwrap_or_else(|e| {
         panic!(
-            "Failed to load transcript store from {}: {}. \
-             Run `cargo run -p vareffect-cli -- build` first.",
-            path.display(),
-            e,
+            "failed to load GRCh38 transcript store from {path}: {e}. \
+             Run `vareffect setup --assembly grch38` first.",
         )
     })
 }

@@ -1,8 +1,8 @@
 //! Indel (insertion and deletion) consequence annotation.
 
 use super::helpers::{
-    build_base_result, compute_cdna_position_exonic, compute_cdna_position_for_cds,
-    fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
+    AnnotateCtx, CdsIndelSite, FrameshiftAlt, build_base_result, compute_cdna_position_exonic,
+    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -60,31 +60,24 @@ pub fn annotate_deletion(
         return Ok(result);
     }
 
+    let ctx = AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    };
+
     if location.crosses_exon_boundary {
-        let mut result = super::complex::annotate_boundary_spanning_deletion(
-            chrom,
-            start,
-            end,
-            transcript,
-            locate_index,
-            fasta,
-            &location,
-        )?;
+        let mut result =
+            super::complex::annotate_boundary_spanning_deletion(&ctx, start, end, &location)?;
         result.hgvs_c = hgvs;
         return Ok(result);
     }
 
     // CDS/UTR boundary within the same exon
     if matches!(location.region, IndelRegion::BoundarySpanning) {
-        let mut result = super::complex::annotate_boundary_spanning_deletion(
-            chrom,
-            start,
-            end,
-            transcript,
-            locate_index,
-            fasta,
-            &location,
-        )?;
+        let mut result =
+            super::complex::annotate_boundary_spanning_deletion(&ctx, start, end, &location)?;
         result.hgvs_c = hgvs;
         return Ok(result);
     }
@@ -95,33 +88,17 @@ pub fn annotate_deletion(
             cds_offset_end,
         } => {
             let del_cds_len = cds_offset_end - cds_offset_start;
-            let exon_index = location.exon_index.unwrap_or(0);
+            let site = CdsIndelSite {
+                start: *cds_offset_start,
+                end: *cds_offset_end,
+                exon_index: location.exon_index.unwrap_or(0),
+                is_splice_region: location.overlaps_splice_region,
+            };
 
             if !del_cds_len.is_multiple_of(3) {
-                annotate_cds_frameshift(
-                    chrom,
-                    *cds_offset_start,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                    *cds_offset_end,
-                    None,
-                    None,
-                    0,
-                )
+                annotate_cds_frameshift(&ctx, site, FrameshiftAlt::Deletion, 0)
             } else {
-                annotate_cds_inframe_deletion(
-                    chrom,
-                    *cds_offset_start,
-                    *cds_offset_end,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                )
+                annotate_cds_inframe_deletion(&ctx, site)
             }
         }
         _ => build_noncds_indel_result(transcript, &location, start, end),
@@ -200,44 +177,34 @@ pub fn annotate_insertion(
         return Ok(result);
     }
 
+    let ctx = AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    };
+
     let mut result = match &location.region {
         IndelRegion::Cds {
             cds_offset_start, ..
         } => {
             let ins_len = inserted_bases.len() as u32;
-            let exon_index = location.exon_index.unwrap_or(0);
+            let site = CdsIndelSite {
+                start: *cds_offset_start,
+                end: *cds_offset_start,
+                exon_index: location.exon_index.unwrap_or(0),
+                is_splice_region: location.overlaps_splice_region,
+            };
 
             if !ins_len.is_multiple_of(3) {
-                annotate_cds_frameshift(
-                    chrom,
-                    *cds_offset_start,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                    *cds_offset_start,
-                    Some(inserted_bases),
-                    None,
-                    0, // Pattern G deferred: applying the genomic shift
-                       // as a CDS offset shift causes regressions (~60 cases
-                       // where the shifted CDS position produces a different
-                       // reading frame than VEP expects). Root cause: VEP's
-                       // internal protein-level shift differs from the
-                       // DNA-level shift. Needs per-variant investigation.
-                )
+                // Pattern G deferred: applying the genomic shift as a CDS
+                // offset shift causes regressions where the shifted CDS
+                // position produces a different reading frame than VEP
+                // expects. Root cause: VEP's internal protein-level shift
+                // differs from the DNA-level shift.
+                annotate_cds_frameshift(&ctx, site, FrameshiftAlt::Insertion(inserted_bases), 0)
             } else {
-                annotate_cds_inframe_insertion(
-                    chrom,
-                    *cds_offset_start,
-                    inserted_bases,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                    shift as u32,
-                )
+                annotate_cds_inframe_insertion(&ctx, site, inserted_bases, shift as u32)
             }
         }
         _ => build_noncds_indel_result(transcript, &location, pos, pos),
@@ -254,20 +221,32 @@ pub fn annotate_insertion(
 /// If the frameshift fully removes the start codon (codon 1), reports
 /// `start_lost` instead. If it partially overlaps codon 1, reports
 /// `frameshift_variant` only (VEP behavior).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn annotate_cds_frameshift(
-    chrom: &str,
-    cds_offset_start: u32,
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
-    exon_index: u16,
-    is_splice_region: bool,
-    cds_offset_end: u32,
-    inserted_bases: Option<&[u8]>,
-    delins_alt: Option<&[u8]>,
+    ctx: &AnnotateCtx<'_>,
+    site: CdsIndelSite,
+    alt: FrameshiftAlt<'_>,
     dna_shift: u32,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let CdsIndelSite {
+        start: cds_offset_start,
+        end: cds_offset_end,
+        exon_index,
+        is_splice_region,
+    } = site;
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
+    let inserted_bases = match alt {
+        FrameshiftAlt::Insertion(bases) => Some(bases),
+        _ => None,
+    };
+    let delins_alt = match alt {
+        FrameshiftAlt::ComplexDelins(bases) => Some(bases),
+        _ => None,
+    };
     let is_mito = transcript.chrom == "chrM";
     let is_insertion = cds_offset_end == cds_offset_start;
 
@@ -422,13 +401,10 @@ pub(super) fn annotate_cds_frameshift(
         Some("p.Met1?".to_string())
     } else {
         crate::hgvs_p::format_hgvs_p_frameshift(
+            ctx,
             cds_offset_start,
             cds_offset_end,
             &coding_inserted_for_hgvs,
-            chrom,
-            transcript,
-            index,
-            fasta,
             dna_shift,
         )?
     };
@@ -464,17 +440,22 @@ pub(super) fn annotate_cds_frameshift(
 ///
 /// Expands to codon boundaries, fetches ref codons, removes deleted bases,
 /// retranslates, and compares amino acids.
-#[allow(clippy::too_many_arguments)]
 fn annotate_cds_inframe_deletion(
-    chrom: &str,
-    cds_offset_start: u32,
-    cds_offset_end: u32,
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
-    exon_index: u16,
-    is_splice_region: bool,
+    ctx: &AnnotateCtx<'_>,
+    site: CdsIndelSite,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let CdsIndelSite {
+        start: cds_offset_start,
+        end: cds_offset_end,
+        exon_index,
+        is_splice_region,
+    } = site;
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
     let is_mito = transcript.chrom == "chrM";
 
     let total_cds = index.total_cds_length();
@@ -606,18 +587,24 @@ fn annotate_cds_inframe_deletion(
 /// `> 0`, the HGVS p. notation is recomputed at the shifted CDS offset so
 /// protein-level dup detection works at the shifted position. All other
 /// result fields remain at the original `cds_offset`.
-#[allow(clippy::too_many_arguments)]
 fn annotate_cds_inframe_insertion(
-    chrom: &str,
-    cds_offset: u32,
+    ctx: &AnnotateCtx<'_>,
+    site: CdsIndelSite,
     inserted_bases: &[u8],
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
-    exon_index: u16,
-    is_splice_region: bool,
     dna_shift: u32,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let CdsIndelSite {
+        start: cds_offset,
+        exon_index,
+        is_splice_region,
+        ..
+    } = site;
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
     let is_mito = transcript.chrom == "chrM";
 
     // Expand the codon window to include the preceding codon when the

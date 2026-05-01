@@ -6,6 +6,45 @@ use crate::fasta::FastaReader;
 use crate::locate::LocateIndex;
 use crate::types::{Strand, TranscriptModel, TranscriptTier};
 
+/// Borrowed bundle of the inputs every per-transcript consequence function
+/// needs: chromosome name, transcript model, locate index, and FASTA reader.
+#[derive(Clone, Copy)]
+pub(crate) struct AnnotateCtx<'a> {
+    pub chrom: &'a str,
+    pub transcript: &'a TranscriptModel,
+    pub index: &'a LocateIndex,
+    pub fasta: &'a FastaReader,
+}
+
+/// Position context for a CDS SNV: which codon and which base inside it.
+#[derive(Clone, Copy)]
+pub(crate) struct CodonSite {
+    pub exon_index: u16,
+    pub cds_offset: u32,
+    pub codon_number: u32,
+    pub codon_position: u8,
+    pub is_splice_region: bool,
+}
+
+/// Position context for a CDS indel or frameshift. `start == end` for pure
+/// insertions.
+#[derive(Clone, Copy)]
+pub(crate) struct CdsIndelSite {
+    pub start: u32,
+    pub end: u32,
+    pub exon_index: u16,
+    pub is_splice_region: bool,
+}
+
+/// Coding-strand alternate sequence for a CDS frameshift dispatch, used to
+/// distinguish pure deletions, insertions, and complex delins without
+/// threading two `Option<&[u8]>` arguments.
+pub(crate) enum FrameshiftAlt<'a> {
+    Deletion,
+    Insertion(&'a [u8]),
+    ComplexDelins(&'a [u8]),
+}
+
 /// Fetch the 3-base reference codon from FASTA for a given CDS codon
 /// start offset. Uses the batched [`fetch_cds_sequence`] internally so
 /// a codon within a single CDS segment costs one FASTA seek instead of
@@ -186,13 +225,13 @@ pub(crate) fn fetch_cds_sequence(
             Strand::Minus => (seg.genomic_end - local_end, seg.genomic_end - local_start),
         };
 
-        let chunk = fasta.fetch_sequence(chrom, gstart, gend)?;
+        let chunk = fasta.fetch_sequence_slice(chrom, gstart, gend)?;
         match transcript.strand {
-            Strand::Plus => seq.extend_from_slice(&chunk),
+            Strand::Plus => seq.extend_from_slice(chunk),
             Strand::Minus => {
                 // Plus-strand ascending genomic bytes → reverse complement
                 // for coding strand in 5'→3' transcript order.
-                let rc = crate::codon::reverse_complement(&chunk);
+                let rc = crate::codon::reverse_complement(chunk);
                 seq.extend_from_slice(&rc);
             }
         }

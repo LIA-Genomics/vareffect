@@ -113,10 +113,6 @@ pub(crate) fn format_hgvs_p_snv(
     None
 }
 
-// ---------------------------------------------------------------------------
-// Indel / complex-variant primitives
-// ---------------------------------------------------------------------------
-
 /// Concatenate three-letter amino acid codes for a slice of one-letter codes.
 ///
 /// # Examples
@@ -260,10 +256,6 @@ fn fetch_3prime_utr_coding_seq(
     Ok(utr_seq)
 }
 
-// ---------------------------------------------------------------------------
-// Indel / complex-variant formatters
-// ---------------------------------------------------------------------------
-
 /// Generate HGVS p. notation for a frameshift variant.
 ///
 /// Fetches the remaining CDS from the variant site to the end, builds the
@@ -281,24 +273,26 @@ fn fetch_3prime_utr_coding_seq(
 ///
 /// # Arguments
 ///
+/// * `ctx` — chromosome, transcript, locate index, and FASTA reader bundle
 /// * `cds_offset_start` — 0-based CDS offset where the variant begins
 /// * `cds_offset_end` — 0-based exclusive end (equal to start for insertions)
 /// * `inserted_coding_bases` — coding-strand bases inserted at the variant
 ///   site (empty slice for pure deletions)
-/// * `chrom`, `transcript`, `index`, `fasta` — for downstream CDS/UTR fetch
 /// * `dna_shift` — HGVS 3' normalization shift in CDS bases (0 for
 ///   deletions / delins; `> 0` for insertions in repeat regions)
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn format_hgvs_p_frameshift(
+    ctx: &crate::consequence::helpers::AnnotateCtx<'_>,
     cds_offset_start: u32,
     cds_offset_end: u32,
     inserted_coding_bases: &[u8],
-    chrom: &str,
-    transcript: &TranscriptModel,
-    index: &LocateIndex,
-    fasta: &FastaReader,
     dna_shift: u32,
 ) -> Result<Option<String>, VarEffectError> {
+    let crate::consequence::helpers::AnnotateCtx {
+        chrom,
+        transcript,
+        index,
+        fasta,
+    } = *ctx;
     let total_cds = index.total_cds_length();
     let is_mito = transcript.chrom == "chrM";
 
@@ -923,10 +917,6 @@ fn truncate_at_stop(aas: &[u8]) -> &[u8] {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,10 +1037,6 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // -----------------------------------------------------------------------
-    // Primitives
-    // -----------------------------------------------------------------------
-
     #[test]
     fn format_aa_sequence_basic() {
         assert_eq!(format_aa_sequence(b"GSK"), "GlySerLys");
@@ -1101,10 +1087,6 @@ mod tests {
         let ref_prot3 = b"MWSSSSHD";
         assert_eq!(apply_protein_3prime_rule(ref_prot3, 2, 2), 4);
     }
-
-    // -----------------------------------------------------------------------
-    // Inframe deletion
-    // -----------------------------------------------------------------------
 
     #[test]
     fn inframe_del_single() {
@@ -1159,10 +1141,6 @@ mod tests {
         assert_eq!(result.as_deref(), Some("p.Met1?"));
     }
 
-    // -----------------------------------------------------------------------
-    // Inframe insertion
-    // -----------------------------------------------------------------------
-
     #[test]
     fn inframe_ins_simple() {
         // ref=[K], alt=[K,Q,S,K], protein_start=2, right_flanking=M
@@ -1192,10 +1170,6 @@ mod tests {
         );
         assert_eq!(result.as_deref(), Some("p.Pro2_Ile3insGlyTer"));
     }
-
-    // -----------------------------------------------------------------------
-    // Delins / MNV
-    // -----------------------------------------------------------------------
 
     #[test]
     fn delins_shrink() {

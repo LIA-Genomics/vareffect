@@ -2,8 +2,6 @@ use super::*;
 use crate::test_fixtures::{minus_strand_coding, noncoding_2_exon, plus_strand_coding};
 use crate::types::{Biotype, CdsSegment, Exon, TranscriptTier};
 
-// -- Test fixtures (module-specific) -----------------------------------------
-
 /// Single-exon coding transcript (no introns, no splice sites).
 fn single_exon_coding() -> TranscriptModel {
     TranscriptModel {
@@ -32,6 +30,8 @@ fn single_exon_coding() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -46,8 +46,6 @@ fn locate_minus(pos: u64) -> VariantLocation {
     let idx = LocateIndex::build(&tx).unwrap();
     locate_variant("chr17", pos, pos + 1, &tx, &idx).unwrap()
 }
-
-// -- Upstream / Downstream / Distal -----------------------------------------
 
 #[test]
 fn plus_upstream() {
@@ -69,8 +67,6 @@ fn plus_downstream() {
 fn plus_distal() {
     assert_eq!(locate_plus(15_000), VariantLocation::Distal);
 }
-
-// -- UTR (plus strand) ------------------------------------------------------
 
 #[test]
 fn plus_5prime_utr() {
@@ -95,8 +91,6 @@ fn plus_3prime_utr() {
         },
     );
 }
-
-// -- CDS exon positions (plus strand) ---------------------------------------
 
 #[test]
 fn plus_cds_first_base() {
@@ -159,8 +153,6 @@ fn plus_cds_last_base() {
     );
 }
 
-// -- Splice donor/acceptor (plus strand) ------------------------------------
-
 #[test]
 fn plus_splice_donor_1() {
     assert_eq!(
@@ -205,8 +197,6 @@ fn plus_splice_acceptor_2() {
     );
 }
 
-// -- Splice region (plus strand) --------------------------------------------
-
 #[test]
 fn plus_splice_region_donor() {
     assert_eq!(
@@ -231,8 +221,6 @@ fn plus_splice_region_acceptor() {
     );
 }
 
-// -- Deep intron (plus strand) ----------------------------------------------
-
 #[test]
 fn plus_deep_intron() {
     // Acceptor closer (500) than donor (501) -> negative
@@ -244,8 +232,6 @@ fn plus_deep_intron() {
         },
     );
 }
-
-// -- Exonic splice region (plus strand) -------------------------------------
 
 #[test]
 fn plus_exonic_splice_region_donor() {
@@ -280,8 +266,6 @@ fn plus_no_splice_region_first_exon_start() {
         other => panic!("Expected FivePrimeUtr, got {:?}", other),
     }
 }
-
-// -- Minus-strand UTR and CDS -----------------------------------------------
 
 #[test]
 fn minus_5prime_utr() {
@@ -322,8 +306,6 @@ fn minus_cds_offset() {
     );
 }
 
-// -- Minus-strand splice sites ----------------------------------------------
-
 #[test]
 fn minus_splice_donor() {
     assert_eq!(
@@ -345,8 +327,6 @@ fn minus_splice_acceptor() {
         },
     );
 }
-
-// -- Non-coding transcript --------------------------------------------------
 
 #[test]
 fn non_coding_exon() {
@@ -376,8 +356,6 @@ fn non_coding_intron() {
     );
 }
 
-// -- Single-exon gene -------------------------------------------------------
-
 #[test]
 fn single_exon_no_splice() {
     let tx = single_exon_coding();
@@ -390,8 +368,6 @@ fn single_exon_no_splice() {
         other => panic!("Expected CdsExon, got {:?}", other),
     }
 }
-
-// -- Exon boundary semantics (half-open) ------------------------------------
 
 #[test]
 fn at_exon_boundary_inclusive() {
@@ -413,8 +389,6 @@ fn at_exon_boundary_exclusive() {
         other => panic!("Expected SpliceDonor (intronic), got {:?}", other),
     }
 }
-
-// -- Splice region boundaries -----------------------------------------------
 
 #[test]
 fn splice_region_boundary_at_9() {
@@ -452,7 +426,6 @@ fn splice_region_at_3() {
     );
 }
 
-// -- Acceptor splice region (polypyrimidine tract, -3..-17) -----------------
 //
 // These tests cover VEP's `splice_polypyrimidine_tract_variant` (SO:0002169),
 // which extends the acceptor-side splice region from -8 down to -17. Positions
@@ -515,8 +488,6 @@ fn minus_acceptor_splice_region_polypyrimidine_at_17() {
     );
 }
 
-// -- CDS boundary exact -----------------------------------------------------
-
 #[test]
 fn cds_boundary_exact() {
     let loc = locate_plus(1_500);
@@ -527,8 +498,6 @@ fn cds_boundary_exact() {
         other => panic!("Expected CdsExon, got {:?}", other),
     }
 }
-
-// -- Second intron ----------------------------------------------------------
 
 #[test]
 fn plus_intron_1_splice_donor() {
@@ -552,8 +521,6 @@ fn plus_intron_1_splice_acceptor() {
     );
 }
 
-// -- Minus-strand upstream/downstream ---------------------------------------
-
 #[test]
 fn minus_upstream() {
     assert_eq!(
@@ -569,8 +536,6 @@ fn minus_downstream() {
         VariantLocation::Downstream { distance: 500 },
     );
 }
-
-// -- Minus-strand CDS in second exon ----------------------------------------
 
 #[test]
 fn minus_cds_second_exon() {
@@ -588,8 +553,6 @@ fn minus_cds_second_exon() {
     );
 }
 
-// -- Minus-strand deep intron -----------------------------------------------
-
 #[test]
 fn minus_deep_intron() {
     // donor closer (1000) than acceptor (1001) -> positive
@@ -601,8 +564,6 @@ fn minus_deep_intron() {
         },
     );
 }
-
-// -- Non-coding splice sites ------------------------------------------------
 
 #[test]
 fn non_coding_splice_donor() {
@@ -646,8 +607,6 @@ fn non_coding_exonic_splice_region() {
     );
 }
 
-// -- Display helpers --------------------------------------------------------
-
 #[test]
 fn format_exon_number_works() {
     assert_eq!(format_exon_number(0, 3), "1/3");
@@ -659,8 +618,6 @@ fn format_intron_number_works() {
     assert_eq!(format_intron_number(0, 3), "1/2");
     assert_eq!(format_intron_number(3, 11), "4/10");
 }
-
-// -- Single-exon UTR checks -------------------------------------------------
 
 #[test]
 fn single_exon_5prime_utr() {
@@ -692,8 +649,6 @@ fn single_exon_3prime_utr() {
     );
 }
 
-// -- Minus-strand exonic splice region --------------------------------------
-
 #[test]
 fn minus_exonic_splice_region_donor() {
     // Donor side = low genomic (18000). pos 18001: dist = 2 <= 3 -> true.
@@ -718,8 +673,6 @@ fn minus_exonic_splice_region_acceptor() {
     }
 }
 
-// -- Last exon 3' boundary: no splice region --------------------------------
-
 #[test]
 fn plus_last_exon_3prime_no_splice() {
     // Last exon -> no intron after -> no splice region
@@ -732,8 +685,6 @@ fn plus_last_exon_3prime_no_splice() {
     }
 }
 
-// -- Minus-strand distal ----------------------------------------------------
-
 #[test]
 fn minus_distal_upstream() {
     assert_eq!(locate_minus(30_000), VariantLocation::Distal);
@@ -743,8 +694,6 @@ fn minus_distal_upstream() {
 fn minus_distal_downstream() {
     assert_eq!(locate_minus(1_000), VariantLocation::Distal);
 }
-
-// -- Minus-strand: 5'UTR at exact CDS boundary ------------------------------
 
 #[test]
 fn minus_5prime_utr_at_cds_boundary() {
@@ -758,8 +707,6 @@ fn minus_5prime_utr_at_cds_boundary() {
         },
     );
 }
-
-// -- Minus-strand: first CDS base -------------------------------------------
 
 #[test]
 fn minus_cds_first_base() {
@@ -776,8 +723,6 @@ fn minus_cds_first_base() {
         },
     );
 }
-
-// -- Multi-exon UTR tests ---------------------------------------------------
 
 /// Plus-strand transcript with 5'UTR and 3'UTR each spanning 2 exons.
 ///
@@ -842,6 +787,8 @@ fn plus_strand_multi_exon_utr() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -898,6 +845,8 @@ fn minus_strand_multi_exon_utr() -> TranscriptModel {
         tier: TranscriptTier::ManeSelect,
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        genome_transcript_divergent: false,
+        translational_exception: None,
     }
 }
 
@@ -961,8 +910,6 @@ fn minus_multi_exon_3prime_utr() {
     );
 }
 
-// -- locate_indel tests -----------------------------------------------------
-
 #[test]
 fn locate_indel_cds_deletion() {
     let tx = plus_strand_coding();
@@ -1015,7 +962,6 @@ fn locate_indel_insertion_in_cds() {
     assert_eq!(loc.exon_index, Some(0));
 }
 
-// -- Partial-overlap (edge-straddling) regression tests --------------------
 //
 // Regressions: deletions/delins whose genomic footprint
 // extends past one transcript edge but retains at least one base inside
@@ -1078,7 +1024,6 @@ fn locate_indel_minus_straddles_high_genomic_edge() {
     assert!(loc.intron_index.is_none());
 }
 
-// -- Regression: canonical splice overlap must use half-open -----------------
 //
 // These tests guard the locate-layer fix for canonical splice overlap: a previous
 // `check_splice_overlap_for_range` helper used a symmetric ±2 buffer around

@@ -14,11 +14,13 @@
 //! construction and at query time.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use coitrees::{COITree, IntervalNode, IntervalTree};
+use serde::Deserialize;
 
+use crate::chrom::Assembly;
 use crate::error::VarEffectError;
 use crate::locate::LocateIndex;
 use crate::types::TranscriptModel;
@@ -51,34 +53,61 @@ pub struct TranscriptStore {
     /// here; resolving an unversioned HGVS input to "the latest version"
     /// belongs with the caller, not the raw store.
     by_accession: HashMap<String, usize>,
+    /// Reference build the store was constructed against. Read from the
+    /// sibling `.manifest.json` at load time and used by [`crate::VarEffect`]
+    /// to assert the matching [`crate::FastaReader::assembly`] before
+    /// annotation begins.
+    assembly: Assembly,
+}
+
+/// Subset of the sibling `.manifest.json` that the runtime reader cares
+/// about. Other fields (sha256, build_at, etc.) are silently ignored.
+#[derive(Debug, Deserialize)]
+struct StoreManifest {
+    /// Reference build identifier — `"GRCh38"` or `"GRCh37"`. Loaders
+    /// treat absence as a hard error rather than defaulting to GRCh38,
+    /// since defaulting would let a GRCh37 dataset load under the wrong
+    /// chrom table.
+    assembly: Option<String>,
 }
 
 impl TranscriptStore {
     /// Load and index a MessagePack-serialized `Vec<TranscriptModel>` from
-    /// disk.
+    /// disk, reading the assembly from the sibling `.manifest.json` file.
+    ///
+    /// The manifest sibling lives at `<basename>.manifest.json` next to the
+    /// `.bin` file (both are written by `vareffect-cli setup`). It must
+    /// carry an `"assembly"` field set to `"GRCh38"` or `"GRCh37"`.
     ///
     /// # Errors
     ///
-    /// * [`VarEffectError::Io`] if the file cannot be read.
+    /// * [`VarEffectError::Io`] if the `.bin` or manifest file cannot be read.
     /// * [`VarEffectError::Deserialize`] if the MessagePack payload is
     ///   malformed or the wrong type.
-    /// * [`VarEffectError::Malformed`] if any record violates a coordinate
-    ///   invariant (`tx_end <= tx_start` or `tx_end > i32::MAX`).
+    /// * [`VarEffectError::AssemblyMissingFromManifest`] if the sibling
+    ///   manifest exists but has no `assembly` field — older binaries
+    ///   must be rebuilt via `vareffect setup`. Defaulting to GRCh38 here
+    ///   would let a GRCh37 dataset load under the wrong chrom table.
+    /// * [`VarEffectError::Malformed`] if the manifest's `assembly` value is
+    ///   neither `"GRCh38"` nor `"GRCh37"`, or if any record violates a
+    ///   coordinate invariant (`tx_end <= tx_start` or `tx_end > i32::MAX`).
     pub fn load_from_path(path: &Path) -> Result<Self, VarEffectError> {
         let bytes = std::fs::read(path).map_err(|source| VarEffectError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         let transcripts: Vec<TranscriptModel> = rmp_serde::from_slice(&bytes)?;
-        Self::try_from_transcripts(transcripts)
+        let assembly = read_assembly_from_manifest(path)?;
+        Self::try_from_transcripts(assembly, transcripts)
     }
 
-    /// Build a store from an owned `Vec<TranscriptModel>`.
+    /// Build a store from an owned `Vec<TranscriptModel>` for a specific
+    /// assembly.
     ///
     /// Panics on invariant violations — use [`TranscriptStore::try_from_transcripts`]
     /// in contexts where malformed input is possible.
-    pub fn from_transcripts(transcripts: Vec<TranscriptModel>) -> Self {
-        Self::try_from_transcripts(transcripts)
+    pub fn from_transcripts(assembly: Assembly, transcripts: Vec<TranscriptModel>) -> Self {
+        Self::try_from_transcripts(assembly, transcripts)
             .expect("TranscriptStore::from_transcripts: invariant violation in input")
     }
 
@@ -86,7 +115,10 @@ impl TranscriptStore {
     ///
     /// Used by the MessagePack loader so corrupt on-disk data surfaces as an
     /// error rather than a panic.
-    pub fn try_from_transcripts(transcripts: Vec<TranscriptModel>) -> Result<Self, VarEffectError> {
+    pub fn try_from_transcripts(
+        assembly: Assembly,
+        transcripts: Vec<TranscriptModel>,
+    ) -> Result<Self, VarEffectError> {
         // Per-chromosome scratch buckets so we can `COITree::new(&nodes)` once
         // per chromosome without re-sorting the global vec.
         let mut scratch: HashMap<String, Vec<IntervalNode<usize, u32>>> = HashMap::new();
@@ -155,7 +187,13 @@ impl TranscriptStore {
             locate_indices: Arc::from(locate_indices.into_boxed_slice()),
             trees,
             by_accession,
+            assembly,
         })
+    }
+
+    /// Reference build the store was constructed for.
+    pub fn assembly(&self) -> Assembly {
+        self.assembly
     }
 
     /// Return every transcript whose `tx_start..tx_end` overlaps the
@@ -265,7 +303,63 @@ impl std::fmt::Debug for TranscriptStore {
             .field("len", &self.transcripts.len())
             .field("chromosomes", &self.trees.len())
             .field("first_accessions", &accessions)
+            .field("assembly", &self.assembly)
             .finish()
+    }
+}
+
+/// Read the `assembly` field from the sibling `<basename>.manifest.json`.
+///
+/// `bin_path` is the `.bin` file path; the manifest sibling is derived by
+/// replacing the extension with `manifest.json` (so
+/// `data/vareffect/transcript_models_grch38.bin` →
+/// `data/vareffect/transcript_models_grch38.manifest.json`).
+///
+/// Defaulting on missing files or missing fields is intentionally rejected:
+/// a GRCh37 dataset loaded under a GRCh38-defaulted store would silently
+/// mis-annotate every variant, so the loader requires an explicit value.
+fn read_assembly_from_manifest(bin_path: &Path) -> Result<Assembly, VarEffectError> {
+    let manifest_path = manifest_path_for(bin_path);
+    let text = std::fs::read_to_string(&manifest_path).map_err(|source| VarEffectError::Io {
+        path: manifest_path.clone(),
+        source,
+    })?;
+    let manifest: StoreManifest = serde_json::from_str(&text).map_err(|e| VarEffectError::Io {
+        path: manifest_path.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+    let Some(raw) = manifest.assembly else {
+        return Err(VarEffectError::AssemblyMissingFromManifest {
+            path: bin_path.to_path_buf(),
+        });
+    };
+    raw.parse::<Assembly>().map_err(|_| {
+        VarEffectError::Malformed(format!(
+            "unrecognized assembly {raw:?} in {}; expected GRCh38 or GRCh37",
+            manifest_path.display()
+        ))
+    })
+}
+
+/// Derive the sibling `.manifest.json` path from a `.bin` path.
+///
+/// Replaces the `.bin` extension with `.manifest.json` so a `.bin` path
+/// like `transcript_models_grch38.bin` maps to
+/// `transcript_models_grch38.manifest.json`. If the input path has no
+/// extension or doesn't end in `.bin`, falls back to appending
+/// `.manifest.json` to the full path so the I/O error surfaces with a
+/// readable filename.
+fn manifest_path_for(bin_path: &Path) -> PathBuf {
+    if let (Some(parent), Some(stem)) = (bin_path.parent(), bin_path.file_stem()) {
+        let mut name = stem.to_os_string();
+        name.push(".manifest.json");
+        parent.join(name)
+    } else {
+        let mut path = bin_path.to_path_buf();
+        let mut s = path.as_os_str().to_os_string();
+        s.push(".manifest.json");
+        path = PathBuf::from(s);
+        path
     }
 }
 
@@ -327,6 +421,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 3,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -377,6 +473,8 @@ mod tests {
             tier: TranscriptTier::ManePlusClinical,
             biotype: Biotype::ProteinCoding,
             exon_count: 5,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -402,6 +500,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::NonCodingRna,
             exon_count: 1,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
@@ -432,16 +532,21 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }
     }
 
     fn build_sample_store() -> TranscriptStore {
-        TranscriptStore::from_transcripts(vec![
-            plus_strand_3_exon(),
-            minus_strand_5_exon(),
-            noncoding_1_exon(),
-            patch_sequence_transcript(),
-        ])
+        TranscriptStore::from_transcripts(
+            crate::Assembly::GRCh38,
+            vec![
+                plus_strand_3_exon(),
+                minus_strand_5_exon(),
+                noncoding_1_exon(),
+                patch_sequence_transcript(),
+            ],
+        )
     }
 
     #[test]
@@ -534,7 +639,7 @@ mod tests {
         ];
         let bytes = rmp_serde::to_vec_named(&original).expect("serialize");
         let decoded: Vec<TranscriptModel> = rmp_serde::from_slice(&bytes).expect("deserialize");
-        let store = TranscriptStore::from_transcripts(decoded);
+        let store = TranscriptStore::from_transcripts(crate::Assembly::GRCh38, decoded);
 
         let (tx, _) = store.get_by_accession("NM_000001.1").unwrap();
         assert_eq!(tx.strand, Strand::Plus);
@@ -592,10 +697,12 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::Unknown,
             exon_count: 0,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         }];
         // Explicit match instead of `unwrap_err` because TranscriptStore
         // owns a COITree that does not implement Debug.
-        match TranscriptStore::try_from_transcripts(bad) {
+        match TranscriptStore::try_from_transcripts(crate::Assembly::GRCh38, bad) {
             Ok(_) => panic!("expected Malformed error for zero-length transcript"),
             Err(VarEffectError::Malformed(msg)) => assert!(msg.contains("tx_start=100")),
             Err(other) => panic!("expected Malformed, got {other:?}"),
@@ -605,7 +712,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_accession() {
         let dup = vec![plus_strand_3_exon(), plus_strand_3_exon()];
-        match TranscriptStore::try_from_transcripts(dup) {
+        match TranscriptStore::try_from_transcripts(crate::Assembly::GRCh38, dup) {
             Ok(_) => panic!("expected Malformed error for duplicate accession"),
             Err(VarEffectError::Malformed(msg)) => assert!(msg.contains("duplicate")),
             Err(other) => panic!("expected Malformed, got {other:?}"),

@@ -131,6 +131,85 @@ pub(super) fn extract_transcript_from_id(id: &str) -> Option<String> {
 /// helper: `NP_` (canonical), `YP_` (mitochondrial), `XP_` (predicted).
 pub(super) const PROTEIN_ACCESSION_PREFIXES: &[&str] = &["NP_", "YP_", "XP_"];
 
+/// Substring pattern NCBI uses in `Note=` attributes to flag transcripts
+/// whose sequence differs from the reference assembly.
+///
+/// In the GRCh37.p13 GFF3 every divergence note is structured as one of:
+///
+/// > "The RefSeq transcript aligns at N% coverage compared to this genomic sequence"
+/// > "The RefSeq transcript has N substitution(s) compared to this genomic sequence"
+/// > "The RefSeq transcript has N frameshift(s) compared to this genomic sequence"
+/// > "The RefSeq transcript has N non-frameshifting indel(s) compared to this genomic sequence"
+/// > combinations of the above
+///
+/// All variants share the trailing phrase "compared to this genomic
+/// sequence", and that phrase appears nowhere else in `Note=` attributes
+/// on mRNA rows in the GRCh37 GFF3 (verified empirically: 6,402 / 6,402
+/// of mRNA `Note=` attributes contain it; 0 don't). One pattern is
+/// therefore enough.
+///
+/// Future drift in NCBI's wording surfaces as a ClinVar-concordance
+/// regression rather than a silent miss: the ClinVar self-concordance
+/// suite asserts the divergent-set fraction lands in [4 %, 6 %] of the
+/// GRCh37 store, matching NCBI's published ~5 % figure for RefSeq Select.
+pub(super) const DIVERGENCE_NOTE_PATTERN: &str = "compared to this genomic sequence";
+
+/// Detect whether an mRNA or CDS row's `Note=` attribute flags the
+/// transcript as having sequence divergence from the reference assembly.
+///
+/// Case-insensitive substring match against [`DIVERGENCE_NOTE_PATTERN`].
+/// Returns `false` for absent or empty `Note=` attributes — divergence is
+/// the rare case (~5 % on GRCh37, 0 % on GRCh38 MANE) and the default
+/// must be permissive so non-divergent transcripts produce no warning.
+pub(super) fn extract_divergence_flag(attrs: &str) -> bool {
+    let Some(note) = extract_attr(attrs, "Note") else {
+        return false;
+    };
+    if note.is_empty() {
+        return false;
+    }
+    note.to_ascii_lowercase().contains(DIVERGENCE_NOTE_PATTERN)
+}
+
+/// Detect whether a CDS row's `transl_except=` attribute marks a
+/// translational exception (selenocysteine / pyrrolysine readthrough).
+///
+/// Returns the residue identity. Distinct from divergence detection:
+/// `transl_except` is a known biological mechanism that vareffect should
+/// record but should NOT raise as a clinical warning, because the HGVS
+/// position remains correct against the reference.
+///
+/// NCBI's qualifier format is
+/// `transl_except=(pos:X..Y,aa:Sec)` (or `aa:Pyl`).
+pub(super) fn extract_translational_exception(
+    attrs: &str,
+) -> Option<vareffect::TranslationalException> {
+    let raw = extract_attr(attrs, "transl_except")?;
+    // Look for `aa:Sec` / `aa:Pyl` / `aa:<other>` inside the qualifier.
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("aa:sec") || lower.contains("aa:selenocysteine") {
+        Some(vareffect::TranslationalException::Selenocysteine)
+    } else if lower.contains("aa:pyl") || lower.contains("aa:pyrrolysine") {
+        Some(vareffect::TranslationalException::Pyrrolysine)
+    } else if let Some(idx) = lower.find("aa:") {
+        // Capture the rest of the value after `aa:` up to the next
+        // delimiter, so an unknown amino acid round-trips as
+        // `Other("Cys")` rather than getting silently dropped.
+        let tail = &raw[idx + 3..];
+        let stop = tail
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(tail.len());
+        let aa = &tail[..stop];
+        if aa.is_empty() {
+            None
+        } else {
+            Some(vareffect::TranslationalException::Other(aa.to_string()))
+        }
+    } else {
+        None
+    }
+}
+
 /// Extract a protein accession from a CDS row's attribute column.
 ///
 /// NCBI GFF3 places the protein accession in two possible locations:
@@ -163,6 +242,36 @@ pub(super) fn extract_protein_id_from_cds_attrs(attrs: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_divergence_flag_matches_real_ncbi_grch37_wording() {
+        // Verbatim Note= attributes pulled from NCBI's
+        // GCF_000001405.25_GRCh37.p13_genomic.gff.gz. All four shapes
+        // appear on `tag=RefSeq Select` mRNAs and must be flagged.
+        let cases = [
+            "ID=rna-X;Note=The RefSeq transcript aligns at 99%25 coverage compared to this genomic sequence;tag=RefSeq Select",
+            "ID=rna-X;Note=The RefSeq transcript has 1 substitution compared to this genomic sequence",
+            "ID=rna-X;Note=The RefSeq transcript has 1 frameshift compared to this genomic sequence",
+            "ID=rna-X;Note=The RefSeq transcript has 1 substitution%2C 1 non-frameshifting indel compared to this genomic sequence",
+        ];
+        for attrs in cases {
+            assert!(
+                extract_divergence_flag(attrs),
+                "expected divergence flag on: {attrs}",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_divergence_flag_is_false_when_note_is_absent_or_unrelated() {
+        assert!(!extract_divergence_flag("ID=rna-X;tag=RefSeq Select"));
+        assert!(!extract_divergence_flag("ID=rna-X;Note="));
+        // GRCh38 MANE rows carry no divergence Note. A benign Note must
+        // not false-positive.
+        assert!(!extract_divergence_flag(
+            "ID=rna-X;Note=transcript variant 2;tag=MANE Select"
+        ));
+    }
 
     #[test]
     fn extract_attr_decodes_common_encodings() {

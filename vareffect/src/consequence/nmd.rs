@@ -145,6 +145,8 @@ mod tests {
             tier: TranscriptTier::ManeSelect,
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            genome_transcript_divergent: false,
+            translational_exception: None,
         };
         let idx = build_index(&tx);
         assert!(!predicts_nmd(10, &idx));

@@ -217,9 +217,9 @@ pub struct TranscriptModel {
     /// contig name exactly as published by MANE GFF3 column 1 (e.g.
     /// `"chr9_KN196479v1_fix"`, `"chr22_KI270879v1_alt"`). Against an NCBI
     /// RefSeq FASTA, patch lookups work only when
-    /// [`crate::FastaReader::open_with_patch_aliases`] is supplied a
-    /// `patch_chrom_aliases.csv` that maps the UCSC form back to the
-    /// matching `NW_*`/`NT_*` RefSeq accession.
+    /// [`crate::FastaReader::open_with_patch_aliases_and_assembly`] is supplied
+    /// a per-assembly `patch_chrom_aliases_grch{37,38}.csv` that maps the
+    /// UCSC form back to the matching `NW_*`/`NT_*` RefSeq accession.
     pub chrom: String,
     /// Transcript strand orientation.
     pub strand: Strand,
@@ -264,6 +264,63 @@ pub struct TranscriptModel {
     /// Stored for O(1) access without traversing the vec. `u16` suffices
     /// (TTN, the longest known, is ~363).
     pub exon_count: u16,
+
+    /// `true` when NCBI flags this transcript as having sequence that
+    /// differs from the corresponding reference assembly.
+    ///
+    /// Sourced from the GFF3 `Note=` attribute on the mRNA or any child
+    /// CDS row, where NCBI's RefSeq annotation pipeline records "the
+    /// transcript variant ... differs from the reference assembly". On
+    /// GRCh37, ~5 % of RefSeq Select transcripts carry this flag because
+    /// the underlying mRNA was sequenced from a different individual than
+    /// the GRCh37 reference. A frameshift or indel HGVS string against a
+    /// divergent transcript may not map back to the same genomic position
+    /// it would on the reference, so [`crate::VarEffect::annotate`]
+    /// surfaces a clinical warning whenever the chosen transcript carries
+    /// the flag.
+    ///
+    /// `#[serde(default)]` is purely forward-compatibility insurance —
+    /// the build pipeline always populates this field for both MANE
+    /// (GRCh38) and RefSeq Select (GRCh37) sources. If a future store
+    /// format ever omits it, the default `false` is the correct semantic
+    /// for MANE (curation excludes known divergence by construction)
+    /// and the safest fallback for any other source.
+    #[serde(default)]
+    pub genome_transcript_divergent: bool,
+
+    /// Translational exception annotation (selenocysteine / pyrrolysine
+    /// readthrough) parsed from the GFF3 `transl_except=` attribute on a
+    /// CDS row.
+    ///
+    /// Distinct from [`genome_transcript_divergent`](Self::genome_transcript_divergent):
+    /// `transl_except` flags a *known biological mechanism* (a TGA codon
+    /// that is read as Sec / Pyl rather than as a stop), not a transcript
+    /// vs. genome sequence disagreement. Annotation tools should record it
+    /// for downstream protein-level reasoning but should NOT raise a
+    /// clinical divergence warning.
+    #[serde(default)]
+    pub translational_exception: Option<TranslationalException>,
+}
+
+/// Per-transcript translational exception flag, parsed from the GFF3
+/// `transl_except=(pos:X..Y,aa:Sec)` attribute on a CDS row.
+///
+/// Selenocysteine (Sec) and pyrrolysine (Pyl) are encoded by codons that
+/// would otherwise be read as stops (UGA and UAG respectively). NCBI marks
+/// the affected CDS rows with a `transl_except` qualifier; vareffect
+/// records the residue identity so downstream code can avoid emitting a
+/// spurious `stop_gained` consequence at the readthrough codon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum TranslationalException {
+    /// Selenocysteine readthrough at a UGA codon.
+    Selenocysteine,
+    /// Pyrrolysine readthrough at a UAG codon.
+    Pyrrolysine,
+    /// Other readthrough mechanism — the inner string preserves NCBI's
+    /// raw `aa:` value so downstream consumers can extend without an
+    /// upstream change here.
+    Other(String),
 }
 
 #[cfg(test)]

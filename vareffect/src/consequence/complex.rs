@@ -1,8 +1,8 @@
 //! Boundary-spanning deletions, complex delins, and MNV annotation.
 
 use super::helpers::{
-    build_base_result, compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon,
-    finalize_consequences, is_incomplete_terminal_codon,
+    AnnotateCtx, CdsIndelSite, FrameshiftAlt, build_base_result, compute_cdna_position_for_cds,
+    fetch_cds_sequence, fetch_ref_codon, finalize_consequences, is_incomplete_terminal_codon,
 };
 use super::indel::{annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result};
 use super::{Consequence, ConsequenceResult, Impact};
@@ -11,7 +11,6 @@ use crate::codon::{
     translate_codon_for_transcript, translate_sequence,
 };
 use crate::error::VarEffectError;
-use crate::fasta::FastaReader;
 use crate::hgvs_c;
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
@@ -73,16 +72,18 @@ fn compute_cds_overlap_offsets(
 /// 1. Splice canonical overlap -> splice donor/acceptor consequence.
 /// 2. CDS-projected deletion -> frame analysis (frameshift or inframe).
 /// 3. No CDS overlap -> intronic/UTR consequence.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn annotate_boundary_spanning_deletion(
-    chrom: &str,
+    ctx: &AnnotateCtx<'_>,
     start: u64,
     end: u64,
-    transcript: &TranscriptModel,
-    locate_index: &LocateIndex,
-    fasta: &FastaReader,
     location: &IndelLocation,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    } = *ctx;
     let is_mito = transcript.chrom == "chrM";
 
     if location.overlaps_splice_canonical {
@@ -224,16 +225,8 @@ pub(super) fn annotate_boundary_spanning_deletion(
             b'X'
         };
 
-        let hgvs_p = crate::hgvs_p::format_hgvs_p_frameshift(
-            global_cds_start,
-            global_cds_end,
-            &[], // pure deletion, no inserted bases
-            chrom,
-            transcript,
-            locate_index,
-            fasta,
-            0, // no 3' shift for boundary-spanning deletions
-        )?;
+        let hgvs_p =
+            crate::hgvs_p::format_hgvs_p_frameshift(ctx, global_cds_start, global_cds_end, &[], 0)?;
 
         let mut result = build_base_result(transcript, consequences);
         result.impact = impact;
@@ -397,16 +390,18 @@ pub(super) fn annotate_boundary_spanning_deletion(
 /// length is not a multiple of 3 -> `FrameshiftVariant`. Otherwise ->
 /// `ProteinAlteringVariant` (VEP convention for delins that change both
 /// sequence and length).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn annotate_complex_delins(
-    chrom: &str,
+    ctx: &AnnotateCtx<'_>,
     start: u64,
     trimmed_ref: &[u8],
     trimmed_alt: &[u8],
-    transcript: &TranscriptModel,
-    locate_index: &LocateIndex,
-    fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    } = *ctx;
     let ref_len = trimmed_ref.len() as u64;
     let del_end = start + ref_len;
     let is_mito = transcript.chrom == "chrM";
@@ -422,15 +417,7 @@ pub(super) fn annotate_complex_delins(
     }
 
     if location.crosses_exon_boundary {
-        let mut result = annotate_boundary_spanning_deletion(
-            chrom,
-            start,
-            del_end,
-            transcript,
-            locate_index,
-            fasta,
-            &location,
-        )?;
+        let mut result = annotate_boundary_spanning_deletion(ctx, start, del_end, &location)?;
         result.hgvs_c = hgvs;
         return Ok(result);
     }
@@ -455,17 +442,16 @@ pub(super) fn annotate_complex_delins(
             }
 
             if net_change % 3 != 0 {
-                let mut result = annotate_cds_frameshift(
-                    chrom,
-                    *cds_offset_start,
-                    transcript,
-                    locate_index,
-                    fasta,
+                let site = CdsIndelSite {
+                    start: *cds_offset_start,
+                    end: *cds_offset_end,
                     exon_index,
-                    location.overlaps_splice_region,
-                    *cds_offset_end,
-                    None,
-                    Some(trimmed_alt),
+                    is_splice_region: location.overlaps_splice_region,
+                };
+                let mut result = annotate_cds_frameshift(
+                    ctx,
+                    site,
+                    FrameshiftAlt::ComplexDelins(trimmed_alt),
                     0,
                 )?;
                 result.hgvs_c = hgvs;
@@ -594,16 +580,18 @@ pub(super) fn annotate_complex_delins(
 /// is replaced by the alt. For CDS variants, all affected codons are
 /// expanded, translated, and compared. VEP reports the most severe
 /// consequence across affected codons.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn annotate_mnv(
-    chrom: &str,
+    ctx: &AnnotateCtx<'_>,
     start: u64,
     ref_bases: &[u8],
     alt_bases: &[u8],
-    transcript: &TranscriptModel,
-    locate_index: &LocateIndex,
-    fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let AnnotateCtx {
+        chrom,
+        transcript,
+        index: locate_index,
+        fasta,
+    } = *ctx;
     let n = ref_bases.len() as u64;
     let end = start + n;
     let is_mito = transcript.chrom == "chrM";

@@ -20,12 +20,12 @@ Run a single test:
 cargo test -p vareffect test_name
 ```
 
-Integration tests are `#[ignore]`-gated and require runtime data files (`data/vareffect/GRCh38.bin`, `data/vareffect/transcript_models.bin`). To run them:
+Integration tests are `#[ignore]`-gated and require runtime data files (`data/vareffect/GRCh38.bin`, `data/vareffect/transcript_models_grch38.bin`, and the matching `data/vareffect/patch_chrom_aliases_grch38.csv`). The GRCh38 helpers also read the `GRCH38_FASTA` env var (and optionally `GRCH38_TRANSCRIPTS`); GRCh37-suffixed tests use `GRCH37_FASTA` / `GRCH37_TRANSCRIPTS`. To run them:
 ```bash
-cargo test -p vareffect -- --ignored
+GRCH38_FASTA=data/vareffect/GRCh38.bin cargo test -p vareffect -- --ignored
 ```
 
-Generate data files with `vareffect setup` (one-time, ~10 min, ~3 GB disk).
+Generate data files with `vareffect setup --assembly grch38` (one-time, ~10 min, ~3 GB disk). Add `--assembly grch37` for the GRCh37 build, or `--assembly all` to build both.
 
 ## Architecture
 

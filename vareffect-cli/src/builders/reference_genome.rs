@@ -508,7 +508,8 @@ mod tests {
         assert!(idx_path.exists());
 
         // Open via the runtime reader and verify sequence content.
-        let reader = FastaReader::open(&bin_path).unwrap();
+        let reader =
+            FastaReader::open_with_assembly(&bin_path, vareffect::Assembly::GRCh38).unwrap();
         assert_eq!(reader.fetch_sequence("chr1", 0, 4).unwrap(), b"ACGT");
         assert_eq!(reader.fetch_sequence("chr1", 8, 16).unwrap(), b"NNNNNNNN");
         assert_eq!(reader.chrom_length("chr1"), Some(16));
@@ -549,7 +550,8 @@ mod tests {
             convert_fasta_to_flat_binary(&fasta_path, &bin_path, &idx_path, "test").unwrap();
         assert_eq!(contigs, 1);
 
-        let reader = FastaReader::open(&bin_path).unwrap();
+        let reader =
+            FastaReader::open_with_assembly(&bin_path, vareffect::Assembly::GRCh38).unwrap();
         assert_eq!(
             reader.fetch_sequence("chr1", 0, 15).unwrap(),
             b"ACGTNRYSWKMBDHV",

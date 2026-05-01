@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::chrom::Assembly;
+
 /// Errors returned by `vareffect` APIs.
 #[derive(Debug, thiserror::Error)]
 pub enum VarEffectError {
@@ -147,4 +149,60 @@ pub enum VarEffectError {
     /// Surfaced instead of panicking per library error-handling policy.
     #[error("allele contains invalid (non-ASCII) bytes")]
     InvalidAllele,
+
+    /// `VarEffect::annotate` was called for an [`Assembly`] that wasn't
+    /// loaded into the [`crate::VarEffect`] instance via the builder.
+    #[error(
+        "assembly {assembly} is not loaded; \
+         construct the VarEffect via VarEffectBuilder::with_{slot}(...).build()"
+    )]
+    AssemblyNotLoaded {
+        /// Assembly the caller asked for.
+        assembly: Assembly,
+        /// Lowercase slot name for the builder method (`grch38` / `grch37`).
+        slot: &'static str,
+    },
+
+    /// The transcript store and FASTA reader handed to a builder slot were
+    /// built for different assemblies. Silent assembly mismatch would
+    /// corrupt every coordinate lookup, so the constructor refuses to
+    /// proceed.
+    #[error(
+        "assembly mismatch: transcripts={transcripts}, fasta={fasta} — \
+         each VarEffect slot requires both stores to be built for the same assembly"
+    )]
+    AssemblyMismatch {
+        /// Assembly recorded in the [`crate::TranscriptStore`] manifest.
+        transcripts: Assembly,
+        /// Assembly the [`crate::FastaReader`] was opened with.
+        fasta: Assembly,
+    },
+
+    /// The transcript store's sibling `.manifest.json` did not include an
+    /// `assembly` field. Pre-GRCh37-support binaries are GRCh38-only but
+    /// did not record their assembly, and silently defaulting them to
+    /// GRCh38 would let a GRCh37 dataset load under the wrong chrom table.
+    /// Rebuild via `vareffect setup`.
+    #[error(
+        "transcript store at {path} has no `assembly` in its sibling manifest \
+         (legacy build); rerun `vareffect setup --assembly <grch37|grch38>` to rebuild"
+    )]
+    AssemblyMissingFromManifest {
+        /// Path the caller attempted to load.
+        path: PathBuf,
+    },
+
+    /// `Assembly::from_str` was called with a UCSC alias (`hg19`, `hg38`)
+    /// or an unrecognized identifier. UCSC `hg19` chrM (NC_001807) differs
+    /// from GRCh37 chrMT (NC_012920.1, the rCRS), so silently mapping
+    /// `hg19` to GRCh37 would mis-annotate every chrM variant.
+    #[error(
+        "unsupported assembly identifier `{input}`; use `grch37` or `grch38` \
+         (note: UCSC `hg19` chrM ≠ GRCh37 chrMT — vareffect rejects the alias \
+         to avoid silent chrM coordinate divergence)"
+    )]
+    UnsupportedAssemblyAlias {
+        /// String the caller attempted to parse.
+        input: String,
+    },
 }

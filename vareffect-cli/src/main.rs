@@ -16,12 +16,46 @@ mod setup;
 mod vcf;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use vareffect::Assembly;
 
 use crate::common::{print_build_header, print_build_summary};
+
+/// CLI value for `--assembly`. Maps to [`vareffect::Assembly`] for the
+/// runtime path; the `All` variant is `setup`-only and means "build
+/// every assembly the config defines".
+///
+/// Variant idents follow the NCBI casing used by the core [`Assembly`]
+/// enum. The explicit `#[value(name = "...")]` attributes pin the
+/// CLI surface form (`grch37` / `grch38`) so it stays decoupled from
+/// the Rust ident — without them, clap's kebab-case derivation would
+/// split `GRCh38` at the `RCh` boundary and produce `gr-ch38`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AssemblyArg {
+    /// GRCh38 (NCBI MANE source).
+    #[value(name = "grch38")]
+    GRCh38,
+    /// GRCh37 (NCBI RefSeq Select source).
+    #[value(name = "grch37")]
+    GRCh37,
+    /// Build every assembly defined in the config. Setup-only — the
+    /// `annotate` subcommand requires a single assembly.
+    All,
+}
+
+impl AssemblyArg {
+    fn to_assembly(self) -> Result<Assembly> {
+        match self {
+            AssemblyArg::GRCh38 => Ok(Assembly::GRCh38),
+            AssemblyArg::GRCh37 => Ok(Assembly::GRCh37),
+            AssemblyArg::All => bail!("--assembly all is only valid for `setup`"),
+        }
+    }
+}
 
 /// Build tooling for vareffect runtime data.
 ///
@@ -54,10 +88,11 @@ enum Command {
 
     /// Set up all runtime data for vareffect in one command.
     ///
-    /// Downloads the GRCh38 reference FASTA, decompresses and indexes it
-    /// (produces `GRCh38.fa.gz` + `.fai` + `.gzi`), downloads the NCBI
+    /// Downloads the per-assembly reference FASTA, decompresses and indexes
+    /// it (produces e.g. `GRCh38.bin` + `.bin.idx`), downloads the NCBI
     /// assembly report and builds patch-chrom aliases, then downloads the
-    /// MANE GFF3 + summary TSV and builds `transcript_models.bin`.
+    /// transcript-source GFF3 (MANE for GRCh38, RefSeq Select for GRCh37)
+    /// and builds the matching `transcript_models_grch{37,38}.bin`.
     ///
     /// Idempotent: the reference FASTA is skipped if already present;
     /// transcript models are always rebuilt. Source archives land in
@@ -71,6 +106,11 @@ enum Command {
         /// are written here instead of `[vareffect].output_dir`.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Reference build to set up. Defaults to `grch38`; `all` builds
+        /// every assembly defined in the config (an additional ~6 GB of
+        /// raw downloads + ~3 GB of binaries on top of GRCh38).
+        #[arg(long, value_enum, default_value_t = AssemblyArg::GRCh38)]
+        assembly: AssemblyArg,
         /// Only download + index the reference FASTA; skip the transcript
         /// model build.
         #[arg(long, conflicts_with = "models_only")]
@@ -88,29 +128,41 @@ enum Command {
     /// an annotated VCF with a CSQ INFO field matching VEP's `--vcf` output
     /// format.
     Annotate {
+        /// Reference build the input VCF was called against. Required —
+        /// no default, because misrouting under the wrong chrom table
+        /// silently produces off-by-millions annotations.
+        ///
+        /// Accepts `grch37` / `grch38`. UCSC aliases `hg19` / `hg38` are
+        /// rejected with an error pointing the caller at the explicit
+        /// form (UCSC `hg19` chrM differs from GRCh37 chrMT, so the
+        /// alias would silently mis-annotate every chrM variant).
+        #[arg(long, value_enum)]
+        assembly: AssemblyArg,
         /// Path to the input VCF file (`.vcf` or `.vcf.gz`).
         #[arg(long)]
         input: PathBuf,
         /// Path to the output VCF file (`.vcf` or `.vcf.gz`).
         #[arg(long)]
         output: PathBuf,
-        /// Path to `GRCh38.bin` (flat binary genome).
+        /// Path to the flat-binary genome (e.g. `GRCh38.bin` or
+        /// `GRCh37.bin`). Must match `--assembly`.
         #[arg(long)]
         fasta: PathBuf,
-        /// Path to `transcript_models.bin`.
+        /// Path to the transcript models bin (e.g.
+        /// `transcript_models_grch38.bin`).
         #[arg(long)]
         transcripts: PathBuf,
         /// Number of threads for parallel annotation.
         #[arg(long, default_value_t = 1)]
         threads: usize,
-        /// Path to `patch_chrom_aliases.csv` (optional).
+        /// Path to the per-assembly `patch_chrom_aliases_*.csv` (optional).
         #[arg(long)]
         patch_aliases: Option<PathBuf>,
     },
 
     /// Build transcript model store from a MANE GFF3 file.
     ///
-    /// Produces `transcript_models.bin` containing full
+    /// Produces `transcript_models_grch{37,38}.bin` containing full
     /// `Vec<vareffect::TranscriptModel>` with exon structure, CDS bounds,
     /// protein accessions, and MANE tier. When `--summary-input` is
     /// provided, every transcript is cross-validated against the MANE
@@ -120,23 +172,38 @@ enum Command {
     /// files automatically. This standalone subcommand is kept for
     /// iterative development.
     BuildTranscripts {
-        /// Path to `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`.
+        /// Reference build to drive admit-tag selection (`grch38` →
+        /// MANE, `grch37` → RefSeq Select) and chrom-table translation.
+        #[arg(long, value_enum)]
+        assembly: AssemblyArg,
+        /// Path to the GFF3 input file. For GRCh38: MANE
+        /// `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`. For GRCh37: NCBI
+        /// `GCF_000001405.25_GRCh37.p13_genomic.gff.gz`.
         #[arg(long)]
         input: PathBuf,
-        /// Optional path to `MANE.GRCh38.vX.X.summary.txt.gz` for
-        /// GFF3-vs-summary cross-validation.
+        /// Optional path to a MANE summary cross-validation source
+        /// (`MANE.GRCh38.vX.X.summary.txt.gz`). MANE-only — UCSC
+        /// cross-validation requires two sources and is wired through
+        /// `setup`. When omitted, the build emits a warning about the
+        /// missing quality gate.
         #[arg(long)]
         summary_input: Option<PathBuf>,
-        /// Path to `patch_chrom_aliases.csv` (produced by `setup`).
-        /// Required whenever `--summary-input` is set.
+        /// Path to the per-assembly `patch_chrom_aliases_*.csv`
+        /// (produced by `setup`). Required whenever `--summary-input`
+        /// is set.
         #[arg(long)]
         patch_chrom_aliases: Option<PathBuf>,
         /// Output directory.
         #[arg(long, default_value = "data/vareffect")]
         output: PathBuf,
-        /// MANE release version (e.g. "1.5").
+        /// Upstream data version string (e.g. "1.5" for MANE,
+        /// "GRCh37.p13" for the NCBI RefSeq GRCh37 release).
         #[arg(long)]
         version: String,
+        /// File-stem (no extension) for the output bin / sha256 /
+        /// manifest sibling files. Defaults to a per-assembly value.
+        #[arg(long)]
+        basename: Option<String>,
     },
 }
 
@@ -169,6 +236,7 @@ fn main() -> Result<()> {
         }
 
         Command::Annotate {
+            assembly,
             input,
             output,
             fasta,
@@ -176,7 +244,9 @@ fn main() -> Result<()> {
             threads,
             patch_aliases,
         } => {
+            let assembly = assembly.to_assembly()?;
             annotate::run(&annotate::AnnotateConfig {
+                assembly,
                 input: &input,
                 output: &output,
                 fasta: &fasta,
@@ -189,42 +259,82 @@ fn main() -> Result<()> {
         Command::Setup {
             config,
             output,
+            assembly,
             fasta_only,
             models_only,
         } => {
+            let filter = match assembly {
+                AssemblyArg::GRCh38 => setup::AssemblyFilter::Single(Assembly::GRCh38),
+                AssemblyArg::GRCh37 => setup::AssemblyFilter::Single(Assembly::GRCh37),
+                AssemblyArg::All => setup::AssemblyFilter::All,
+            };
             setup::run(
                 config.as_deref(),
                 fasta_only,
                 models_only,
                 output.as_deref(),
+                filter,
             )?;
         }
 
         Command::BuildTranscripts {
+            assembly,
             input,
             summary_input,
             patch_chrom_aliases,
             output,
             version,
+            basename,
         } => {
             if summary_input.is_some() && patch_chrom_aliases.is_none() {
                 bail!(
                     "--summary-input requires --patch-chrom-aliases (point it at \
-                     the patch_chrom_aliases.csv produced by `vareffect-cli setup`)"
+                     the per-assembly patch_chrom_aliases CSV produced by \
+                     `vareffect-cli setup`)"
                 );
             }
+            let asm = assembly.to_assembly()?;
+            let admit_tags = match asm {
+                Assembly::GRCh38 => builders::transcript_models::ADMIT_TAGS_MANE,
+                Assembly::GRCh37 => builders::transcript_models::ADMIT_TAGS_REFSEQ_SELECT,
+            };
+            let basename = basename.unwrap_or_else(|| match asm {
+                Assembly::GRCh38 => "transcript_models_grch38".to_string(),
+                Assembly::GRCh37 => "transcript_models_grch37".to_string(),
+            });
+            // build-transcripts uses MANE summary only; UCSC validation
+            // requires two source files and is wired through `setup`.
+            let cross_validation_source = summary_input.as_deref().map(|p| {
+                builders::transcript_models::CrossValidationSource::ManeSummary {
+                    summary_path: p.to_path_buf(),
+                }
+            });
             let start = Instant::now();
-            let (out, size) = builders::transcript_models::build(
-                &input,
-                summary_input.as_deref(),
-                patch_chrom_aliases.as_deref(),
-                &output,
-                &version,
-            )?;
+            let (out, size) =
+                builders::transcript_models::build(builders::transcript_models::BuildOptions {
+                    input: &input,
+                    cross_validation_source,
+                    patch_aliases_input: patch_chrom_aliases.as_deref(),
+                    output_dir: &output,
+                    version: &version,
+                    assembly: asm,
+                    admit_tags,
+                    output_basename: &basename,
+                })?;
             print_build_header();
-            print_build_summary("transcript_models", &out, size, start);
+            print_build_summary(&basename, &out, size, start);
         }
     }
 
     Ok(())
+}
+
+/// Bridge `AssemblyArg::GRCh{37,38}` to [`vareffect::Assembly`] without
+/// triggering the `--assembly all` rejection. The runtime parser is
+/// unused for the non-`All` cases but kept as a shared correctness check
+/// for the rejection-of-aliases path that the CLI never reaches.
+#[allow(dead_code)]
+fn _check_assembly_alias_rejection() {
+    debug_assert!(Assembly::from_str("hg19").is_err());
+    debug_assert!(Assembly::from_str("hg38").is_err());
 }

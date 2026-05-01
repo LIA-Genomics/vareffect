@@ -4,9 +4,14 @@
 # for all vareffect runtime data. It can also be pointed at via
 # `--config` when running individual subcommands.
 #
-# The parser silently ignores unknown top-level sections, so this file can
-# be shared with other build tools that add their own sections without
-# requiring changes here.
+# Two assemblies are supported in parallel sub-tables: `[vareffect.grch38]`
+# and `[vareffect.grch37]`. The CLI's `--assembly` flag picks which to
+# build; both can co-exist on disk and be loaded into a single VarEffect
+# at runtime via `VarEffect::builder().with_grch38(...).with_grch37(...)`.
+#
+# The parser silently ignores unknown top-level sections, so this file
+# can be shared with other build tools that add their own sections
+# without requiring changes here.
 
 [paths]
 raw_dir = "data/raw"
@@ -17,37 +22,76 @@ raw_dir = "data/raw"
 [mane]
 input = "mane_grch38.gff.gz"
 
+# Shared output directory for all per-assembly artifacts (.bin, .bin.idx,
+# transcript_models_grch{37,38}.bin, patch_chrom_aliases_grch{37,38}.csv).
 [vareffect]
-# Reference genome -- NCBI RefSeq GRCh38.p14 full assembly (includes every
-# `NC_*` primary chromosome plus all `NW_*`/`NT_*` patch scaffolds).
-# Contig naming aligns with the MANE GFF3 column 1, so patch transcripts
-# in `transcript_models.bin` can be resolved directly against the genome.
+output_dir = "data/vareffect"
+
+# --- GRCh38 build ----------------------------------------------------------
 #
-# The source is plain gzip; `vareffect-cli setup` decompresses it to a
-# transient staging file, then converts it to a flat binary (`GRCh38.bin`)
-# with a sibling `.bin.idx` MessagePack index for memory-mapped random
-# access at runtime. The transient decompress + convert step requires
-# ~7 GB free across `raw_dir` + `output_dir` during setup.
+# Source: NCBI RefSeq GRCh38.p14 + MANE v1.5. Includes every `NC_*` primary
+# chromosome plus all `NW_*`/`NT_*` patch scaffolds. Contig naming aligns
+# with the MANE GFF3 column 1, so patch transcripts in
+# `transcript_models_grch38.bin` resolve directly against the genome.
+#
+# `transcript_source = "mane"` admits `tag=MANE Select` and
+# `tag=MANE Plus Clinical`. `cross_validation_url` points at NCBI's MANE
+# summary TSV so the GFF3 build is cross-checked against an authoritative
+# second source; mismatches fail the build.
+[vareffect.grch38]
 fasta_url      = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_genomic.fna.gz"
 fasta_filename = "GRCh38.bin"
 fasta_build    = "GRCh38"
+gff_url                       = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+cross_validation_format       = "mane_summary"
+cross_validation_url          = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.summary.txt.gz"
+cross_validation_input        = "mane_transcript_models_v1.5.summary.tsv.gz"
+transcript_models_filename    = "transcript_models_grch38.bin"
+transcript_models_basename    = "transcript_models_grch38"
+transcript_models_version     = "1.5"
+transcript_source             = "mane"
+assembly_report_url           = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_report.txt"
+assembly_report_input         = "GCF_000001405.40_GRCh38.p14_assembly_report.txt"
+patch_aliases_filename        = "patch_chrom_aliases_grch38.csv"
 
-# Transcript models -- MANE v1.5 GFF3 + summary TSV for cross-validation.
-# The summary is required (not optional), because `vareffect-cli setup` is
-# the production build path and mismatches between the GFF3 and summary are
-# a build-blocking signal.
-gff_url                   = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
-summary_url               = "https://ftp.ncbi.nlm.nih.gov/refseq/MANE/MANE_human/release_1.5/MANE.GRCh38.v1.5.summary.txt.gz"
-summary_input             = "mane_transcript_models_v1.5.summary.tsv.gz"
-transcript_models_version = "1.5"
-
-# NCBI assembly report. Parsed by `vareffect-cli setup` into
-# `data/vareffect/patch_chrom_aliases.csv`, which feeds cross-validation of
-# patch-contig transcripts in the MANE summary TSV. The report is a small
-# (~2 MB) plain-text TSV; NCBI publishes a fresh one with every patch bump.
-assembly_report_url       = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.40_GRCh38.p14/GCF_000001405.40_GRCh38.p14_assembly_report.txt"
-assembly_report_input     = "GCF_000001405.40_GRCh38.p14_assembly_report.txt"
-
-# Output directory for the final runtime files (GRCh38.bin, GRCh38.bin.idx,
-# transcript_models.bin, .sha256, manifest.json).
-output_dir = "data/vareffect"
+# --- GRCh37 build ----------------------------------------------------------
+#
+# Source: NCBI RefSeq GRCh37.p13 (`GCF_000001405.25-RS_2024_09`). MANE is
+# GRCh38-only, so GRCh37 transcripts come from NCBI's RefSeq Select set
+# (`tag=RefSeq Select` on the curated representative transcripts).
+#
+# Cross-validation: UCSC's hg19 `ncbiRefSeq.txt.gz` plus the sibling
+# `ncbiRefSeqSelect.txt.gz`. UCSC re-derives NCBI's annotation release,
+# so this catches GFF3-attr-parser regressions and coordinate-conversion
+# drift against an independently-implemented parser, but it is not a
+# truly independent biological source.
+#
+# The URLs below point at the *live* UCSC `database/` tables, which
+# track only the latest NCBI annotation release. If the GFF3 release
+# pinned in `gff_url` lags the live UCSC release the validator will
+# fail with systematic version drift; swap the URL for a release-aligned
+# archive snapshot from
+# `https://hgdownload.soe.ucsc.edu/goldenPath/archive/hg19/ncbiRefSeq/<release>/`
+# when that happens.
+#
+# chrM is excluded from this cross-check: UCSC `hg19` chrM is NC_001807
+# (Anderson 1981) while NCBI GRCh37 chrMT is NC_012920.1 (rCRS), so
+# coordinate comparison would systematically false-positive on every
+# chrM transcript.
+[vareffect.grch37]
+fasta_url      = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.25_GRCh37.p13/GCF_000001405.25_GRCh37.p13_genomic.fna.gz"
+fasta_filename = "GRCh37.bin"
+fasta_build    = "GRCh37"
+gff_url                       = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.25_GRCh37.p13/GCF_000001405.25_GRCh37.p13_genomic.gff.gz"
+cross_validation_format       = "ucsc_refseq_select"
+cross_validation_url          = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/ncbiRefSeq.txt.gz"
+cross_validation_input        = "ucsc_ncbiRefSeq_hg19.txt.gz"
+cross_validation_select_url   = "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/ncbiRefSeqSelect.txt.gz"
+cross_validation_select_input = "ucsc_ncbiRefSeqSelect_hg19.txt.gz"
+transcript_models_filename    = "transcript_models_grch37.bin"
+transcript_models_basename    = "transcript_models_grch37"
+transcript_models_version     = "GRCh37.p13"
+transcript_source             = "refseq_select"
+assembly_report_url           = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.25_GRCh37.p13/GCF_000001405.25_GRCh37.p13_assembly_report.txt"
+assembly_report_input         = "GCF_000001405.25_GRCh37.p13_assembly_report.txt"
+patch_aliases_filename        = "patch_chrom_aliases_grch37.csv"

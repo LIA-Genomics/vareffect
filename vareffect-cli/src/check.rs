@@ -154,59 +154,74 @@ pub fn run(args: &CheckArgs) -> Result<bool> {
             }
         }
 
-        // C3: Genome binary exists and is readable.
-        let genome_path = output_dir.join(&cfg.vareffect.fasta_filename);
-        match check_file_readable(&genome_path) {
-            Ok(()) => {
-                let size = fs::metadata(&genome_path).map(|m| m.len()).unwrap_or(0);
-                results.push(CheckResult::pass(format!(
-                    "Genome: {} ({})",
-                    genome_path.display(),
-                    format_size(size),
-                )));
-            }
-            Err(_) => {
-                results.push(CheckResult::fail(format!(
-                    "Genome binary not found: {}",
-                    genome_path.display(),
-                )));
-            }
+        // C3..C5: Per-assembly artifacts. Iterate over every entry the
+        // config defines so the check command works for builds that
+        // include only one assembly.
+        let entries: Vec<(&'static str, &crate::config::AssemblyEntry)> = [
+            cfg.vareffect.grch38.as_ref().map(|e| ("GRCh38", e)),
+            cfg.vareffect.grch37.as_ref().map(|e| ("GRCh37", e)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if entries.is_empty() {
+            results.push(CheckResult::fail(
+                "Config defines no assembly sub-table; \
+                 add [vareffect.grch38] or [vareffect.grch37] then run `vareffect setup`",
+            ));
         }
+        for (label, entry) in &entries {
+            let genome_path = output_dir.join(&entry.fasta_filename);
+            match check_file_readable(&genome_path) {
+                Ok(()) => {
+                    let size = fs::metadata(&genome_path).map(|m| m.len()).unwrap_or(0);
+                    results.push(CheckResult::pass(format!(
+                        "{label} genome: {} ({})",
+                        genome_path.display(),
+                        format_size(size),
+                    )));
+                }
+                Err(_) => {
+                    results.push(CheckResult::fail(format!(
+                        "{label} genome binary not found: {}",
+                        genome_path.display(),
+                    )));
+                }
+            }
 
-        // C4: Genome index (.idx sidecar) exists.
-        let idx_path = genome_path.with_extension("bin.idx");
-        match check_file_readable(&idx_path) {
-            Ok(()) => {
-                results.push(CheckResult::pass(format!(
-                    "Genome index: {}",
-                    idx_path.display(),
-                )));
+            let idx_path = genome_path.with_extension("bin.idx");
+            match check_file_readable(&idx_path) {
+                Ok(()) => {
+                    results.push(CheckResult::pass(format!(
+                        "{label} genome index: {}",
+                        idx_path.display(),
+                    )));
+                }
+                Err(_) => {
+                    results.push(CheckResult::fail(format!(
+                        "{label} genome index not found: {}",
+                        idx_path.display(),
+                    )));
+                }
             }
-            Err(_) => {
-                results.push(CheckResult::fail(format!(
-                    "Genome index not found: {}",
-                    idx_path.display(),
-                )));
-            }
-        }
 
-        // C5: Transcript DB exists and is readable.
-        let transcript_path = output_dir.join("transcript_models.bin");
-        match check_file_readable(&transcript_path) {
-            Ok(()) => {
-                let count_str = read_manifest_record_count(&transcript_path)
-                    .map(|n| format!(" ({n} transcripts)"))
-                    .unwrap_or_default();
-                results.push(CheckResult::pass(format!(
-                    "Transcript DB: {}{count_str}",
-                    transcript_path.display(),
-                )));
-            }
-            Err(_) => {
-                results.push(CheckResult::fail(format!(
-                    "Transcript DB not found: {}",
-                    transcript_path.display(),
-                )));
+            let transcript_path = output_dir.join(&entry.transcript_models_filename);
+            match check_file_readable(&transcript_path) {
+                Ok(()) => {
+                    let count_str = read_manifest_record_count(&transcript_path)
+                        .map(|n| format!(" ({n} transcripts)"))
+                        .unwrap_or_default();
+                    results.push(CheckResult::pass(format!(
+                        "{label} transcript DB: {}{count_str}",
+                        transcript_path.display(),
+                    )));
+                }
+                Err(_) => {
+                    results.push(CheckResult::fail(format!(
+                        "{label} transcript DB not found: {}",
+                        transcript_path.display(),
+                    )));
+                }
             }
         }
     } else {
@@ -268,16 +283,20 @@ mod tests {
         let content = format!(
             r#"
 [vareffect]
-fasta_url = "https://example.com/genome.fna.gz"
+output_dir = "{output_dir}"
+
+[vareffect.grch38]
+fasta_url = "https://example.com/GRCh38.fna.gz"
 fasta_filename = "GRCh38.bin"
 fasta_build = "GRCh38"
 gff_url = "https://example.com/mane.gff.gz"
-summary_url = "https://example.com/summary.txt.gz"
-summary_input = "summary.tsv.gz"
+transcript_models_filename = "transcript_models_grch38.bin"
+transcript_models_basename = "transcript_models_grch38"
 transcript_models_version = "1.5"
+transcript_source = "mane"
 assembly_report_url = "https://example.com/report.txt"
 assembly_report_input = "report.txt"
-output_dir = "{output_dir}"
+patch_aliases_filename = "patch_chrom_aliases_grch38.csv"
 "#,
         );
         fs::write(&config_path, content).unwrap();
@@ -320,10 +339,15 @@ output_dir = "{output_dir}"
         let data_dir = tmp.path().join("data");
         fs::create_dir_all(&data_dir).unwrap();
 
-        // Create dummy data files.
+        // Create dummy data files matching the per-assembly filenames in
+        // the test config (GRCh38 only).
         fs::write(data_dir.join("GRCh38.bin"), b"genome").unwrap();
         fs::write(data_dir.join("GRCh38.bin.idx"), b"index").unwrap();
-        fs::write(data_dir.join("transcript_models.bin"), b"transcripts").unwrap();
+        fs::write(
+            data_dir.join("transcript_models_grch38.bin"),
+            b"transcripts",
+        )
+        .unwrap();
 
         let config_path = write_test_config(tmp.path(), &data_dir.display().to_string());
 
@@ -338,15 +362,15 @@ output_dir = "{output_dir}"
     #[test]
     fn manifest_record_count_read() {
         let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
+        let bin_path = tmp.path().join("transcript_models_grch38.bin");
         fs::write(&bin_path, b"data").unwrap();
 
         let manifest = serde_json::json!({
-            "store_name": "transcript_models",
+            "store_name": "transcript_models_grch38",
             "record_count": 1234,
         });
         fs::write(
-            tmp.path().join("transcript_models.manifest.json"),
+            tmp.path().join("transcript_models_grch38.manifest.json"),
             serde_json::to_string(&manifest).unwrap(),
         )
         .unwrap();
@@ -357,7 +381,7 @@ output_dir = "{output_dir}"
     #[test]
     fn manifest_record_count_missing_manifest() {
         let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
+        let bin_path = tmp.path().join("transcript_models_grch38.bin");
         assert_eq!(read_manifest_record_count(&bin_path), None);
     }
 }

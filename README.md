@@ -31,7 +31,9 @@ vareffect init
 
 # Downloads GRCh38 + MANE, builds genome binary and transcript store.
 # One-time, ~10 minutes, ~3 GB disk. Idempotent.
-vareffect setup
+vareffect setup                        # default: --assembly grch38
+vareffect setup --assembly grch37      # GRCh37 + RefSeq Select (~6 GB more)
+vareffect setup --assembly all         # both, side-by-side under data/vareffect/
 
 # Validate everything is in place:
 vareffect check
@@ -41,10 +43,11 @@ vareffect check
 
 ```bash
 vareffect annotate \
+  --assembly grch38 \
   --input sample.vcf.gz \
   --output annotated.vcf.gz \
   --fasta data/vareffect/GRCh38.bin \
-  --transcripts data/vareffect/transcript_models.bin \
+  --transcripts data/vareffect/transcript_models_grch38.bin \
   --threads 8
 ```
 
@@ -60,17 +63,19 @@ vareffect = "0.1"
 
 ```rust
 use std::path::Path;
-use vareffect::{Consequence, VarEffect};
+use vareffect::{Assembly, Consequence, VarEffect};
 
-let ve = VarEffect::open(
-    Path::new("data/vareffect/transcript_models.bin"),
-    Path::new("data/vareffect/GRCh38.bin"),
-)?;
+let ve = VarEffect::builder()
+    .with_grch38(
+        Path::new("data/vareffect/transcript_models_grch38.bin"),
+        Path::new("data/vareffect/GRCh38.bin"),
+    )?
+    .build()?;
 
-// TP53 c.742C>T (p.Arg248Trp) — 0-based position
-let results = ve.annotate("chr17", 7_674_220, b"G", b"A")?;
+// TP53 c.742C>T (p.Arg248Trp) — chr17, 0-based position
+let result = ve.annotate(Assembly::GRCh38, "chr17", 7_674_219, b"C", b"T")?;
 
-for r in &results {
+for r in &result.consequences {
     println!(
         "{} {}: {} ({})",
         r.transcript,
@@ -82,10 +87,24 @@ for r in &results {
 // => NM_000546.6 p.Arg248Trp: missense_variant (MODERATE)
 ```
 
+The builder accepts any combination of GRCh38 / GRCh37 slots in a single
+`VarEffect`; pass the matching `Assembly` to each `annotate()` call:
+
+```rust
+let ve = VarEffect::builder()
+    .with_grch38(grch38_transcripts, grch38_genome)?
+    .with_grch37(grch37_transcripts, grch37_genome)?
+    .build()?;
+
+let g38 = ve.annotate(Assembly::GRCh38, "chr17", 7_674_219, b"C", b"T")?;
+let g37 = ve.annotate(Assembly::GRCh37, "chr17", 7_577_120, b"C", b"T")?;
+```
+
 For multi-threaded use, wrap in `Arc`:
 
 ```rust
-let ve = Arc::new(VarEffect::open(transcripts, genome)?);
+use std::sync::Arc;
+let ve = Arc::new(ve);
 // Clone the Arc into each worker — zero contention, no interior mutability.
 ```
 
@@ -104,48 +123,57 @@ let ve = Arc::new(VarEffect::open(transcripts, genome)?);
 
 ## VarEffect API
 
-All coordinates are 0-based half-open (BED convention). Chromosome names are UCSC-style (`chr17`, `chrM`).
+All coordinates are 0-based half-open (BED convention). Chromosome names are UCSC-style (`chr17`, `chrM`). Assembly is always passed explicitly — there is no implicit default, because misrouting under the wrong chrom table silently produces off-by-millions annotations.
 
 ### Construction
 
-| Method | Description |
+`VarEffect` is built via the typestate `VarEffectBuilder`. Each `with_*` method loads one assembly slot; `build()` finalises. Both slots are independent, so a single `VarEffect` can serve GRCh38 and GRCh37 traffic simultaneously.
+
+| Builder method | Description |
 |--------|-------------|
-| `VarEffect::open(transcripts, genome)` | Load both stores from disk |
-| `VarEffect::open_with_patch_aliases(transcripts, genome, aliases)` | Load with NCBI patch-contig alias support |
-| `VarEffect::new(transcript_store, fasta_reader)` | Construct from pre-loaded stores |
+| `VarEffect::builder()` | Start a new builder (returns `VarEffectBuilder`) |
+| `.with_grch38(transcripts, genome)` | Load GRCh38 from disk into the GRCh38 slot |
+| `.with_grch38_and_patch_aliases(transcripts, genome, aliases)` | GRCh38 with NCBI patch-contig alias support |
+| `.with_grch37(transcripts, genome)` | Load GRCh37 from disk into the GRCh37 slot |
+| `.with_grch37_and_patch_aliases(transcripts, genome, aliases)` | GRCh37 with patch-contig alias support |
+| `.with_handles(assembly, transcripts, fasta)` | Insert a pre-built `(TranscriptStore, FastaReader)` pair (assembly-generic) |
+| `.build()` | Finalise into `VarEffect` |
 
 ### Annotation
 
 | Method | Description |
 |--------|-------------|
-| `annotate(chrom, pos, ref, alt)` | Returns `Vec<ConsequenceResult>` -- one per overlapping transcript |
-| `annotate_to_vep_json(chrom, pos, ref, alt, assembly)` | Same, serialized as VEP REST-compatible JSON |
-| `resolve_hgvs_c(hgvs)` | Parse HGVS c. string to `GenomicVariant` (genomic coordinates + alleles) |
+| `annotate(assembly, chrom, pos, ref, alt)` | Returns `AnnotationResult { consequences, warnings }` — one `ConsequenceResult` per overlapping transcript |
+| `annotate_to_vep_json(assembly, chrom, pos, ref, alt)` | Same, serialised as VEP REST-compatible JSON |
+| `resolve_hgvs_c(assembly, hgvs)` | Parse HGVS c. string to `GenomicVariant` (genomic coordinates + alleles) |
 
 ### Reference genome
 
+All take `assembly` as the first argument; route to the matching slot. For raw access to the inner `FastaReader`, use `ve.fasta(assembly)`.
+
 | Method | Description |
 |--------|-------------|
-| `fetch_base(chrom, pos)` | Single base lookup (~5 ns) |
-| `fetch_sequence(chrom, start, end)` | Sequence slice as `Vec<u8>` |
-| `verify_ref(chrom, pos, ref_allele)` | Check REF matches genome (zero-copy) |
-| `chrom_length(chrom)` | Chromosome length or `None` |
+| `fetch_base(assembly, chrom, pos)` | Single base lookup (~5 ns) |
+| `fetch_sequence(assembly, chrom, start, end)` | Sequence slice as `Vec<u8>` |
+| `verify_ref(assembly, chrom, pos, ref_allele)` | Check REF matches genome (zero-copy) |
+| `chrom_length(assembly, chrom)` | Chromosome length or `None` |
 
 ### Indel normalization
 
 | Method | Description |
 |--------|-------------|
-| `anchor_prepend_indel(chrom, pos, ref, alt)` | Convert HGVS `"-"` placeholders to VCF anchor-prepended form |
-| `left_align_indel(chrom, pos, ref, alt)` | Left-align to leftmost position (Tan et al. 2015) |
+| `anchor_prepend_indel(assembly, chrom, pos, ref, alt)` | Convert HGVS `"-"` placeholders to VCF anchor-prepended form |
+| `left_align_indel(assembly, chrom, pos, ref, alt)` | Left-align to leftmost position (Tan et al. 2015) |
 
 ### Transcript queries
 
+All take `assembly` as the first argument. For raw access to the inner `TranscriptStore`, use `ve.transcripts(assembly)`.
+
 | Method | Description |
 |--------|-------------|
-| `get_by_accession(accession)` | O(1) lookup by versioned accession (e.g. `NM_000546.6`) |
-| `query_overlap(chrom, start, end)` | O(log n + k) interval-tree overlap query |
-| `transcripts()` | Borrow inner `TranscriptStore` |
-| `fasta()` | Borrow inner `FastaReader` |
+| `get_by_accession(assembly, accession)` | O(1) lookup by versioned accession (e.g. `NM_000546.6`) |
+| `query_overlap(assembly, chrom, start, end)` | O(log n + k) interval-tree overlap query |
+| `has_assembly(assembly)` | True if the slot was loaded by the builder |
 
 ## Performance
 
@@ -234,7 +262,7 @@ Elapsed:    0.2s
 | `mature_miRNA_variant` | Requires miRNA locus track |
 | Regulatory terms (`TFBS_ablation`, `TF_binding_site_variant`, `regulatory_region_variant`) | Requires regulatory feature store |
 | SV terms (`feature_elongation`, `feature_truncation`, `transcript_amplification`) | Requires segment-level SV input |
-| Alternate builds (GRCh37, CHM13) | Build pipeline work, not engine limitation |
+| Alternate builds (CHM13) | Build pipeline work, not engine limitation. GRCh38 and GRCh37 are both supported via `Assembly` selector. |
 | Multi-allele VCF splitting | Caller's responsibility |
 | Canonical transcript selection | Caller filters on tier metadata |
 

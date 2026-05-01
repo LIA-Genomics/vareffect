@@ -7,15 +7,80 @@ and every feature that is intentionally out of scope for the core crate.
 ## Overview
 
 - **Target VEP version:** releases 115 and 116.
-- **Genome build:** GRCh38 (GRCh37 and CHM13 are not validated; the
-  transcript and genome binaries would need to be rebuilt from
-  build-specific sources).
-- **Transcript source:** MANE Select, MANE Plus Clinical, and RefSeq
-  Select. Variants on accessions outside the loaded store are reported as
-  `intergenic_variant` even if they would overlap a non-loaded transcript.
-- **Validation date:** last full concordance run 2026-04-11 — 6 / 6 test
-  files pass (see [Validation methodology](#validation-methodology) for the
-  per-file variant counts).
+- **Genome builds:** GRCh38 and GRCh37, selected per call via the
+  `Assembly` enum. CHM13 is not yet supported. UCSC `hg19` / `hg38`
+  aliases are explicitly rejected at parse time — UCSC `hg19` chrM
+  (`NC_001807`) differs from GRCh37 chrMT (`NC_012920.1`, the rCRS) by
+  ~10 bases and would silently mis-annotate every chrM variant.
+- **Transcript source:** **GRCh38** uses MANE Select + MANE Plus
+  Clinical from the NCBI MANE v1.5 release. **GRCh37** uses NCBI RefSeq
+  Select from `GCF_000001405.25_GRCh37.p13`; MANE is GRCh38-only and
+  has no GRCh37 equivalent. Variants on accessions outside the loaded
+  store are reported as `intergenic_variant` even if they would overlap
+  a non-loaded transcript.
+- **Transcript-vs-genome divergence (GRCh37 only):** ~5 % of NCBI
+  RefSeq Select transcripts on GRCh37 carry sequence that differs from
+  the reference assembly at one or more positions. NCBI flags these in
+  the GFF3 `Note=` attribute on the affected mRNA / CDS rows; vareffect
+  detects the flag at build time, persists it on
+  [`TranscriptModel::genome_transcript_divergent`], and surfaces a
+  structured [`Warning::DivergentTranscript`] on every `annotate(...)`
+  call whose chosen transcript carries it. HGVS positions emitted
+  against a divergent transcript may not map back to the same genomic
+  position they would against the reference; clinical callers should
+  consider falling back to a non-divergent transcript before reporting.
+  GRCh38 MANE transcripts are curated to exclude divergence by
+  construction, so this warning is silent there.
+- **Translational exceptions (selenocysteine / pyrrolysine
+  readthrough):** parsed from the GFF3 `transl_except=` attribute and
+  recorded on [`TranscriptModel::translational_exception`]. Distinct
+  from divergence: a `transl_except` codon is a known biological
+  mechanism, not a sequence disagreement, and HGVS positions remain
+  reliable — vareffect therefore does NOT raise a clinical warning.
+- **Cross-validation:** GRCh38 builds are second-source-checked against
+  the MANE summary TSV at build time, with mismatches failing the
+  build. GRCh37 builds are checked against UCSC's hg19 `ncbiRefSeq.txt`
+  + `ncbiRefSeqSelect.txt` pair. UCSC re-derives NCBI's annotation
+  release, so the GRCh37 cross-check catches GFF3 attribute-parser
+  regressions and coordinate-conversion drift but does not catch
+  divergence between two independent biological databases.
+
+  **chrM is excluded from the GRCh37 UCSC cross-check.** UCSC `hg19`
+  chrM is `NC_001807` (the original 1981 Anderson reference), while
+  NCBI GRCh37 chrMT is `NC_012920.1` (the rCRS). The two references
+  differ by ~10 bp plus indels, so naive coordinate comparison would
+  systematically false-positive on every chrM transcript. The UCSC
+  parser skips chrM rows at parse time with a build-log warning; the
+  ~37 affected mitochondrial transcripts (MT-RNR1, MT-CO1, …) are
+  validated separately via downstream ClinVar concordance.
+- **Validation date:** last full concordance run 2026-04-30.
+  - **GRCh38:** 6 / 6 spot-check files pass (136 / 136 hand-curated
+    variants — see [Validation methodology](#validation-methodology) for
+    the per-file breakdown). Large-scale concordance against VEP REST on
+    ~50,000 ClinVar variants (`vep_large_concordance_grch38.rs`) is in
+    progress with the threshold currently set at ≥95 % consequence
+    concordance; tightening to ≥99 % once divergences are triaged.
+  - **GRCh37 ClinVar self-concordance** (vareffect-GRCh37 vs
+    vareffect-GRCh38 on 5,000 dual-coordinate ClinVar pairs,
+    `grch37_clinvar_concordance.rs`): **100.00 %** consequence,
+    **99.98 %** HGVS.c, **100.00 %** HGVS.p across 4,698
+    shared-transcript comparisons, with **902 / 19,262 (4.68 %)**
+    divergent transcripts excluded by construction (within tolerance
+    of NCBI's published ~5 % figure for RefSeq Select on GRCh37).
+  - **GRCh37 VEP REST concordance** on 10,000 stratified ClinVar
+    variants captured from `https://grch37.rest.ensembl.org`
+    (`vep_large_concordance_grch37.rs`): **99.33 %** consequence
+    concordance across 5,220 in-store comparisons (89.64 % strict-equal
+    + 8.31 % normalised splice/NMD folding + 0.67 % real mismatch).
+    HGVS.c **96.99 %**, HGVS.p **96.53 %**, IMPACT **99.67 %**, protein
+    start **97.68 %**. Zero panics, zero annotation errors.
+  - **GRCh37 spot-check tier**: `vep_concordance_grch37_snv.rs` ships
+    with **3 hand-curated variants** validated against VEP REST. Five
+    additional spot-check files (`indel`, `hgvs`, `hgvs_p`,
+    `hgvs_reverse`, `normalization`) — mirroring the GRCh38 layout —
+    will land as separate files once their fixtures are curated. Use
+    the same `https://grch37.rest.ensembl.org/vep/human/region/...`
+    REST endpoint as the GRCh38 spot-checks, with `assembly=GRCh37`.
 
 ## Intentional divergences
 
@@ -92,9 +157,10 @@ requests welcome.
   calls, not VCF rows).
 - **`--shift_3prime` equivalent** — a toggle to switch off 3' normalization
   for callers who need VEP's pre-release-109 behaviour.
-- **Alternate genome builds** — GRCh37, CHM13, and non-human assemblies.
-  The crate is build-agnostic at runtime; the work is all upstream, in the
-  transcript-model and genome-binary build pipelines.
+- **CHM13 and non-human assemblies.** The crate accepts an `Assembly`
+  selector; adding new variants requires a hardcoded NC_* accession
+  table per assembly plus a transcript-source pipeline. GRCh38 and
+  GRCh37 are both supported.
 - **Multi-allele VCF splitting** — VCF `ALT` columns can carry multiple
   comma-separated alternate alleles. `vareffect` expects one ref / one alt
   per `annotate` call; callers must split beforehand. A convenience
@@ -179,30 +245,50 @@ reader once, iterates its `VARIANTS` fixture, and asserts per-variant
 equality on `hgvs_c`, `hgvs_p`, the consequence subset, and (where
 relevant) the `predicts_nmd` flag.
 
-| Test file                              | Variants | Focus |
-|----------------------------------------|---------:|-------|
-| `vep_concordance_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
-| `vep_concordance_indel.rs`             |       28 | Frameshift, inframe insertions / deletions, boundary-spanning indels, splice-overlap indels |
-| `vep_concordance_hgvs.rs`              |       20 | HGVS c. forward formatting (substitution, del, ins, dup, delins, intronic offsets, UTR offsets) |
-| `vep_concordance_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
-| `vep_concordance_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
-| `vep_concordance_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
-| **Total**                              |  **136** | |
+### GRCh38 hand-curated spot-checks
 
-As of 2026-04-11 all six test files pass (6 / 6 test functions, 136 / 136
-variants). The suite is `#[ignore]`-gated because it requires the
-transcript store and genome binary on disk; run with:
+| Test file                                     | Variants | Focus |
+|-----------------------------------------------|---------:|-------|
+| `vep_concordance_grch38_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
+| `vep_concordance_grch38_indel.rs`             |       28 | Frameshift, inframe insertions / deletions, boundary-spanning indels, splice-overlap indels |
+| `vep_concordance_grch38_hgvs.rs`              |       20 | HGVS c. forward formatting (substitution, del, ins, dup, delins, intronic offsets, UTR offsets) |
+| `vep_concordance_grch38_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
+| `vep_concordance_grch38_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
+| `vep_concordance_grch38_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
+| **GRCh38 spot-check total**                   |  **136** | |
+
+### GRCh37 hand-curated spot-checks
+
+| Test file                                     | Variants | Focus |
+|-----------------------------------------------|---------:|-------|
+| `vep_concordance_grch37_snv.rs`               |        3 | SNV consequences (in progress; target ~50) |
+| **GRCh37 spot-check total**                   |    **3** | additional files (`indel`, `hgvs`, `hgvs_p`, `hgvs_reverse`, `normalization`) will mirror the GRCh38 layout once curated |
+
+### Statistical / large-scale concordance
+
+| Test file                                | Rows | Focus |
+|------------------------------------------|-----:|-------|
+| `vep_large_concordance_grch38.rs`        | ~50,000 | Statistical consequence concordance vs VEP REST on stratified ClinVar variants. Threshold ≥95 %. |
+| `vep_large_concordance_grch37.rs`        |  9,986 | Same shape on GRCh37; 5,220 in-store comparisons → 99.33 % consequence concordance. |
+| `grch37_clinvar_concordance.rs`          |  5,000 | GRCh37 self-concordance vs vareffect-GRCh38 on dual-coord ClinVar pairs. Threshold ≥99 % per metric. |
+
+The suite is `#[ignore]`-gated because it requires the transcript stores
+and genome binaries on disk; run with:
 
 ```bash
-FASTA_PATH=/absolute/path/to/GRCh38.bin \
-    cargo test -p vareffect --release -- --ignored vep_concordance
+GRCH38_FASTA=/abs/path/to/GRCh38.bin \
+GRCH37_FASTA=/abs/path/to/GRCh37.bin \
+GRCH37_TRANSCRIPTS=/abs/path/to/transcript_models_grch37.bin \
+  cargo test -p vareffect --release -- --ignored
 ```
 
-When adding a new variant to a fixture, record its expected output by
-querying the Ensembl VEP REST API with `refseq=1&hgvs=1` (or `&numbers=1`
-for exon number assertions) and paste the response into the fixture
-comment so future reviewers can cross-check against the recorded ground
-truth.
+or via `make test-ignored` for the env-var-laden form. When adding a new
+variant to a hand-curated fixture, record its expected output from the
+relevant Ensembl VEP REST endpoint (`rest.ensembl.org` for GRCh38,
+`grch37.rest.ensembl.org` for GRCh37) with
+`refseq=1&hgvs=1&shift_hgvs=1&numbers=1` and paste the response into
+the fixture comment so future reviewers can cross-check against the
+recorded ground truth.
 
 ## Known edge cases
 
@@ -215,9 +301,11 @@ truth.
   interpretation of the rule but may produce false positives in rare
   transcript architectures.
 - **Patch-contig lookups.** The reference genome binary can be built with
-  or without NCBI patch contigs. When you need patch lookups, use
-  `VarEffect::open_with_patch_aliases` and supply a `refseq,ucsc` alias
-  CSV — otherwise variants on patch contigs return `ChromNotFound`.
+  or without NCBI patch contigs. When you need patch lookups, build the
+  `VarEffect` via `VarEffect::builder().with_grch38_and_patch_aliases(...)`
+  (or the GRCh37 variant) and supply the `refseq,ucsc` alias CSV that
+  `vareffect setup` writes as `patch_chrom_aliases_grch{37,38}.csv` —
+  otherwise variants on patch contigs return `ChromNotFound`.
 - **IUPAC ambiguity codes.** The NCBI GRCh38.p14 assembly contains
   ambiguity bases (`M`, `R`, `Y`, etc.) in a few patch regions. The
   genome reader preserves them, but codon translation treats any
