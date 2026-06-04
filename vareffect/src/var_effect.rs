@@ -501,59 +501,61 @@ impl VarEffect {
 
         // Step 1: Shift loop (Tan et al. 2015).
         //
-        // Compare rightmost bases. If they match, drop them and shift
-        // left. If an allele becomes empty after dropping, left-extend
-        // from the reference genome.
+        // Compare rightmost bases. While they match, drop them and shift left.
+        // When trimming empties an allele, prepend the reference base immediately
+        // 5' to BOTH alleles and step the position back by one. Extending both
+        // alleles preserves the indel (the ref/alt length difference); extending
+        // only the emptied allele would collapse an insertion/deletion into a
+        // substitution.
         //
-        // Coordinate convention: `fetch_base` takes 0-based position.
-        // After `pos -= 1`, `pos` is the new 1-based position, so the
-        // 0-based index for the base AT `pos` is `pos - 1`.
+        // Coordinate convention: `fetch_base` takes a 0-based position. After
+        // `pos -= 1`, `pos` is the new 1-based position, so the 0-based index for
+        // the base AT `pos` is `pos - 1`.
         loop {
-            if pos <= 1 {
+            if pos <= 1 || r.is_empty() || a.is_empty() {
                 break;
             }
-            // Both alleles must be non-empty to compare rightmost
-            // bases. On the first iteration both are always non-empty
-            // (VCF input guarantees >= 1 base per allele).
-            let (Some(&r_last), Some(&a_last)) = (r.last(), a.last()) else {
-                break;
+            let trimmed = if r.last() == a.last() {
+                r.pop();
+                a.pop();
+                true
+            } else {
+                false
             };
-            if r_last != a_last {
+            if r.is_empty() || a.is_empty() {
+                pos -= 1;
+                let prepend = self.fasta.fetch_base(chrom, pos - 1)?;
+                r.insert(0, prepend);
+                a.insert(0, prepend);
+            } else if !trimmed {
                 break;
-            }
-
-            r.pop();
-            a.pop();
-            pos -= 1;
-
-            // Left-extend empty alleles from the reference genome.
-            // After decrement, `pos` is the new 1-based position;
-            // 0-based index = `pos - 1`.
-            if r.is_empty() {
-                r.push(self.fasta.fetch_base(chrom, pos - 1)?);
-            }
-            if a.is_empty() {
-                a.push(self.fasta.fetch_base(chrom, pos - 1)?);
             }
         }
 
         // Step 2: Left-trim for parsimony.
         //
-        // Removes shared leading bases while preserving at least one
-        // base per allele (VCF anchor requirement).
-        while r.len() > 1 && a.len() > 1 && r[0] == a[0] {
-            r.remove(0);
-            a.remove(0);
+        // Skips shared leading bases via an index (no O(n) `remove(0)`), keeping
+        // at least one base per allele (the VCF anchor requirement).
+        let mut prefix_skip = 0usize;
+        while r.len() - prefix_skip > 1
+            && a.len() - prefix_skip > 1
+            && r[prefix_skip] == a[prefix_skip]
+        {
+            prefix_skip += 1;
             pos += 1;
         }
 
         // Step 3: Return None if nothing changed, Some if normalized.
         //
-        // Alleles contain only ASCII bytes (ACGTN from the FASTA reader
-        // or the original input validated upstream). `from_utf8` cannot
-        // fail on valid ASCII but we propagate rather than panic.
-        let new_ref = String::from_utf8(r).map_err(|_| VarEffectError::InvalidAllele)?;
-        let new_alt = String::from_utf8(a).map_err(|_| VarEffectError::InvalidAllele)?;
+        // Alleles contain only ASCII bytes (ACGTN from the FASTA reader or the
+        // original input validated upstream). `from_utf8` cannot fail on valid
+        // ASCII but we propagate rather than panic.
+        let new_ref = std::str::from_utf8(&r[prefix_skip..])
+            .map_err(|_| VarEffectError::InvalidAllele)?
+            .to_string();
+        let new_alt = std::str::from_utf8(&a[prefix_skip..])
+            .map_err(|_| VarEffectError::InvalidAllele)?
+            .to_string();
 
         if pos == orig_pos && new_ref == orig_ref && new_alt == orig_alt {
             Ok(None)
@@ -598,5 +600,79 @@ impl VarEffect {
     /// reader-only methods that aren't forwarded above.
     pub fn fasta(&self) -> &FastaReader {
         &self.fasta
+    }
+}
+
+#[cfg(test)]
+mod left_align_unit_tests {
+    //! CI-runnable (no 3.1 GB FASTA) exact-output tests for `left_align_indel`,
+    //! covering the shapes whose ref/alt share a rightmost base — duplications
+    //! and homopolymer/tandem indels — which is where the per-allele-extend bug
+    //! collapsed indels into substitutions. Run against a tiny synthetic genome.
+
+    use super::*;
+    use crate::fasta::write_genome_binary;
+    use tempfile::TempDir;
+
+    /// Synthetic contig "1" (queried as "chr1"):
+    ///   1-based pos: 1 2 3 4 5 6 7 8 9 10
+    ///   base:        A A T G G G G T A A
+    /// The `GGGG` run (pos 4-7) anchored by `T` at pos 3 exercises left-shifting.
+    const CONTIG: &[u8] = b"AATGGGGTAA";
+
+    /// Build a `VarEffect` over a synthetic in-memory genome (temp `.bin` +
+    /// `.bin.idx`), with an empty transcript store — `left_align_indel` only
+    /// touches the FASTA.
+    fn ve_with_genome(contigs: &[(&str, &[u8])]) -> (TempDir, VarEffect) {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin = tmp.path().join("g.bin");
+        let idx = tmp.path().join("g.bin.idx");
+        write_genome_binary(contigs, "test", &bin, &idx).expect("write synthetic genome");
+        let fasta = FastaReader::open(&bin).expect("open synthetic genome");
+        let ve = VarEffect::new(TranscriptStore::from_transcripts(Vec::new()), fasta);
+        (tmp, ve)
+    }
+
+    /// A right-shifted 1 bp duplication inside the `GGGG` run must left-align to
+    /// the `T` anchor at pos 3 and REMAIN an insertion (`T>TG`). Pre-fix the
+    /// buggy per-allele extension collapsed this to a substitution.
+    #[test]
+    fn duplication_left_aligns_preserving_insertion() {
+        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
+        let result = ve
+            .left_align_indel("chr1", 6, "G", "GG")
+            .expect("left_align_indel should not error");
+        assert_eq!(result, Some((3, "T".to_string(), "TG".to_string())));
+    }
+
+    /// The symmetric 1 bp tandem deletion must left-align to the same anchor and
+    /// REMAIN a deletion (`TG>T`).
+    #[test]
+    fn tandem_deletion_left_aligns_preserving_deletion() {
+        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
+        let result = ve
+            .left_align_indel("chr1", 6, "GG", "G")
+            .expect("left_align_indel should not error");
+        assert_eq!(result, Some((3, "TG".to_string(), "T".to_string())));
+    }
+
+    /// Feeding the already-left-aligned form back in is a no-op (idempotent).
+    #[test]
+    fn left_aligned_insertion_is_idempotent() {
+        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
+        let result = ve
+            .left_align_indel("chr1", 3, "T", "TG")
+            .expect("left_align_indel should not error");
+        assert_eq!(result, None);
+    }
+
+    /// An SNV (differing rightmost bases) never enters the shift loop → `None`.
+    #[test]
+    fn snv_passes_through() {
+        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
+        let result = ve
+            .left_align_indel("chr1", 8, "T", "A")
+            .expect("left_align_indel should not error");
+        assert_eq!(result, None);
     }
 }

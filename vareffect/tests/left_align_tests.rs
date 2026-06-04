@@ -82,55 +82,56 @@ fn already_leftmost_deletion() {
 // Homopolymer shifts — the core use case
 // -----------------------------------------------------------------------
 
-/// Right-shifted 1bp deletion in a poly-A run should left-align.
-///
-/// BRCA2 c.1813del is in a poly-A run. A right-shifted representation
-/// should produce the same result as the left-shifted one.
+// Reference context (GRCh38): chr17 1-based 43057062 = T, then a GGG run at
+// 43057063-43057065, then A at 43057066. Deleting/inserting one G anywhere in
+// the run must left-align to the T anchor at 43057062 — independent of which
+// right-shifted representation the caller supplies.
+
+/// Right-shifted 1bp deletions in the chr17 GGG run must all left-align to the
+/// same canonical deletion `43057062 TG>T`.
 #[test]
 #[ignore]
 fn homopolymer_deletion_shifts_left() {
     let ve = open_var_effect();
-    // First, find a poly-A run by checking adjacent bases.
-    // BRCA2 region around chr13:32340301 (GRCh38).
-    // Submit a right-shifted representation and confirm it shifts.
-    //
-    // The leftmost representation should have a smaller or equal pos.
-    let result_right = ve
-        .left_align_indel("chr13", 32_340_301, "GA", "G")
+    let canonical = Some((43_057_062, "TG".to_string(), "T".to_string()));
+    // Delete the 2nd vs the 3rd G of the run — two representations, one variant.
+    let from_inner = ve
+        .left_align_indel("chr17", 43_057_063, "GG", "G")
         .expect("left_align_indel should not error");
-    let result_left = ve
-        .left_align_indel("chr13", 32_340_300, "AG", "A")
+    let from_outer = ve
+        .left_align_indel("chr17", 43_057_064, "GG", "G")
         .expect("left_align_indel should not error");
-
-    // Both representations should normalize to the same coordinates.
-    // At least one of them must have shifted (not None).
-    let norm_right = result_right.unwrap_or((32_340_301, "GA".to_string(), "G".to_string()));
-    let norm_left = result_left.unwrap_or((32_340_300, "AG".to_string(), "A".to_string()));
     assert_eq!(
-        norm_right, norm_left,
-        "two representations of the same deletion must normalize identically"
+        from_inner, canonical,
+        "inner deletion must left-align to TG>T"
+    );
+    assert_eq!(
+        from_outer, canonical,
+        "outer deletion must left-align to TG>T"
     );
 }
 
-/// Right-shifted 1bp insertion in a poly-A should left-align.
+/// Right-shifted 1bp insertions in the chr17 GGG run must all left-align to the
+/// same canonical insertion `43057062 T>TG` (the BRCA1 c.5266dup case).
 #[test]
 #[ignore]
 fn homopolymer_insertion_shifts_left() {
     let ve = open_var_effect();
-    // Submit two representations of the same insertion and verify
-    // they converge.
-    let result_a = ve
-        .left_align_indel("chr13", 32_340_301, "G", "GA")
+    let canonical = Some((43_057_062, "T".to_string(), "TG".to_string()));
+    // Insert a G after the 1st vs the 3rd G of the run — two representations.
+    let from_inner = ve
+        .left_align_indel("chr17", 43_057_063, "G", "GG")
         .expect("left_align_indel should not error");
-    let result_b = ve
-        .left_align_indel("chr13", 32_340_300, "A", "AG")
+    let from_outer = ve
+        .left_align_indel("chr17", 43_057_065, "G", "GG")
         .expect("left_align_indel should not error");
-
-    let norm_a = result_a.unwrap_or((32_340_301, "G".to_string(), "GA".to_string()));
-    let norm_b = result_b.unwrap_or((32_340_300, "A".to_string(), "AG".to_string()));
     assert_eq!(
-        norm_a, norm_b,
-        "two representations of the same insertion must normalize identically"
+        from_inner, canonical,
+        "inner insertion must left-align to T>TG"
+    );
+    assert_eq!(
+        from_outer, canonical,
+        "outer insertion must left-align to T>TG"
     );
 }
 
@@ -167,22 +168,19 @@ fn complex_becomes_deletion_after_shift() {
 #[ignore]
 fn idempotent() {
     let ve = open_var_effect();
-    // First pass: normalize a right-shifted deletion
-    let first = ve
-        .left_align_indel("chr13", 32_340_301, "GA", "G")
-        .expect("first pass should not error");
-
-    if let Some((pos, ref_a, alt_a)) = first {
-        // Second pass: normalize the already-normalized result
-        let second = ve
-            .left_align_indel("chr13", pos, &ref_a, &alt_a)
-            .expect("second pass should not error");
-        assert_eq!(
-            second, None,
-            "already-normalized variant should return None on second pass"
-        );
-    }
-    // If first returned None, it was already leftmost — also idempotent.
+    // First pass: normalize a right-shifted deletion in the chr17 GGG run.
+    let (pos, ref_a, alt_a) = ve
+        .left_align_indel("chr17", 43_057_064, "GG", "G")
+        .expect("first pass should not error")
+        .expect("a right-shifted homopolymer deletion must left-align");
+    // Second pass over the normalized form is a no-op.
+    let second = ve
+        .left_align_indel("chr17", pos, &ref_a, &alt_a)
+        .expect("second pass should not error");
+    assert_eq!(
+        second, None,
+        "already-normalized variant should return None on second pass"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -227,4 +225,27 @@ fn vcf_anchor_preserved() {
         let shorter = ref_a.len().min(alt_a.len());
         assert!(shorter >= 1, "shorter allele must be >= 1 base");
     }
+}
+
+// -----------------------------------------------------------------------
+// Regression: duplication must stay an insertion, not collapse to a SNV
+// -----------------------------------------------------------------------
+
+/// BRCA1 c.5266dupC (the 5382insC founder frameshift): the right-shifted
+/// genomic duplication `17:43057063 G>GG` must left-align to the insertion
+/// `17:43057062 T>TG`. The pre-fix per-allele extension collapsed it to the
+/// substitution `T>G`, which downstream annotated as a missense SNV at BRCA1
+/// residue 1756 instead of a truncating frameshift — the bug this guards.
+#[test]
+#[ignore]
+fn brca1_5266dup_left_aligns_to_insertion_not_snv() {
+    let ve = open_var_effect();
+    let result = ve
+        .left_align_indel("chr17", 43_057_063, "G", "GG")
+        .expect("left_align_indel should not error");
+    assert_eq!(
+        result,
+        Some((43_057_062, "T".to_string(), "TG".to_string())),
+        "duplication must remain an insertion (T>TG), not collapse to a SNV (T>G)"
+    );
 }
