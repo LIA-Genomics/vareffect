@@ -138,6 +138,46 @@ pub fn minus_strand_coding() -> TranscriptModel {
     }
 }
 
+/// Single-exon plus-strand coding transcript (1 exon, chr3).
+///
+/// The lone exon is simultaneously the most-5' (index 0) and most-3' exon, so
+/// any overlap flags both `overlaps_first_exon` and `overlaps_last_exon`. Used
+/// to pin the intragenic predicate, which must rely on the exact bound test
+/// rather than the exon flags.
+///
+/// ```text
+/// Exon 0: [2000, 5000)  5'UTR [2000,2200) + CDS [2200,4800) + 3'UTR [4800,5000)
+/// ```
+pub fn single_exon_coding() -> TranscriptModel {
+    TranscriptModel {
+        accession: "NM_TEST_SINGLE.1".into(),
+        protein_accession: Some("NP_TEST_SINGLE.1".into()),
+        gene_symbol: "TESTSINGLE".into(),
+        hgnc_id: Some("HGNC:99903".into()),
+        ensembl_accession: None,
+        chrom: "chr3".into(),
+        strand: Strand::Plus,
+        tx_start: 2_000,
+        tx_end: 5_000,
+        cds_genomic_start: Some(2_200),
+        cds_genomic_end: Some(4_800),
+        exons: vec![Exon {
+            exon_number: 1,
+            genomic_start: 2_000,
+            genomic_end: 5_000,
+        }],
+        cds_segments: vec![CdsSegment {
+            exon_index: 0,
+            genomic_start: 2_200,
+            genomic_end: 4_800,
+            phase: 0,
+        }],
+        tier: TranscriptTier::ManeSelect,
+        biotype: Biotype::ProteinCoding,
+        exon_count: 1,
+    }
+}
+
 /// Non-coding transcript (2 exons, chr2, no CDS).
 pub fn noncoding_2_exon() -> TranscriptModel {
     TranscriptModel {
