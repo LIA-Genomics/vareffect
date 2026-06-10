@@ -24,7 +24,7 @@
 
 use std::path::Path;
 
-use crate::consequence::ConsequenceResult;
+use crate::consequence::{CnvConsequenceResult, ConsequenceResult, SvKind};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
@@ -220,6 +220,50 @@ impl VarEffect {
         Ok(crate::vep_json::to_vep_json_array(
             chrom, pos, ref_allele, alt_allele, assembly, &results,
         ))
+    }
+
+    /// Annotate a structural-variant interval against every overlapping
+    /// transcript.
+    ///
+    /// Unlike [`Self::annotate`] (which takes a single ref/alt allele pair),
+    /// this consumes a genomic *interval* plus a direction and emits the
+    /// SV-shaped SO consequence terms VEP uses for copy-number variants:
+    ///
+    /// | direction | spans whole transcript | partial overlap |
+    /// |-----------|------------------------|-----------------|
+    /// | deletion ([`SvKind::Deletion`]) | `transcript_ablation` | `feature_truncation` |
+    /// | duplication ([`SvKind::Duplication`]) | `transcript_amplification` | `feature_elongation` |
+    ///
+    /// Each [`CnvConsequenceResult`] also carries per-transcript exon-overlap
+    /// geometry (5'/3'/last-exon coverage, exon count, CDS bases affected,
+    /// overlap fraction) so callers can drive region-centric ACMG/ClinGen CNV
+    /// scoring without re-deriving exon math from the raw [`TranscriptModel`].
+    ///
+    /// # Arguments
+    ///
+    /// * `chrom` — UCSC-style chromosome name (`"chr17"`, `"chrX"`).
+    /// * `start` — 0-based inclusive start of the SV footprint (BED convention).
+    /// * `end` — 0-based exclusive end of the SV footprint.
+    /// * `sv_kind` — [`SvKind::Deletion`] or [`SvKind::Duplication`].
+    ///
+    /// # Returns
+    ///
+    /// One result per overlapping transcript. An **empty** vec is the valid
+    /// "no transcript overlapped" answer — it is never conflated with an
+    /// error, so a downstream CNV scorer can trust an empty result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VarEffectError::Malformed`] only when `start >= end` (an
+    /// inverted/zero-length interval is a caller bug, not bad reference data).
+    pub fn annotate_interval(
+        &self,
+        chrom: &str,
+        start: u64,
+        end: u64,
+        sv_kind: SvKind,
+    ) -> Result<Vec<CnvConsequenceResult>, VarEffectError> {
+        crate::consequence::annotate_interval(chrom, start, end, sv_kind, &self.transcripts)
     }
 
     /// Resolve HGVS c. notation to plus-strand genomic coordinates.

@@ -85,11 +85,6 @@ requests welcome.
   RegulatoryFeatureStore with transcription factor binding sites,
   enhancers, and promoters. See the [Out of scope](#out-of-scope-by-design)
   section below for why this is not on the core roadmap.
-- **`feature_elongation`, `feature_truncation`, `transcript_amplification`** —
-  structural-variant consequence terms. `transcript_ablation` is
-  implemented for variants that delete an entire transcript; elongation
-  and truncation require a different input surface (segment-level SV
-  calls, not VCF rows).
 - **`--shift_3prime` equivalent** — a toggle to switch off 3' normalization
   for callers who need VEP's pre-release-109 behaviour.
 - **Alternate genome builds** — GRCh37, CHM13, and non-human assemblies.
@@ -159,10 +154,10 @@ which are covered, which are not, and the reasoning.
 | `upstream_gene_variant`                   | yes    | |
 | `downstream_gene_variant`                 | yes    | |
 | `intergenic_variant`                      | yes    | No overlapping transcript in the loaded store. |
-| `transcript_ablation`                     | yes    | Variant deletes an entire transcript. |
-| `transcript_amplification`                | no     | Not yet implemented — SV-shaped term. |
-| `feature_elongation`                      | no     | Not yet implemented — SV-shaped term. |
-| `feature_truncation`                      | no     | Not yet implemented — SV-shaped term. |
+| `transcript_ablation`                     | yes    | SV interval deletes an entire transcript (`annotate_interval`, deletion + full span). |
+| `transcript_amplification`                | yes    | SV interval duplicates an entire transcript (`annotate_interval`, duplication + full span). |
+| `feature_elongation`                      | yes    | SV interval partially duplicates a transcript (`annotate_interval`, duplication + partial overlap). |
+| `feature_truncation`                      | yes    | SV interval partially deletes a transcript (`annotate_interval`, deletion + partial overlap). |
 | `NMD_transcript_variant`                  | no     | Intentional divergence — biotype-based, exposed via `predicts_nmd` instead. |
 | `mature_miRNA_variant`                    | no     | Not yet implemented — requires a miRNA locus track. |
 | `TF_binding_site_variant`                 | no     | Out of scope — regulatory layer. |

@@ -106,7 +106,7 @@ binary and reads bytes directly.
 ## Features
 
 ### Variant consequence prediction
-- **24 Sequence Ontology terms** — `missense_variant`, `synonymous_variant`,
+- **27 Sequence Ontology terms** — `missense_variant`, `synonymous_variant`,
   `stop_gained`, `stop_lost`, `start_lost`, `start_retained_variant`,
   `stop_retained_variant`, `frameshift_variant`, `inframe_insertion`,
   `inframe_deletion`, `splice_donor_variant`, `splice_acceptor_variant`,
@@ -114,7 +114,16 @@ binary and reads bytes directly.
   `5_prime_UTR_variant`, `3_prime_UTR_variant`, `intron_variant`,
   `non_coding_transcript_exon_variant`, `upstream_gene_variant`,
   `downstream_gene_variant`, `intergenic_variant`, `coding_sequence_variant`,
-  `transcript_ablation`, `protein_altering_variant`.
+  `protein_altering_variant`, and the four SV-shaped terms
+  `transcript_ablation`, `transcript_amplification`, `feature_truncation`,
+  `feature_elongation`.
+- **Structural-variant interval annotation** — `VarEffect::annotate_interval`
+  takes a genomic interval plus a direction (`SvKind::Deletion` /
+  `Duplication`) and emits one `CnvConsequenceResult` per overlapping
+  transcript: the SV SO term (ablation/amplification when the interval spans
+  the whole transcript, truncation/elongation when it partially overlaps) plus
+  per-transcript exon-overlap geometry (5'/3'/last-exon coverage, exon count,
+  CDS bases affected, overlap fraction) for region-centric CNV scoring.
 - **IMPACT ranking** — `HIGH` / `MODERATE` / `LOW` / `MODIFIER`, matching
   VEP's severity scale. `Consequence` derives `Ord` for sorting.
 - **Multi-transcript annotation** — one `ConsequenceResult` per overlapping

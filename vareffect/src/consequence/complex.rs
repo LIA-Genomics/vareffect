@@ -21,7 +21,11 @@ use crate::types::{Strand, TranscriptModel, TranscriptTier};
 /// Compute the number of CDS bases deleted by a genomic range `[del_start, del_end)`.
 ///
 /// Walks all CDS segments and sums the overlap with the deletion footprint.
-fn compute_cds_projected_length(del_start: u64, del_end: u64, transcript: &TranscriptModel) -> u32 {
+pub(super) fn compute_cds_projected_length(
+    del_start: u64,
+    del_end: u64,
+    transcript: &TranscriptModel,
+) -> u32 {
     let mut cds_bases = 0u32;
     for seg in &transcript.cds_segments {
         let overlap_start = del_start.max(seg.genomic_start);

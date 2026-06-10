@@ -41,11 +41,14 @@ pub(crate) mod helpers;
 mod indel;
 mod nmd;
 mod snv;
+mod sv;
 #[cfg(test)]
 mod tests;
 
 pub use indel::{annotate_deletion, annotate_insertion};
 pub use snv::annotate_snv;
+pub(crate) use sv::annotate_interval;
+pub use sv::{CnvConsequenceResult, SvKind};
 
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
@@ -88,8 +91,13 @@ impl std::fmt::Display for Impact {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Consequence {
     // --- HIGH impact ---
-    /// Variant causes loss of the transcription unit (typically large SVs).
+    /// A deletion that removes an entire transcription unit (SO:0001893).
+    /// Emitted for SV-shaped deletions that span the whole transcript.
     TranscriptAblation,
+    /// A duplication/amplification that spans an entire transcription unit,
+    /// raising its copy number (SO:0001889). Emitted for SV-shaped
+    /// duplications that cover the whole transcript.
+    TranscriptAmplification,
     /// Variant in the canonical splice acceptor site (intronic -1 or -2).
     SpliceAcceptorVariant,
     /// Variant in the canonical splice donor site (intronic +1 or +2).
@@ -103,6 +111,14 @@ pub enum Consequence {
     StopLost,
     /// Start codon (ATG) disrupted -- translation initiation site lost.
     StartLost,
+    /// A deletion that removes part (but not all) of a transcription unit
+    /// (SO:0001906). Emitted for SV-shaped deletions that partially overlap a
+    /// transcript. Promoted MODIFIER -> HIGH by Ensembl (release 111+).
+    FeatureTruncation,
+    /// A duplication/insertion that lengthens part of a transcription unit
+    /// (SO:0001907). Emitted for SV-shaped duplications that partially overlap
+    /// a transcript. Promoted MODIFIER -> HIGH by Ensembl (release 111+).
+    FeatureElongation,
 
     // --- MODERATE impact ---
     /// In-frame insertion of one or more codons (length divisible by 3).
@@ -155,12 +171,15 @@ impl Consequence {
     pub fn impact(&self) -> Impact {
         match self {
             Self::TranscriptAblation
+            | Self::TranscriptAmplification
             | Self::SpliceAcceptorVariant
             | Self::SpliceDonorVariant
             | Self::StopGained
             | Self::FrameshiftVariant
             | Self::StopLost
-            | Self::StartLost => Impact::High,
+            | Self::StartLost
+            | Self::FeatureTruncation
+            | Self::FeatureElongation => Impact::High,
 
             Self::InframeInsertion
             | Self::InframeDeletion
@@ -185,32 +204,40 @@ impl Consequence {
     }
 
     /// Severity rank (lower = more severe). Matches VEP's ordering.
+    ///
+    /// `transcript_amplification` sits in the top HIGH block (right after
+    /// `transcript_ablation`); `feature_truncation` / `feature_elongation`
+    /// rank just above `intergenic_variant`, matching VEP's canonical SO
+    /// severity list even though both are now HIGH-impact.
     pub fn severity_rank(&self) -> u8 {
         match self {
             Self::TranscriptAblation => 1,
-            Self::SpliceAcceptorVariant => 2,
-            Self::SpliceDonorVariant => 3,
-            Self::StopGained => 4,
-            Self::FrameshiftVariant => 5,
-            Self::StopLost => 6,
-            Self::StartLost => 7,
-            Self::InframeInsertion => 8,
-            Self::InframeDeletion => 9,
-            Self::MissenseVariant => 10,
-            Self::ProteinAlteringVariant => 11,
-            Self::SpliceRegionVariant => 12,
-            Self::StartRetainedVariant => 13,
-            Self::StopRetainedVariant => 14,
-            Self::IncompleteTerminalCodonVariant => 15,
-            Self::SynonymousVariant => 16,
-            Self::CodingSequenceVariant => 17,
-            Self::FivePrimeUtrVariant => 18,
-            Self::ThreePrimeUtrVariant => 19,
-            Self::NonCodingTranscriptExonVariant => 20,
-            Self::IntronVariant => 21,
-            Self::UpstreamGeneVariant => 22,
-            Self::DownstreamGeneVariant => 23,
-            Self::IntergenicVariant => 24,
+            Self::TranscriptAmplification => 2,
+            Self::SpliceAcceptorVariant => 3,
+            Self::SpliceDonorVariant => 4,
+            Self::StopGained => 5,
+            Self::FrameshiftVariant => 6,
+            Self::StopLost => 7,
+            Self::StartLost => 8,
+            Self::InframeInsertion => 9,
+            Self::InframeDeletion => 10,
+            Self::MissenseVariant => 11,
+            Self::ProteinAlteringVariant => 12,
+            Self::SpliceRegionVariant => 13,
+            Self::StartRetainedVariant => 14,
+            Self::StopRetainedVariant => 15,
+            Self::IncompleteTerminalCodonVariant => 16,
+            Self::SynonymousVariant => 17,
+            Self::CodingSequenceVariant => 18,
+            Self::FivePrimeUtrVariant => 19,
+            Self::ThreePrimeUtrVariant => 20,
+            Self::NonCodingTranscriptExonVariant => 21,
+            Self::IntronVariant => 22,
+            Self::UpstreamGeneVariant => 23,
+            Self::DownstreamGeneVariant => 24,
+            Self::FeatureTruncation => 25,
+            Self::FeatureElongation => 26,
+            Self::IntergenicVariant => 27,
         }
     }
 
@@ -218,12 +245,15 @@ impl Consequence {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TranscriptAblation => "transcript_ablation",
+            Self::TranscriptAmplification => "transcript_amplification",
             Self::SpliceAcceptorVariant => "splice_acceptor_variant",
             Self::SpliceDonorVariant => "splice_donor_variant",
             Self::StopGained => "stop_gained",
             Self::FrameshiftVariant => "frameshift_variant",
             Self::StopLost => "stop_lost",
             Self::StartLost => "start_lost",
+            Self::FeatureTruncation => "feature_truncation",
+            Self::FeatureElongation => "feature_elongation",
             Self::InframeInsertion => "inframe_insertion",
             Self::InframeDeletion => "inframe_deletion",
             Self::MissenseVariant => "missense_variant",
