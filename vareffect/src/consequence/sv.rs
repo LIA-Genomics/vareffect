@@ -47,6 +47,10 @@ pub struct CnvConsequenceResult {
     pub hgnc_id: Option<String>,
     /// Transcript strand.
     pub strand: Strand,
+    /// Transcript footprint start, `[tx_start, tx_end)` 0-based half-open.
+    pub tx_start: u64,
+    /// Transcript footprint end (exclusive).
+    pub tx_end: u64,
     /// SO consequence term assigned to this transcript for the SV.
     pub consequence: Consequence,
     /// VEP IMPACT for [`Self::consequence`].
@@ -160,6 +164,8 @@ fn annotate_transcript(
         gene_symbol: transcript.gene_symbol.clone(),
         hgnc_id: transcript.hgnc_id.clone(),
         strand: transcript.strand,
+        tx_start: transcript.tx_start,
+        tx_end: transcript.tx_end,
         consequence,
         impact: consequence.impact(),
         spans_whole_transcript,
