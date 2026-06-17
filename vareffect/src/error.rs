@@ -147,4 +147,10 @@ pub enum VarEffectError {
     /// Surfaced instead of panicking per library error-handling policy.
     #[error("allele contains invalid (non-ASCII) bytes")]
     InvalidAllele,
+
+    /// A VCF breakend ALT string did not match the VCF 4.x breakend grammar
+    /// (`t[p[`, `t]p]`, `]p]t`, `[p[t`, or single breakends `t.` / `.t`).
+    /// The inner string is the offending ALT.
+    #[error("invalid breakend ALT notation: {0}")]
+    InvalidBreakend(String),
 }

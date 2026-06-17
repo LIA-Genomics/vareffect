@@ -73,6 +73,37 @@ undocumented legacy mode. `vareffect` always applies 3' normalization on
 the coding strand, matching VEP's current default. There is no toggle to
 disable it.
 
+### Structural variants are annotated at the region level
+
+`annotate_interval` (DEL / DUP / INV), `annotate_breakend` (`<BND>`), and
+`annotate_sv_insertion` (`<INS>`) emit the per-transcript SO term **set** VEP
+assigns to a structural variant: the overlapped sub-regions
+(`coding_sequence_variant`, `5_prime_UTR_variant`, `3_prime_UTR_variant`,
+`intron_variant`, `non_coding_transcript_exon_variant`) plus a copy-number
+headline where applicable — `transcript_ablation` / `transcript_amplification`
+for a whole-transcript deletion / duplication, `feature_truncation` for a
+partial deletion overlapping an exon or any breakend breakpoint, and
+`feature_elongation` for an intragenic, exonic duplication or insertion.
+Inversions are copy-number-neutral and carry no headline term (matching
+[ensembl-vep#79](https://github.com/Ensembl/ensembl-vep/issues/79)). The term
+sets are validated against the VEP REST API in `tests/vep_concordance_sv.rs`.
+
+Two deliberate divergences, both because the SV path is pure interval geometry
+(no FASTA, no codon translation):
+
+- **No precise codon consequences at breakpoints.** Where an SV breakpoint
+  removes a stop/start codon or hits a splice site, VEP may add `stop_lost`,
+  `start_lost`, `stop_gained`, `frameshift_variant`, or a splice term;
+  `vareffect` reports only the region-level set.
+- **Symbolic insertions are annotated at the insertion point**, not an
+  `SVLEN`-projected reference footprint, so the touched sub-regions (and
+  `feature_elongation`) can differ when the point and footprint straddle a
+  region boundary.
+
+Breakend mate pairing (`MATEID` / `EVENT`) is not performed — each breakpoint is
+annotated independently, matching VEP. `Breakend::parse` decodes the VCF breakend
+ALT grammar so callers can extract and annotate the mate locus.
+
 ## Not yet implemented
 
 These are features `vareffect` intends to cover but has not yet. Pull
@@ -154,10 +185,10 @@ which are covered, which are not, and the reasoning.
 | `upstream_gene_variant`                   | yes    | |
 | `downstream_gene_variant`                 | yes    | |
 | `intergenic_variant`                      | yes    | No overlapping transcript in the loaded store. |
-| `transcript_ablation`                     | yes    | SV interval deletes an entire transcript (`annotate_interval`, deletion + full span). |
-| `transcript_amplification`                | yes    | SV interval duplicates an entire transcript (`annotate_interval`, duplication + full span). |
-| `feature_elongation`                      | yes    | SV interval partially duplicates a transcript (`annotate_interval`, duplication + partial overlap). |
-| `feature_truncation`                      | yes    | SV interval partially deletes a transcript (`annotate_interval`, deletion + partial overlap). |
+| `transcript_ablation`                     | yes    | Deletion spanning a whole transcript (`annotate_interval`, DEL + full span). |
+| `transcript_amplification`                | yes    | Duplication spanning a whole transcript (`annotate_interval`, DUP + full span). |
+| `feature_elongation`                      | yes    | Intragenic, exonic duplication or insertion (`annotate_interval` DUP / `annotate_sv_insertion`). |
+| `feature_truncation`                      | yes    | Partial deletion overlapping an exon, or a breakend breakpoint (`annotate_interval` DEL / `annotate_breakend`). |
 | `NMD_transcript_variant`                  | no     | Intentional divergence — biotype-based, exposed via `predicts_nmd` instead. |
 | `mature_miRNA_variant`                    | no     | Not yet implemented — requires a miRNA locus track. |
 | `TF_binding_site_variant`                 | no     | Out of scope — regulatory layer. |

@@ -137,8 +137,8 @@ mod vep_json;
 pub(crate) mod test_fixtures;
 
 pub use consequence::{
-    CnvConsequenceResult, Consequence, ConsequenceResult, Impact, SvKind, annotate_deletion,
-    annotate_insertion, annotate_snv,
+    Breakend, BreakendMate, BreakendOrientation, Consequence, ConsequenceResult, Impact,
+    SvConsequenceResult, SvKind, annotate_deletion, annotate_insertion, annotate_snv,
 };
 pub use error::VarEffectError;
 pub use fasta::FastaReader;

@@ -117,13 +117,18 @@ binary and reads bytes directly.
   `protein_altering_variant`, and the four SV-shaped terms
   `transcript_ablation`, `transcript_amplification`, `feature_truncation`,
   `feature_elongation`.
-- **Structural-variant interval annotation** — `VarEffect::annotate_interval`
-  takes a genomic interval plus a direction (`SvKind::Deletion` /
-  `Duplication`) and emits one `CnvConsequenceResult` per overlapping
-  transcript: the SV SO term (ablation/amplification when the interval spans
-  the whole transcript, truncation/elongation when it partially overlaps) plus
-  per-transcript exon-overlap geometry (5'/3'/last-exon coverage, exon count,
-  CDS bases affected, overlap fraction) for region-centric CNV scoring.
+- **Structural-variant annotation** — `VarEffect::annotate_interval`
+  (deletions, duplications, inversions via `SvKind`), `annotate_breakend`
+  (translocation / `<BND>` breakpoints), and `annotate_sv_insertion` (`<INS>`)
+  emit one `SvConsequenceResult` per overlapping transcript: the per-transcript
+  SO term **set** VEP assigns to the event — the overlapped sub-regions plus a
+  copy-number headline where applicable (`transcript_ablation` /
+  `transcript_amplification` for whole-transcript DEL / DUP; `feature_truncation`
+  for partial deletions and breakpoints; `feature_elongation` for intragenic
+  exonic duplications / insertions; inversions are balanced and carry no
+  headline). `Breakend::parse` decodes the VCF breakend ALT grammar. Each result
+  also carries exon-overlap geometry (5'/3'/last-exon coverage, exon count, CDS
+  bases affected, overlap fraction) for region-centric CNV scoring.
 - **IMPACT ranking** — `HIGH` / `MODERATE` / `LOW` / `MODIFIER`, matching
   VEP's severity scale. `Consequence` derives `Ord` for sorting.
 - **Multi-transcript annotation** — one `ConsequenceResult` per overlapping

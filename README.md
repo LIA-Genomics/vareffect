@@ -232,7 +232,7 @@ Elapsed:    0.2s
 |---------|--------|
 | `mature_miRNA_variant` | Requires miRNA locus track |
 | Regulatory terms (`TFBS_ablation`, `TF_binding_site_variant`, `regulatory_region_variant`) | Requires regulatory feature store |
-| SV terms (`feature_elongation`, `feature_truncation`, `transcript_amplification`) | Requires segment-level SV input |
+| Precise codon consequences at SV breakpoints (`stop_lost`, `start_lost`, …) | The SV path is geometry-only; SVs get region-level terms (see VEP_DIVERGENCES.md) |
 | Alternate builds (GRCh37, CHM13) | Build pipeline work, not engine limitation |
 | Multi-allele VCF splitting | Caller's responsibility |
 | Canonical transcript selection | Caller filters on tier metadata |
