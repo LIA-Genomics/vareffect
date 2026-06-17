@@ -24,7 +24,7 @@
 
 use std::path::Path;
 
-use crate::consequence::{CnvConsequenceResult, ConsequenceResult, SvKind};
+use crate::consequence::{ConsequenceResult, SvConsequenceResult, SvKind};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
@@ -222,19 +222,27 @@ impl VarEffect {
         ))
     }
 
-    /// Annotate a structural-variant interval against every overlapping
-    /// transcript.
+    /// Annotate an interval structural variant (DEL / DUP / INV) against every
+    /// overlapping transcript.
     ///
-    /// Unlike [`Self::annotate`] (which takes a single ref/alt allele pair),
-    /// this consumes a genomic *interval* plus a direction and emits the
-    /// SV-shaped SO consequence terms VEP uses for copy-number variants:
+    /// Unlike [`Self::annotate`] (single ref/alt pair), this consumes a genomic
+    /// *interval* plus a direction and emits the per-transcript SO term **set**
+    /// VEP assigns to structural variants — the overlapped sub-regions plus, for
+    /// unbalanced events, a copy-number headline term:
     ///
     /// | direction | spans whole transcript | partial overlap |
     /// |-----------|------------------------|-----------------|
-    /// | deletion ([`SvKind::Deletion`]) | `transcript_ablation` | `feature_truncation` |
-    /// | duplication ([`SvKind::Duplication`]) | `transcript_amplification` | `feature_elongation` |
+    /// | deletion ([`SvKind::Deletion`]) | `transcript_ablation` (alone) | `feature_truncation` + sub-regions |
+    /// | duplication ([`SvKind::Duplication`]) | `transcript_amplification` (alone) | `feature_elongation` + sub-regions |
+    /// | inversion ([`SvKind::Inversion`]) | sub-regions only | sub-regions only |
     ///
-    /// Each [`CnvConsequenceResult`] also carries per-transcript exon-overlap
+    /// An inversion is copy-number-neutral, so VEP assigns **no** ablation /
+    /// truncation headline — only the overlapped sub-region terms
+    /// (`coding_sequence_variant`, `5_prime_UTR_variant`, `3_prime_UTR_variant`,
+    /// `intron_variant`, `non_coding_transcript_exon_variant`). See
+    /// Ensembl/ensembl-vep#79.
+    ///
+    /// Each [`SvConsequenceResult`] also carries per-transcript exon-overlap
     /// geometry (5'/3'/last-exon coverage, exon count, CDS bases affected,
     /// overlap fraction) so callers can drive region-centric ACMG/ClinGen CNV
     /// scoring without re-deriving exon math from the raw [`TranscriptModel`].
@@ -244,7 +252,7 @@ impl VarEffect {
     /// * `chrom` — UCSC-style chromosome name (`"chr17"`, `"chrX"`).
     /// * `start` — 0-based inclusive start of the SV footprint (BED convention).
     /// * `end` — 0-based exclusive end of the SV footprint.
-    /// * `sv_kind` — [`SvKind::Deletion`] or [`SvKind::Duplication`].
+    /// * `sv_kind` — interval SV shape ([`SvKind`]).
     ///
     /// # Returns
     ///
@@ -262,8 +270,60 @@ impl VarEffect {
         start: u64,
         end: u64,
         sv_kind: SvKind,
-    ) -> Result<Vec<CnvConsequenceResult>, VarEffectError> {
+    ) -> Result<Vec<SvConsequenceResult>, VarEffectError> {
         crate::consequence::annotate_interval(chrom, start, end, sv_kind, &self.transcripts)
+    }
+
+    /// Annotate a single breakend (`<BND>`) breakpoint against every transcript
+    /// it falls in.
+    ///
+    /// The breakpoint at 0-based genomic `pos` truncates any transcript it lands
+    /// inside (`feature_truncation`), reported alongside the sub-region term at
+    /// that base. Nearby transcripts the breakpoint does not enter are not
+    /// returned (the store overlap query is exact, like [`Self::annotate`]).
+    ///
+    /// A translocation is two linked breakends; annotate each end with this
+    /// method (or [`Self::annotate_breakend_pair`]). Mate pairing (MATEID /
+    /// EVENT) is intentionally not performed — this matches VEP, which annotates
+    /// each breakend independently. Use [`crate::Breakend::parse`] to extract a
+    /// mate locus from a VCF breakend ALT string.
+    ///
+    /// Returns one [`SvConsequenceResult`] per overlapping transcript; an empty
+    /// vec means the breakpoint fell in no transcript.
+    pub fn annotate_breakend(&self, chrom: &str, pos: u64) -> Vec<SvConsequenceResult> {
+        crate::consequence::annotate_breakend(chrom, pos, &self.transcripts)
+    }
+
+    /// Annotate both breakpoints of a breakend pair (a translocation or other
+    /// two-locus rearrangement) and return the union of their transcript
+    /// annotations.
+    ///
+    /// Each breakpoint is annotated independently via [`Self::annotate_breakend`];
+    /// the two result lists are concatenated (not deduplicated across ends — the
+    /// two loci are normally far apart or on different chromosomes). This mirrors
+    /// VEP, which reports every transcript affected by either breakend.
+    pub fn annotate_breakend_pair(
+        &self,
+        chrom_a: &str,
+        pos_a: u64,
+        chrom_b: &str,
+        pos_b: u64,
+    ) -> Vec<SvConsequenceResult> {
+        let mut results = self.annotate_breakend(chrom_a, pos_a);
+        results.extend(self.annotate_breakend(chrom_b, pos_b));
+        results
+    }
+
+    /// Annotate a symbolic insertion (`<INS>`) at 0-based genomic `pos`.
+    ///
+    /// A symbolic insertion carries no copy-number headline — the inserted
+    /// sequence is unknown to the annotator, so VEP reports only the sub-region
+    /// the insertion point occupies (e.g. `intron_variant`,
+    /// `coding_sequence_variant`). Purely positional.
+    ///
+    /// Returns one [`SvConsequenceResult`] per overlapping transcript.
+    pub fn annotate_sv_insertion(&self, chrom: &str, pos: u64) -> Vec<SvConsequenceResult> {
+        crate::consequence::annotate_sv_insertion(chrom, pos, &self.transcripts)
     }
 
     /// Resolve HGVS c. notation to plus-strand genomic coordinates.

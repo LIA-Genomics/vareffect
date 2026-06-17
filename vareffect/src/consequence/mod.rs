@@ -36,6 +36,7 @@
 //! [`FastaReader::try_clone`] to avoid mutex
 //! contention on the internal seek-based reader.
 
+mod breakend;
 mod complex;
 pub(crate) mod helpers;
 mod indel;
@@ -45,10 +46,11 @@ mod sv;
 #[cfg(test)]
 mod tests;
 
+pub use breakend::{Breakend, BreakendMate, BreakendOrientation};
 pub use indel::{annotate_deletion, annotate_insertion};
 pub use snv::annotate_snv;
-pub(crate) use sv::annotate_interval;
-pub use sv::{CnvConsequenceResult, SvKind};
+pub use sv::{SvConsequenceResult, SvKind};
+pub(crate) use sv::{annotate_breakend, annotate_interval, annotate_sv_insertion};
 
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
