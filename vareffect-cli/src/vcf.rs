@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use flate2::Compression;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 
 /// Parsed VCF data line with zero-copy borrows from the raw line.
@@ -142,7 +142,7 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
-        Ok(Box::new(BufReader::new(GzDecoder::new(file))))
+        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
     } else {
         Ok(Box::new(BufReader::new(file)))
     }
@@ -228,5 +228,58 @@ mod tests {
         let out = write_annotated_line(&r, "CSQ_VAL");
         // FORMAT and sample columns must be preserved.
         assert!(out.ends_with("\tGT\t0/1"));
+    }
+
+    /// Compress `content` into a single, self-contained gzip member.
+    fn gzip_member(content: &str) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder
+            .write_all(content.as_bytes())
+            .expect("writing gzip member");
+        encoder.finish().expect("finishing gzip member")
+    }
+
+    #[test]
+    fn open_reader_reads_all_members_of_multi_member_gzip() {
+        // BGZF (the .vcf.gz format from bgzip/bcftools/tabix) is a stream of
+        // concatenated gzip members. Simulate it with two independently
+        // finished members so a single-member decoder would stop after the
+        // first. The #CHROM line and variant data live in the SECOND member,
+        // mirroring a real GRCh38 VCF whose contig-heavy header overflows the
+        // first BGZF block.
+        let member1 = "##fileformat=VCFv4.2\n##contig=<ID=chr16,length=90338345>\n";
+        let member2 =
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr16\t47435\t.\tC\tA\t.\t.\t.\n";
+
+        let mut bytes = gzip_member(member1);
+        bytes.extend_from_slice(&gzip_member(member2));
+
+        let tmp = tempfile::Builder::new()
+            .suffix(".vcf.gz")
+            .tempfile()
+            .expect("creating temp .vcf.gz");
+        std::fs::write(tmp.path(), &bytes).expect("writing multi-member gzip");
+
+        let reader = open_reader(tmp.path()).expect("opening multi-member gzip");
+        let lines: Vec<String> = reader
+            .lines()
+            .collect::<std::io::Result<_>>()
+            .expect("reading lines");
+
+        // All four lines from BOTH members must be present. A single-member
+        // GzDecoder would return only the two lines from member 1.
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected lines from both gzip members, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("#CHROM")),
+            "second-member #CHROM line missing"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("chr16\t47435")),
+            "second-member data line missing"
+        );
     }
 }
