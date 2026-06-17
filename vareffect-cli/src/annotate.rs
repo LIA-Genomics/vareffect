@@ -7,10 +7,12 @@
 //!
 //! # Threading model
 //!
-//! Data lines are read into chunks of [`CHUNK_SIZE`]. Each chunk is annotated
-//! in parallel with `rayon::par_iter().map().collect()` (which preserves
-//! input order), then written sequentially. This bounds memory to one chunk
-//! while maintaining VCF output order.
+//! A dedicated reader thread prefetches data lines into chunks of
+//! [`CHUNK_SIZE`] over a bounded channel ([`PIPELINE_DEPTH`] deep). The main
+//! thread annotates each chunk in parallel with `rayon::par_iter` (which
+//! preserves input order) and writes it; `.vcf.gz` output is BGZF compressed
+//! on its own worker pool. Reading, annotation, and output compression overlap
+//! while input order and bounded memory are preserved.
 //!
 //! # Error handling
 //!
