@@ -148,19 +148,71 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     }
 }
 
+/// Gzip-aware output sink for an annotated VCF.
+///
+/// Call [`VcfWriter::finish`] when done: it writes the gzip footer and surfaces
+/// I/O errors that `GzEncoder`'s `Drop` would otherwise swallow.
+pub enum VcfWriter {
+    /// Uncompressed output.
+    Plain(BufWriter<File>),
+    /// gzip-compressed output (standard gzip, not BGZF).
+    Gzip(BufWriter<GzEncoder<File>>),
+}
+
+impl Write for VcfWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            VcfWriter::Plain(writer) => writer.write(buf),
+            VcfWriter::Gzip(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            VcfWriter::Plain(writer) => writer.flush(),
+            VcfWriter::Gzip(writer) => writer.flush(),
+        }
+    }
+}
+
+impl VcfWriter {
+    /// Flush buffers and, for gzip, write the footer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if flushing or gzip finalization fails (e.g. the device
+    /// is full) -- errors `Drop` would otherwise discard.
+    pub fn finish(self) -> Result<()> {
+        match self {
+            VcfWriter::Plain(mut writer) => {
+                writer.flush().context("flushing output")?;
+                Ok(())
+            }
+            VcfWriter::Gzip(writer) => {
+                let encoder = writer
+                    .into_inner()
+                    .map_err(std::io::IntoInnerError::into_error)
+                    .context("flushing buffered output before gzip finalization")?;
+                encoder.finish().context("writing gzip footer")?;
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Open a VCF file for writing, auto-detecting gzip by extension.
 ///
 /// `.gz` output uses `flate2` fast compression (standard gzip, not BGZF).
-pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
+pub fn open_writer(path: &Path) -> Result<VcfWriter> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
-        Ok(Box::new(BufWriter::new(GzEncoder::new(
+        Ok(VcfWriter::Gzip(BufWriter::new(GzEncoder::new(
             file,
             Compression::fast(),
         ))))
     } else {
-        Ok(Box::new(BufWriter::new(file)))
+        Ok(VcfWriter::Plain(BufWriter::new(file)))
     }
 }
 
@@ -237,6 +289,54 @@ mod tests {
             .write_all(content.as_bytes())
             .expect("writing gzip member");
         encoder.finish().expect("finishing gzip member")
+    }
+
+    #[test]
+    fn vcf_writer_gzip_finish_round_trips() {
+        let tmp = tempfile::Builder::new()
+            .suffix(".vcf.gz")
+            .tempfile()
+            .expect("creating temp .vcf.gz");
+
+        let mut writer = open_writer(tmp.path()).expect("opening gzip writer");
+        writeln!(writer, "##fileformat=VCFv4.2").expect("write header");
+        writeln!(writer, "chr1\t100\t.\tA\tG\t.\t.\tCSQ=x").expect("write record");
+        writer.finish().expect("finalizing gzip writer");
+
+        // Reopen: succeeds only if finish() wrote a valid gzip footer.
+        let reader = open_reader(tmp.path()).expect("reopening gzip output");
+        let lines: Vec<String> = reader
+            .lines()
+            .collect::<std::io::Result<_>>()
+            .expect("reading lines");
+        assert_eq!(
+            lines,
+            vec!["##fileformat=VCFv4.2", "chr1\t100\t.\tA\tG\t.\t.\tCSQ=x"]
+        );
+    }
+
+    #[test]
+    fn write_annotated_sites_only_dot_info_replaces_cleanly() {
+        // Sites-only line, INFO ".": CSQ replaces it cleanly, no stray '\r'.
+        let line = "chr1\t100\t.\tA\tG\t.\tPASS\t.";
+        let r = parse_vcf_line(line).unwrap();
+        let out = write_annotated_line(&r, "csqval");
+        assert!(out.ends_with("\tCSQ=csqval"));
+        assert!(!out.contains(";CSQ"));
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn trailing_cr_corrupts_sites_only_info_if_not_stripped() {
+        // Why annotate::run strips '\r' first: an un-stripped CR breaks INFO
+        // "." detection and mis-splices CSQ after the carriage return.
+        let with_cr = "chr1\t100\t.\tA\tG\t.\tPASS\t.\r";
+        let r = parse_vcf_line(with_cr).unwrap();
+        let out = write_annotated_line(&r, "csqval");
+        assert!(
+            out.contains(".\r;CSQ=csqval"),
+            "unstripped CR corrupts the INFO field"
+        );
     }
 
     #[test]
