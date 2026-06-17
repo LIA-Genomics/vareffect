@@ -18,17 +18,18 @@
 //! logged as warnings. The original line is passed through unmodified. The
 //! pipeline never drops a line or aborts for a single bad variant.
 
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use vareffect::VarEffect;
+use vareffect::{VarEffect, VarEffectError};
 
 use crate::csq;
 use crate::vcf;
@@ -56,11 +57,16 @@ pub struct AnnotateConfig<'a> {
 }
 
 /// Annotation statistics, updated atomically from rayon worker threads.
+///
+/// The first four count *alleles*; `malformed` counts unparseable *lines*.
+/// `chrom_not_found` dedupes the missing-chromosome warning.
 struct Counters {
     annotated: AtomicU64,
     intergenic: AtomicU64,
     skipped: AtomicU64,
     errored: AtomicU64,
+    malformed: AtomicU64,
+    chrom_not_found: Mutex<HashSet<String>>,
 }
 
 /// Run the annotate pipeline.
@@ -77,7 +83,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
 
     // -- 1. Configure rayon thread pool -----------------------------------
     rayon::ThreadPoolBuilder::new()
-        .num_threads(config.threads)
+        .num_threads(resolve_threads(config.threads))
         .build_global()
         .context("configuring rayon thread pool")?;
 
@@ -109,7 +115,8 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     pb.set_message("processing headers");
 
     // -- 5. Process headers -----------------------------------------------
-    let mut lines = reader.lines();
+    // Drop trailing '\r' so CRLF input doesn't leave it in the spliced output.
+    let mut lines = reader.lines().map(|r| r.map(strip_trailing_cr));
     process_headers(&mut lines, &mut writer)?;
 
     // -- 6. Chunked parallel annotation -----------------------------------
@@ -119,6 +126,8 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         intergenic: AtomicU64::new(0),
         skipped: AtomicU64::new(0),
         errored: AtomicU64::new(0),
+        malformed: AtomicU64::new(0),
+        chrom_not_found: Mutex::new(HashSet::new()),
     };
 
     let mut total = 0u64;
@@ -142,7 +151,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         total += chunk.len() as u64;
     }
 
-    writer.flush().context("flushing output")?;
+    writer.finish().context("finalizing output")?;
 
     // -- 7. Summary -------------------------------------------------------
     let annotate_elapsed = annotate_start.elapsed();
@@ -151,6 +160,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     let intergenic = counters.intergenic.load(Ordering::Relaxed);
     let skipped = counters.skipped.load(Ordering::Relaxed);
     let errored = counters.errored.load(Ordering::Relaxed);
+    let malformed = counters.malformed.load(Ordering::Relaxed);
     let annotate_secs = annotate_elapsed.as_secs_f64();
     let rate = if annotate_secs > 0.0 {
         total as f64 / annotate_secs
@@ -160,9 +170,9 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
 
     pb.finish_and_clear();
     tracing::info!(
-        "{annotated} annotated, {intergenic} intergenic, {skipped} skipped, {errored} errors. \
-         {total} variants in {:.1}ms ({rate:.0} variants/sec) \
-         [load: {:.1}ms, total: {:.1}ms]",
+        "{annotated} annotated, {intergenic} intergenic, {skipped} skipped, {errored} errored \
+         (alleles); {malformed} malformed lines; {total} variant lines in {:.1}ms \
+         ({rate:.0} lines/sec) [load: {:.1}ms, total: {:.1}ms]",
         annotate_elapsed.as_secs_f64() * 1000.0,
         load_elapsed.as_secs_f64() * 1000.0,
         total_elapsed.as_secs_f64() * 1000.0,
@@ -198,10 +208,32 @@ fn process_headers(
         }
     }
 
-    // If we exhaust the iterator without finding #CHROM, this is an
-    // empty or header-only VCF. Still inject the CSQ header.
+    // No #CHROM found (empty/truncated input): inject CSQ header and warn.
+    tracing::warn!(
+        "no #CHROM line found in input; wrote header only and annotated no variants \
+         (is the input a complete, valid VCF?)"
+    );
     writeln!(writer, "{}", csq::CSQ_HEADER).context("writing CSQ header (empty VCF)")?;
     Ok(())
+}
+
+/// Drop a single trailing `\r` (`BufRead::lines` strips `\n` but not `\r`).
+fn strip_trailing_cr(mut line: String) -> String {
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    line
+}
+
+/// Resolve worker-thread count: `0` means all logical cores (fallback `1`).
+fn resolve_threads(requested: usize) -> usize {
+    if requested == 0 {
+        std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+    } else {
+        requested
+    }
 }
 
 /// Annotate a chunk of VCF lines in parallel and write results in order.
@@ -232,7 +264,7 @@ fn annotate_line(line: &str, ve: &VarEffect, counters: &Counters) -> String {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("skipping malformed line: {e}");
-            counters.skipped.fetch_add(1, Ordering::Relaxed);
+            counters.malformed.fetch_add(1, Ordering::Relaxed);
             return line.to_string();
         }
     };
@@ -290,12 +322,29 @@ fn annotate_line(line: &str, ve: &VarEffect, counters: &Counters) -> String {
                 }
             }
             Ok(Err(e)) => {
-                tracing::warn!(
-                    chrom = %record.chrom,
-                    pos = record.pos,
-                    alt = %alt,
-                    "annotation failed: {e}"
-                );
+                if let VarEffectError::ChromNotFound { chrom } = &e {
+                    // Warn once per distinct chromosome, not once per allele.
+                    let first_sight = counters
+                        .chrom_not_found
+                        .lock()
+                        .map(|mut seen| seen.insert(chrom.clone()))
+                        .unwrap_or(true);
+                    if first_sight {
+                        tracing::warn!(
+                            chrom = %chrom,
+                            "chromosome not found in genome index; variants on it cannot be \
+                             annotated (is the VCF using a chromosome naming convention \
+                             vareffect does not recognize?)"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        chrom = %record.chrom,
+                        pos = record.pos,
+                        alt = %alt,
+                        "annotation failed: {e}"
+                    );
+                }
                 counters.skipped.fetch_add(1, Ordering::Relaxed);
             }
             Err(_) => {
@@ -335,4 +384,62 @@ fn normalize_chrom(chrom: &str) -> String {
         return "chrM".to_string();
     }
     format!("chr{chrom}")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_trailing_cr_removes_one_cr() {
+        assert_eq!(strip_trailing_cr("chr1\t100".to_string()), "chr1\t100");
+        assert_eq!(strip_trailing_cr("chr1\t100\r".to_string()), "chr1\t100");
+        assert_eq!(strip_trailing_cr(String::new()), "");
+        assert_eq!(strip_trailing_cr("x\r\r".to_string()), "x\r");
+    }
+
+    #[test]
+    fn resolve_threads_auto_is_at_least_one() {
+        assert!(resolve_threads(0) >= 1);
+        assert_eq!(resolve_threads(1), 1);
+        assert_eq!(resolve_threads(8), 8);
+    }
+
+    #[test]
+    fn process_headers_injects_csq_immediately_before_chrom() {
+        let input: [std::io::Result<String>; 2] = [
+            Ok("##fileformat=VCFv4.2".to_string()),
+            Ok("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO".to_string()),
+        ];
+        let mut lines = input.into_iter();
+        let mut out: Vec<u8> = Vec::new();
+        process_headers(&mut lines, &mut out).expect("process headers");
+
+        let text = String::from_utf8(out).expect("utf8");
+        let csq_pos = text.find("ID=CSQ").expect("CSQ header written");
+        let chrom_pos = text.find("#CHROM").expect("#CHROM written");
+        assert!(csq_pos < chrom_pos, "CSQ header must precede #CHROM");
+    }
+
+    #[test]
+    fn process_headers_tolerates_missing_chrom() {
+        let input: [std::io::Result<String>; 2] = [
+            Ok("##fileformat=VCFv4.2".to_string()),
+            Ok("##contig=<ID=chr1,length=1000>".to_string()),
+        ];
+        let mut lines = input.into_iter();
+        let mut out: Vec<u8> = Vec::new();
+        process_headers(&mut lines, &mut out).expect("process headers");
+
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.contains("ID=CSQ"), "CSQ header still injected");
+        assert!(
+            !text.contains("#CHROM"),
+            "no #CHROM line in header-only input"
+        );
+    }
 }
