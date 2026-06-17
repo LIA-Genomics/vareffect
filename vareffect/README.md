@@ -30,7 +30,7 @@ provisions the reference data:
 ```toml
 # Cargo.toml
 [dependencies]
-vareffect = "0.1.2"
+vareffect = "0.3"
 ```
 
 ```bash

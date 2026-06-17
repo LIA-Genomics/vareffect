@@ -44,18 +44,17 @@ vareffect annotate \
   --input sample.vcf.gz \
   --output annotated.vcf.gz \
   --fasta data/vareffect/GRCh38.bin \
-  --transcripts data/vareffect/transcript_models.bin \
-  --threads 8
+  --transcripts data/vareffect/transcript_models.bin
 ```
 
-Output is a standard VCF with a `CSQ` INFO field whose pipe-delimited layout matches VEP `--vcf` output. Downstream tools that parse VEP CSQ fields (SnpSift, bcftools, GEMINI) work unchanged.
+Annotation runs on all logical cores by default (`--threads N` to limit). Output is a VCF with a `CSQ` INFO field whose pipe-delimited layout matches VEP `--vcf` output; downstream tools that parse VEP CSQ fields (SnpSift, bcftools, GEMINI) work unchanged. `.vcf.gz` output is parallel-compressed BGZF, directly indexable with `tabix -p vcf`.
 
 ### 3. Use as a library
 
 ```toml
 # Cargo.toml
 [dependencies]
-vareffect = "0.1"
+vareffect = "0.3"
 ```
 
 ```rust
@@ -159,7 +158,7 @@ Single-threaded throughput on a modern x86_64 laptop (excludes startup cost):
 | bcftools csq | C | ~10,000 -- 50,000 |
 | **vareffect** | **Rust** | **~50,000 -- 200,000** |
 
-The gap is almost entirely I/O: VEP reads BGZF-compressed FASTA through block decompression per base; vareffect memory-maps a flat binary and reads bytes directly. The CLI annotator achieves ~270k variants/sec with near-linear multi-thread scaling.
+The gap is almost entirely I/O: VEP reads BGZF-compressed FASTA through block decompression per base; vareffect memory-maps a flat binary and reads bytes directly. The CLI annotator is multi-threaded by default (all logical cores) with a read/annotate/write pipeline and parallel BGZF output, reaching millions of variants/sec on a multi-core host.
 
 ## VEP divergences
 
