@@ -6,12 +6,13 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::num::NonZero;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use flate2::Compression;
 use flate2::read::MultiGzDecoder;
-use flate2::write::GzEncoder;
+use noodles_bgzf::io::multithreaded_writer::{Builder as BgzfBuilder, MultithreadedWriter};
+use noodles_bgzf::io::writer::CompressionLevel;
 
 /// Parsed VCF data line with zero-copy borrows from the raw line.
 ///
@@ -137,8 +138,10 @@ pub fn write_annotated_line(record: &VcfRecord<'_>, csq: &str) -> String {
 
 /// Open a VCF file for reading, auto-detecting gzip by extension.
 ///
-/// Returns a boxed `BufRead` that transparently decompresses `.gz` files.
-pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+/// Returns a boxed `BufRead` that transparently decompresses `.gz` files
+/// (`MultiGzDecoder` handles BGZF and plain multi-member gzip). The reader is
+/// `Send` so it can be moved onto the pipeline's dedicated reader thread.
+pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
@@ -148,69 +151,72 @@ pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     }
 }
 
-/// Gzip-aware output sink for an annotated VCF.
+/// Output sink for an annotated VCF.
 ///
-/// Call [`VcfWriter::finish`] when done: it writes the gzip footer and surfaces
-/// I/O errors that `GzEncoder`'s `Drop` would otherwise swallow.
+/// `.gz` paths use a multithreaded **BGZF** writer (`noodles-bgzf`, pure-Rust
+/// `zlib-rs` backend) -- a valid gzip stream that is also tabix/`bcftools`-
+/// indexable. Call [`VcfWriter::finish`] when done: for BGZF it appends the
+/// required EOF block and surfaces I/O errors `Drop` would otherwise discard.
 pub enum VcfWriter {
     /// Uncompressed output.
     Plain(BufWriter<File>),
-    /// gzip-compressed output (standard gzip, not BGZF).
-    Gzip(BufWriter<GzEncoder<File>>),
+    /// Multithreaded BGZF (block-gzip) output.
+    Bgzf(MultithreadedWriter<File>),
 }
 
 impl Write for VcfWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             VcfWriter::Plain(writer) => writer.write(buf),
-            VcfWriter::Gzip(writer) => writer.write(buf),
+            VcfWriter::Bgzf(writer) => writer.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             VcfWriter::Plain(writer) => writer.flush(),
-            VcfWriter::Gzip(writer) => writer.flush(),
+            VcfWriter::Bgzf(writer) => writer.flush(),
         }
     }
 }
 
 impl VcfWriter {
-    /// Flush buffers and, for gzip, write the footer.
+    /// Flush buffers and finalize the stream.
+    ///
+    /// For BGZF this appends the EOF block (required by tabix/htslib to detect
+    /// truncation), surfacing any I/O error instead of discarding it on `Drop`.
     ///
     /// # Errors
     ///
-    /// Returns an error if flushing or gzip finalization fails (e.g. the device
-    /// is full) -- errors `Drop` would otherwise discard.
+    /// Returns an error if flushing or BGZF finalization fails (e.g. the device
+    /// is full).
     pub fn finish(self) -> Result<()> {
         match self {
             VcfWriter::Plain(mut writer) => {
                 writer.flush().context("flushing output")?;
-                Ok(())
             }
-            VcfWriter::Gzip(writer) => {
-                let encoder = writer
-                    .into_inner()
-                    .map_err(std::io::IntoInnerError::into_error)
-                    .context("flushing buffered output before gzip finalization")?;
-                encoder.finish().context("writing gzip footer")?;
-                Ok(())
+            VcfWriter::Bgzf(mut writer) => {
+                writer.finish().context("finalizing BGZF output")?;
             }
         }
+        Ok(())
     }
 }
 
 /// Open a VCF file for writing, auto-detecting gzip by extension.
 ///
-/// `.gz` output uses `flate2` fast compression (standard gzip, not BGZF).
-pub fn open_writer(path: &Path) -> Result<VcfWriter> {
+/// `.gz` paths produce multithreaded BGZF using `bgzf_worker_count` compression
+/// threads (clamped to at least 1); other paths are written uncompressed.
+pub fn open_writer(path: &Path, bgzf_worker_count: usize) -> Result<VcfWriter> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
-        Ok(VcfWriter::Gzip(BufWriter::new(GzEncoder::new(
-            file,
-            Compression::fast(),
-        ))))
+        let workers = NonZero::new(bgzf_worker_count).unwrap_or(NonZero::<usize>::MIN);
+        let writer = BgzfBuilder::default()
+            .set_compression_level(CompressionLevel::FAST)
+            .set_worker_count(workers)
+            .build_from_writer(file);
+        Ok(VcfWriter::Bgzf(writer))
     } else {
         Ok(VcfWriter::Plain(BufWriter::new(file)))
     }
@@ -222,6 +228,9 @@ pub fn open_writer(path: &Path) -> Result<VcfWriter> {
 
 #[cfg(test)]
 mod tests {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
     use super::*;
 
     const SIMPLE_LINE: &str = "chr17\t7674221\t.\tG\tA\t.\tPASS\t.\tGT\t0/1";
@@ -292,19 +301,19 @@ mod tests {
     }
 
     #[test]
-    fn vcf_writer_gzip_finish_round_trips() {
+    fn vcf_writer_bgzf_finish_round_trips() {
         let tmp = tempfile::Builder::new()
             .suffix(".vcf.gz")
             .tempfile()
             .expect("creating temp .vcf.gz");
 
-        let mut writer = open_writer(tmp.path()).expect("opening gzip writer");
+        let mut writer = open_writer(tmp.path(), 2).expect("opening BGZF writer");
         writeln!(writer, "##fileformat=VCFv4.2").expect("write header");
         writeln!(writer, "chr1\t100\t.\tA\tG\t.\t.\tCSQ=x").expect("write record");
-        writer.finish().expect("finalizing gzip writer");
+        writer.finish().expect("finalizing BGZF writer");
 
-        // Reopen: succeeds only if finish() wrote a valid gzip footer.
-        let reader = open_reader(tmp.path()).expect("reopening gzip output");
+        // Reopen: succeeds only if finish() wrote a valid BGZF stream + EOF.
+        let reader = open_reader(tmp.path()).expect("reopening BGZF output");
         let lines: Vec<String> = reader
             .lines()
             .collect::<std::io::Result<_>>()

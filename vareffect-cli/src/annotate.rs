@@ -23,7 +23,9 @@ use std::io::{BufRead, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -39,6 +41,12 @@ use crate::vcf;
 /// 10 000 lines * ~200 bytes/line = ~2 MB per chunk. Large enough to
 /// amortize rayon overhead, small enough to bound memory for WGS VCFs.
 const CHUNK_SIZE: usize = 10_000;
+
+/// Number of chunks the reader thread may buffer ahead of annotation.
+///
+/// Bounds memory to ~`PIPELINE_DEPTH * CHUNK_SIZE` lines while letting input
+/// reading overlap annotation and output compression.
+const PIPELINE_DEPTH: usize = 3;
 
 /// Configuration for the annotate pipeline.
 pub struct AnnotateConfig<'a> {
@@ -82,8 +90,9 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     let start = Instant::now();
 
     // -- 1. Configure rayon thread pool -----------------------------------
+    let threads = resolve_threads(config.threads);
     rayon::ThreadPoolBuilder::new()
-        .num_threads(resolve_threads(config.threads))
+        .num_threads(threads)
         .build_global()
         .context("configuring rayon thread pool")?;
 
@@ -103,7 +112,9 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
 
     // -- 3. Open I/O ------------------------------------------------------
     let reader = vcf::open_reader(config.input)?;
-    let mut writer = vcf::open_writer(config.output)?;
+    // BGZF output compresses on its own worker pool; give it the annotation
+    // budget (the stages overlap in the pipeline -- tune via --threads).
+    let mut writer = vcf::open_writer(config.output, threads)?;
 
     // -- 4. Progress bar --------------------------------------------------
     let pb = ProgressBar::new_spinner();
@@ -119,7 +130,11 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     let mut lines = reader.lines().map(|r| r.map(strip_trailing_cr));
     process_headers(&mut lines, &mut writer)?;
 
-    // -- 6. Chunked parallel annotation -----------------------------------
+    // -- 6. Pipelined parallel annotation ---------------------------------
+    // A reader thread prefetches chunks while the main thread annotates each
+    // chunk in parallel (rayon) and writes it; BGZF compression runs on the
+    // writer's own worker pool. The stages overlap. Output order is preserved
+    // (FIFO channel + a single in-order annotator).
     let annotate_start = Instant::now();
     let counters = Counters {
         annotated: AtomicU64::new(0),
@@ -130,26 +145,38 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
         chrom_not_found: Mutex::new(HashSet::new()),
     };
 
-    let mut total = 0u64;
-    let mut chunk = Vec::with_capacity(CHUNK_SIZE);
-
-    for line_result in lines {
-        let line = line_result.context("reading VCF data line")?;
-        chunk.push(line);
-
-        if chunk.len() == CHUNK_SIZE {
-            process_chunk(&chunk, &ve, &counters, &mut writer)?;
-            total += chunk.len() as u64;
-            pb.set_message(format!("{total} variants processed"));
-            chunk.clear();
+    let (tx, rx) = sync_channel::<Vec<String>>(PIPELINE_DEPTH);
+    let reader_handle = thread::spawn(move || -> Result<()> {
+        let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+        for line_result in lines {
+            chunk.push(line_result.context("reading VCF data line")?);
+            if chunk.len() == CHUNK_SIZE {
+                let full = std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK_SIZE));
+                if tx.send(full).is_err() {
+                    return Ok(()); // receiver hung up (main errored); stop quietly
+                }
+            }
         }
+        if !chunk.is_empty() {
+            let _ = tx.send(chunk);
+        }
+        Ok(())
+    });
+
+    let mut total = 0u64;
+    for chunk in rx {
+        let annotated = annotate_chunk(&chunk, &ve, &counters);
+        for line in &annotated {
+            writeln!(writer, "{line}").context("writing annotated line")?;
+        }
+        total += chunk.len() as u64;
+        pb.set_message(format!("{total} variants processed"));
     }
 
-    // Flush remaining lines.
-    if !chunk.is_empty() {
-        process_chunk(&chunk, &ve, &counters, &mut writer)?;
-        total += chunk.len() as u64;
-    }
+    // Reader finished (channel closed): surface any read error before finalize.
+    reader_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("reader thread panicked"))??;
 
     writer.finish().context("finalizing output")?;
 
@@ -236,23 +263,13 @@ fn resolve_threads(requested: usize) -> usize {
     }
 }
 
-/// Annotate a chunk of VCF lines in parallel and write results in order.
-fn process_chunk(
-    chunk: &[String],
-    ve: &Arc<VarEffect>,
-    counters: &Counters,
-    writer: &mut dyn Write,
-) -> Result<()> {
-    let annotated: Vec<String> = chunk
+/// Annotate a chunk of VCF lines in parallel, returning the rewritten lines in
+/// input order (rayon's `collect` preserves order).
+fn annotate_chunk(chunk: &[String], ve: &Arc<VarEffect>, counters: &Counters) -> Vec<String> {
+    chunk
         .par_iter()
         .map(|line| annotate_line(line, ve, counters))
-        .collect();
-
-    for line in &annotated {
-        writeln!(writer, "{line}").context("writing annotated line")?;
-    }
-
-    Ok(())
+        .collect()
 }
 
 /// Annotate a single VCF data line, returning the (possibly modified) line.
