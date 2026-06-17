@@ -6,12 +6,13 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::num::NonZero;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use flate2::read::MultiGzDecoder;
+use noodles_bgzf::io::multithreaded_writer::{Builder as BgzfBuilder, MultithreadedWriter};
+use noodles_bgzf::io::writer::CompressionLevel;
 
 /// Parsed VCF data line with zero-copy borrows from the raw line.
 ///
@@ -137,30 +138,87 @@ pub fn write_annotated_line(record: &VcfRecord<'_>, csq: &str) -> String {
 
 /// Open a VCF file for reading, auto-detecting gzip by extension.
 ///
-/// Returns a boxed `BufRead` that transparently decompresses `.gz` files.
-pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead>> {
+/// Returns a boxed `BufRead` that transparently decompresses `.gz` files
+/// (`MultiGzDecoder` handles BGZF and plain multi-member gzip). The reader is
+/// `Send` so it can be moved onto the pipeline's dedicated reader thread.
+pub fn open_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
-        Ok(Box::new(BufReader::new(GzDecoder::new(file))))
+        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
     } else {
         Ok(Box::new(BufReader::new(file)))
     }
 }
 
+/// Output sink for an annotated VCF.
+///
+/// `.gz` paths use a multithreaded **BGZF** writer (`noodles-bgzf`, pure-Rust
+/// `zlib-rs` backend) -- a valid gzip stream that is also tabix/`bcftools`-
+/// indexable. Call [`VcfWriter::finish`] when done: for BGZF it appends the
+/// required EOF block and surfaces I/O errors `Drop` would otherwise discard.
+pub enum VcfWriter {
+    /// Uncompressed output.
+    Plain(BufWriter<File>),
+    /// Multithreaded BGZF (block-gzip) output.
+    Bgzf(MultithreadedWriter<File>),
+}
+
+impl Write for VcfWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            VcfWriter::Plain(writer) => writer.write(buf),
+            VcfWriter::Bgzf(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            VcfWriter::Plain(writer) => writer.flush(),
+            VcfWriter::Bgzf(writer) => writer.flush(),
+        }
+    }
+}
+
+impl VcfWriter {
+    /// Flush buffers and finalize the stream.
+    ///
+    /// For BGZF this appends the EOF block (required by tabix/htslib to detect
+    /// truncation), surfacing any I/O error instead of discarding it on `Drop`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if flushing or BGZF finalization fails (e.g. the device
+    /// is full).
+    pub fn finish(self) -> Result<()> {
+        match self {
+            VcfWriter::Plain(mut writer) => {
+                writer.flush().context("flushing output")?;
+            }
+            VcfWriter::Bgzf(mut writer) => {
+                writer.finish().context("finalizing BGZF output")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Open a VCF file for writing, auto-detecting gzip by extension.
 ///
-/// `.gz` output uses `flate2` fast compression (standard gzip, not BGZF).
-pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
+/// `.gz` paths produce multithreaded BGZF using `bgzf_worker_count` compression
+/// threads (clamped to at least 1); other paths are written uncompressed.
+pub fn open_writer(path: &Path, bgzf_worker_count: usize) -> Result<VcfWriter> {
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
 
     if path.extension().is_some_and(|e| e == "gz") {
-        Ok(Box::new(BufWriter::new(GzEncoder::new(
-            file,
-            Compression::fast(),
-        ))))
+        let workers = NonZero::new(bgzf_worker_count).unwrap_or(NonZero::<usize>::MIN);
+        let writer = BgzfBuilder::default()
+            .set_compression_level(CompressionLevel::FAST)
+            .set_worker_count(workers)
+            .build_from_writer(file);
+        Ok(VcfWriter::Bgzf(writer))
     } else {
-        Ok(Box::new(BufWriter::new(file)))
+        Ok(VcfWriter::Plain(BufWriter::new(file)))
     }
 }
 
@@ -170,6 +228,9 @@ pub fn open_writer(path: &Path) -> Result<Box<dyn Write>> {
 
 #[cfg(test)]
 mod tests {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
     use super::*;
 
     const SIMPLE_LINE: &str = "chr17\t7674221\t.\tG\tA\t.\tPASS\t.\tGT\t0/1";
@@ -228,5 +289,106 @@ mod tests {
         let out = write_annotated_line(&r, "CSQ_VAL");
         // FORMAT and sample columns must be preserved.
         assert!(out.ends_with("\tGT\t0/1"));
+    }
+
+    /// Compress `content` into a single, self-contained gzip member.
+    fn gzip_member(content: &str) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder
+            .write_all(content.as_bytes())
+            .expect("writing gzip member");
+        encoder.finish().expect("finishing gzip member")
+    }
+
+    #[test]
+    fn vcf_writer_bgzf_finish_round_trips() {
+        let tmp = tempfile::Builder::new()
+            .suffix(".vcf.gz")
+            .tempfile()
+            .expect("creating temp .vcf.gz");
+
+        let mut writer = open_writer(tmp.path(), 2).expect("opening BGZF writer");
+        writeln!(writer, "##fileformat=VCFv4.2").expect("write header");
+        writeln!(writer, "chr1\t100\t.\tA\tG\t.\t.\tCSQ=x").expect("write record");
+        writer.finish().expect("finalizing BGZF writer");
+
+        // Reopen: succeeds only if finish() wrote a valid BGZF stream + EOF.
+        let reader = open_reader(tmp.path()).expect("reopening BGZF output");
+        let lines: Vec<String> = reader
+            .lines()
+            .collect::<std::io::Result<_>>()
+            .expect("reading lines");
+        assert_eq!(
+            lines,
+            vec!["##fileformat=VCFv4.2", "chr1\t100\t.\tA\tG\t.\t.\tCSQ=x"]
+        );
+    }
+
+    #[test]
+    fn write_annotated_sites_only_dot_info_replaces_cleanly() {
+        // Sites-only line, INFO ".": CSQ replaces it cleanly, no stray '\r'.
+        let line = "chr1\t100\t.\tA\tG\t.\tPASS\t.";
+        let r = parse_vcf_line(line).unwrap();
+        let out = write_annotated_line(&r, "csqval");
+        assert!(out.ends_with("\tCSQ=csqval"));
+        assert!(!out.contains(";CSQ"));
+        assert!(!out.contains('\r'));
+    }
+
+    #[test]
+    fn trailing_cr_corrupts_sites_only_info_if_not_stripped() {
+        // Why annotate::run strips '\r' first: an un-stripped CR breaks INFO
+        // "." detection and mis-splices CSQ after the carriage return.
+        let with_cr = "chr1\t100\t.\tA\tG\t.\tPASS\t.\r";
+        let r = parse_vcf_line(with_cr).unwrap();
+        let out = write_annotated_line(&r, "csqval");
+        assert!(
+            out.contains(".\r;CSQ=csqval"),
+            "unstripped CR corrupts the INFO field"
+        );
+    }
+
+    #[test]
+    fn open_reader_reads_all_members_of_multi_member_gzip() {
+        // BGZF (the .vcf.gz format from bgzip/bcftools/tabix) is a stream of
+        // concatenated gzip members. Simulate it with two independently
+        // finished members so a single-member decoder would stop after the
+        // first. The #CHROM line and variant data live in the SECOND member,
+        // mirroring a real GRCh38 VCF whose contig-heavy header overflows the
+        // first BGZF block.
+        let member1 = "##fileformat=VCFv4.2\n##contig=<ID=chr16,length=90338345>\n";
+        let member2 =
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr16\t47435\t.\tC\tA\t.\t.\t.\n";
+
+        let mut bytes = gzip_member(member1);
+        bytes.extend_from_slice(&gzip_member(member2));
+
+        let tmp = tempfile::Builder::new()
+            .suffix(".vcf.gz")
+            .tempfile()
+            .expect("creating temp .vcf.gz");
+        std::fs::write(tmp.path(), &bytes).expect("writing multi-member gzip");
+
+        let reader = open_reader(tmp.path()).expect("opening multi-member gzip");
+        let lines: Vec<String> = reader
+            .lines()
+            .collect::<std::io::Result<_>>()
+            .expect("reading lines");
+
+        // All four lines from BOTH members must be present. A single-member
+        // GzDecoder would return only the two lines from member 1.
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected lines from both gzip members, got {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("#CHROM")),
+            "second-member #CHROM line missing"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("chr16\t47435")),
+            "second-member data line missing"
+        );
     }
 }

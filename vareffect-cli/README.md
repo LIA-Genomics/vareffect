@@ -14,7 +14,8 @@ consequence prediction engine. Installs as a single binary named
 3. **`setup`** -- download GRCh38 + MANE and build the runtime data
    files that `vareffect` needs
 4. **`annotate`** -- annotate a VCF with VEP-compatible CSQ fields
-   (~270k variants/sec single-threaded, near-linear multi-thread scaling)
+   (multi-threaded by default; `.vcf.gz` output is parallel, tabix-indexable
+   BGZF)
 
 ## Install
 
@@ -114,9 +115,10 @@ vareffect annotate \
   --input sample.vcf.gz \
   --output annotated.vcf.gz \
   --fasta data/vareffect/GRCh38.bin \
-  --transcripts data/vareffect/transcript_models.bin \
-  --threads 8
+  --transcripts data/vareffect/transcript_models.bin
 ```
+
+Annotation uses all logical cores by default; add `--threads N` to limit it.
 
 Reads a VCF (`.vcf` or `.vcf.gz`), runs consequence prediction on every
 variant, and writes an annotated VCF with a `CSQ` INFO field whose
@@ -150,7 +152,7 @@ vareffect annotate \
 | `--output` | required | Output VCF (`.vcf` or `.vcf.gz`) |
 | `--fasta` | required | `GRCh38.bin` flat-binary genome |
 | `--transcripts` | required | `transcript_models.bin` |
-| `--threads` | `1` | Rayon worker threads |
+| `--threads` | `0` | Worker threads (`0` = all logical cores) |
 | `--patch-aliases` | none | `patch_chrom_aliases.csv` for patch contigs |
 
 ### Behaviour
@@ -166,8 +168,12 @@ vareffect annotate \
   drops a line.
 - `RUST_LOG=debug` enables per-variant reason logging for unannotated
   variants.
-- Output `.vcf.gz` is standard gzip (not BGZF). Use `tabix` post-hoc
-  if indexing is needed.
+- Annotation is multi-threaded by default (`--threads 0` = all logical
+  cores); pass a number to limit it.
+- Output `.vcf.gz` is **BGZF** (block gzip), compressed in parallel and
+  written as a valid gzip stream with the BGZF EOF marker. It is directly
+  indexable with `tabix -p vcf` and queryable with `bcftools`. Plain `.vcf`
+  output is also supported (choose by extension).
 
 ## Configuration
 

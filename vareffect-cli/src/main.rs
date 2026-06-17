@@ -100,8 +100,8 @@ enum Command {
         /// Path to `transcript_models.bin`.
         #[arg(long)]
         transcripts: PathBuf,
-        /// Number of threads for parallel annotation.
-        #[arg(long, default_value_t = 1)]
+        /// Number of threads for parallel annotation (0 = all logical cores).
+        #[arg(long, default_value_t = 0)]
         threads: usize,
         /// Path to `patch_chrom_aliases.csv` (optional).
         #[arg(long)]
