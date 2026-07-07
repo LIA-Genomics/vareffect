@@ -81,6 +81,13 @@ pub fn format_hgvs_g(
         None => return Ok(None),
     };
 
+    // A REF that overhangs the contig end is a degenerate input, not an I/O
+    // fault: fail closed to `Ok(None)` rather than letting `verify_ref` raise
+    // `CoordinateOutOfRange`, which the doc reserves for genuine read faults.
+    if pos.saturating_add(ref_u.len() as u64) > chrom_len {
+        return Ok(None);
+    }
+
     // Fail closed if the stated REF disagrees with the reference genome — a
     // coordinate or reference-build mismatch must yield an absent notation,
     // never a wrong one. Verifying the full untrimmed REF here also covers the
@@ -387,6 +394,13 @@ mod tests {
         // Right-anchored insertion of a non-matching base before 0-based 0
         // (ref A, alt GA) cannot shift and has no 5' flank → no canonical g.
         assert_eq!(fmt("chr1", 0, b"A", b"GA"), None);
+    }
+
+    #[test]
+    fn ref_overhanging_contig_end_yields_none() {
+        // REF "AA" at 0-based 9 runs to position 11 on a 10 bp contig — a
+        // degenerate out-of-range input must fail closed to None, not error.
+        assert_eq!(fmt("chr1", 9, b"AA", b"A"), None);
     }
 
     #[test]
