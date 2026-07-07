@@ -124,6 +124,7 @@ pub mod consequence;
 pub mod error;
 pub mod fasta;
 pub mod hgvs_c;
+pub mod hgvs_g;
 pub mod hgvs_p;
 pub mod hgvs_reverse;
 pub mod locate;

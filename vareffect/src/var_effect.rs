@@ -376,6 +376,28 @@ impl VarEffect {
         crate::hgvs_reverse::resolve_hgvs_c_with_meta(hgvs, &self.transcripts, &self.fasta)
     }
 
+    /// Build canonical genomic-HGVS (`g.`) notation for a plus-strand variant.
+    ///
+    /// Convenience `&self` wrapper over [`crate::hgvs_g::format_hgvs_g`] that
+    /// borrows the bundled reference genome. `pos` is 0-based (the
+    /// [`VarEffect::annotate`] convention). Returns `Ok(None)` when the variant
+    /// has no canonical `g.` string (unknown contig, symbolic allele,
+    /// REF/genome mismatch); the returned notation is 3'-shifted per the HGVS
+    /// rule so it matches VEP `--hgvsg` / ClinVar.
+    ///
+    /// # Errors
+    ///
+    /// [`VarEffectError`] on a genuine reference-genome read fault.
+    pub fn format_hgvs_g(
+        &self,
+        chrom: &str,
+        pos: u64,
+        ref_allele: &[u8],
+        alt_allele: &[u8],
+    ) -> Result<Option<String>, VarEffectError> {
+        crate::hgvs_g::format_hgvs_g(chrom, pos, ref_allele, alt_allele, &self.fasta)
+    }
+
     // -----------------------------------------------------------------
     // FastaReader forwarders
     // -----------------------------------------------------------------
