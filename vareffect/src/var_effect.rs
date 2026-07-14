@@ -27,10 +27,10 @@ use std::path::Path;
 use crate::consequence::{ConsequenceResult, SvConsequenceResult, SvKind};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
-use crate::hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
+use crate::hgvs_reverse::ResolvedHgvsC;
 use crate::locate::LocateIndex;
 use crate::transcript::TranscriptStore;
-use crate::types::TranscriptModel;
+use crate::types::{GenomicVariant, TranscriptModel};
 
 /// Stateful entrypoint to vareffect: bundles a [`TranscriptStore`] and a
 /// [`FastaReader`] so callers don't have to thread both handles through
@@ -376,6 +376,37 @@ impl VarEffect {
         crate::hgvs_reverse::resolve_hgvs_c_with_meta(hgvs, &self.transcripts, &self.fasta)
     }
 
+    /// Resolve HGVS g. (genomic) notation to a left-aligned VCF-canonical
+    /// variant.
+    ///
+    /// Parses a full genomic HGVS string (`"NC_000017.11:g.7674220C>G"`; `":m."`
+    /// mitochondrial notation is also accepted) and returns a [`GenomicVariant`]
+    /// with 0-based position, UCSC-style chromosome, and plus-strand alleles,
+    /// ready for [`VarEffect::annotate`]:
+    ///
+    /// ```no_run
+    /// # use vareffect::VarEffect;
+    /// # let ve: VarEffect = unimplemented!();
+    /// let gv = ve.resolve_hgvs_g("NC_000017.11:g.7674220C>G")?;
+    /// let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
+    /// # Ok::<(), vareffect::VarEffectError>(())
+    /// ```
+    ///
+    /// Supports substitution, deletion, duplication, insertion, delins, and
+    /// inversion. The output is **left-aligned** to the 5'-most parsimonious
+    /// form (bcftools / biocommons `hgvs_to_vcf` concordant) — note this differs
+    /// from [`VarEffect::resolve_hgvs_c`], which emits the raw, un-normalized
+    /// form. Identity (`=`), imprecise/templated notation, and non-chromosomal
+    /// references (`NG_`/`LRG_`/`NW_`/`NT_`) are rejected.
+    ///
+    /// # Errors
+    ///
+    /// `HgvsParseError`, `ChromNotFound`, `HgvsRefMismatch`,
+    /// `CoordinateOutOfRange`.
+    pub fn resolve_hgvs_g(&self, hgvs: &str) -> Result<GenomicVariant, VarEffectError> {
+        crate::hgvs_g_reverse::resolve_hgvs_g(hgvs, &self.fasta)
+    }
+
     /// Build canonical genomic-HGVS (`g.`) notation for a plus-strand variant.
     ///
     /// Convenience `&self` wrapper over [`crate::hgvs_g::format_hgvs_g`] that
@@ -617,77 +648,7 @@ impl VarEffect {
         ref_allele: &str,
         alt_allele: &str,
     ) -> Result<Option<(u64, String, String)>, VarEffectError> {
-        let orig_pos = pos_1based;
-        let orig_ref = ref_allele;
-        let orig_alt = alt_allele;
-
-        let mut pos = pos_1based;
-        let mut r: Vec<u8> = ref_allele.as_bytes().to_vec();
-        let mut a: Vec<u8> = alt_allele.as_bytes().to_vec();
-
-        // Step 1: Shift loop (Tan et al. 2015).
-        //
-        // Compare rightmost bases. While they match, drop them and shift left.
-        // When trimming empties an allele, prepend the reference base immediately
-        // 5' to BOTH alleles and step the position back by one. Extending both
-        // alleles preserves the indel (the ref/alt length difference); extending
-        // only the emptied allele would collapse an insertion/deletion into a
-        // substitution.
-        //
-        // Coordinate convention: `fetch_base` takes a 0-based position. After
-        // `pos -= 1`, `pos` is the new 1-based position, so the 0-based index for
-        // the base AT `pos` is `pos - 1`.
-        loop {
-            if pos <= 1 || r.is_empty() || a.is_empty() {
-                break;
-            }
-            let trimmed = if r.last() == a.last() {
-                r.pop();
-                a.pop();
-                true
-            } else {
-                false
-            };
-            if r.is_empty() || a.is_empty() {
-                pos -= 1;
-                let prepend = self.fasta.fetch_base(chrom, pos - 1)?;
-                r.insert(0, prepend);
-                a.insert(0, prepend);
-            } else if !trimmed {
-                break;
-            }
-        }
-
-        // Step 2: Left-trim for parsimony.
-        //
-        // Skips shared leading bases via an index (no O(n) `remove(0)`), keeping
-        // at least one base per allele (the VCF anchor requirement).
-        let mut prefix_skip = 0usize;
-        while r.len() - prefix_skip > 1
-            && a.len() - prefix_skip > 1
-            && r[prefix_skip] == a[prefix_skip]
-        {
-            prefix_skip += 1;
-            pos += 1;
-        }
-
-        // Step 3: Return None if nothing changed, Some if normalized.
-        //
-        // Alleles contain only ASCII bytes (ACGTN from the FASTA reader or the
-        // original input validated upstream). `from_utf8` cannot fail on valid
-        // ASCII but we propagate rather than panic.
-        let new_ref = std::str::from_utf8(&r[prefix_skip..])
-            .map_err(|_| VarEffectError::InvalidAllele)?
-            .to_string();
-        let new_alt = std::str::from_utf8(&a[prefix_skip..])
-            .map_err(|_| VarEffectError::InvalidAllele)?
-            .to_string();
-
-        if pos == orig_pos && new_ref == orig_ref && new_alt == orig_alt {
-            Ok(None)
-        } else {
-            Ok(Some((pos, new_ref, new_alt)))
-        }
+        crate::left_align::left_align_indel(&self.fasta, chrom, pos_1based, ref_allele, alt_allele)
     }
 
     // -----------------------------------------------------------------
@@ -726,79 +687,5 @@ impl VarEffect {
     /// reader-only methods that aren't forwarded above.
     pub fn fasta(&self) -> &FastaReader {
         &self.fasta
-    }
-}
-
-#[cfg(test)]
-mod left_align_unit_tests {
-    //! CI-runnable (no 3.1 GB FASTA) exact-output tests for `left_align_indel`,
-    //! covering the shapes whose ref/alt share a rightmost base — duplications
-    //! and homopolymer/tandem indels — which is where the per-allele-extend bug
-    //! collapsed indels into substitutions. Run against a tiny synthetic genome.
-
-    use super::*;
-    use crate::fasta::write_genome_binary;
-    use tempfile::TempDir;
-
-    /// Synthetic contig "1" (queried as "chr1"):
-    ///   1-based pos: 1 2 3 4 5 6 7 8 9 10
-    ///   base:        A A T G G G G T A A
-    /// The `GGGG` run (pos 4-7) anchored by `T` at pos 3 exercises left-shifting.
-    const CONTIG: &[u8] = b"AATGGGGTAA";
-
-    /// Build a `VarEffect` over a synthetic in-memory genome (temp `.bin` +
-    /// `.bin.idx`), with an empty transcript store — `left_align_indel` only
-    /// touches the FASTA.
-    fn ve_with_genome(contigs: &[(&str, &[u8])]) -> (TempDir, VarEffect) {
-        let tmp = TempDir::new().expect("tempdir");
-        let bin = tmp.path().join("g.bin");
-        let idx = tmp.path().join("g.bin.idx");
-        write_genome_binary(contigs, "test", &bin, &idx).expect("write synthetic genome");
-        let fasta = FastaReader::open(&bin).expect("open synthetic genome");
-        let ve = VarEffect::new(TranscriptStore::from_transcripts(Vec::new()), fasta);
-        (tmp, ve)
-    }
-
-    /// A right-shifted 1 bp duplication inside the `GGGG` run must left-align to
-    /// the `T` anchor at pos 3 and REMAIN an insertion (`T>TG`). Pre-fix the
-    /// buggy per-allele extension collapsed this to a substitution.
-    #[test]
-    fn duplication_left_aligns_preserving_insertion() {
-        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
-        let result = ve
-            .left_align_indel("chr1", 6, "G", "GG")
-            .expect("left_align_indel should not error");
-        assert_eq!(result, Some((3, "T".to_string(), "TG".to_string())));
-    }
-
-    /// The symmetric 1 bp tandem deletion must left-align to the same anchor and
-    /// REMAIN a deletion (`TG>T`).
-    #[test]
-    fn tandem_deletion_left_aligns_preserving_deletion() {
-        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
-        let result = ve
-            .left_align_indel("chr1", 6, "GG", "G")
-            .expect("left_align_indel should not error");
-        assert_eq!(result, Some((3, "TG".to_string(), "T".to_string())));
-    }
-
-    /// Feeding the already-left-aligned form back in is a no-op (idempotent).
-    #[test]
-    fn left_aligned_insertion_is_idempotent() {
-        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
-        let result = ve
-            .left_align_indel("chr1", 3, "T", "TG")
-            .expect("left_align_indel should not error");
-        assert_eq!(result, None);
-    }
-
-    /// An SNV (differing rightmost bases) never enters the shift loop → `None`.
-    #[test]
-    fn snv_passes_through() {
-        let (_tmp, ve) = ve_with_genome(&[("1", CONTIG)]);
-        let result = ve
-            .left_align_indel("chr1", 8, "T", "A")
-            .expect("left_align_indel should not error");
-        assert_eq!(result, None);
     }
 }

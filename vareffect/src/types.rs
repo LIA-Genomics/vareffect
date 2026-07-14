@@ -4,13 +4,33 @@
 //! The GFF3 parser in `vareffect-cli` converts NCBI's 1-based fully-closed
 //! coordinates on ingest, so consumers of this crate never see 1-based indices.
 //!
-//! Every type in this module round-trips through MessagePack via
+//! Most types in this module round-trip through MessagePack via
 //! [`serde::Serialize`]/[`serde::Deserialize`]. [`Biotype`] has a hand-written
 //! `Serialize`/`Deserialize` so the on-disk format stays a single flat string
 //! and unknown upstream labels (`vault_RNA`, future biotypes) survive as
-//! [`Biotype::Other`] without schema changes.
+//! [`Biotype::Other`] without schema changes. The exception is
+//! [`GenomicVariant`], a non-serialized in-memory value type (the resolver
+//! output shared by the HGVS `c.`/`g.` reverse mappers).
 
 use serde::{Deserialize, Serialize};
+
+/// A genomic variant in VCF-style coordinates.
+///
+/// The shared output type of the HGVS reverse resolvers
+/// ([`crate::VarEffect::resolve_hgvs_c`] and [`crate::VarEffect::resolve_hgvs_g`]).
+/// All coordinates are 0-based (matching the internal convention used
+/// throughout `vareffect`). Alleles are plus-strand, uppercase ASCII.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenomicVariant {
+    /// UCSC-style chromosome name (e.g., `"chr17"`).
+    pub chrom: String,
+    /// 0-based genomic position of the first REF base.
+    pub pos: u64,
+    /// Reference allele (plus-strand, uppercase ASCII).
+    pub ref_allele: Vec<u8>,
+    /// Alternate allele (plus-strand, uppercase ASCII).
+    pub alt_allele: Vec<u8>,
+}
 
 /// Transcript strand orientation relative to the reference genome.
 ///
