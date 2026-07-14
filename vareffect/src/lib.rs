@@ -125,8 +125,10 @@ pub mod error;
 pub mod fasta;
 pub mod hgvs_c;
 pub mod hgvs_g;
+mod hgvs_g_reverse;
 pub mod hgvs_p;
 pub mod hgvs_reverse;
+mod left_align;
 pub mod locate;
 mod normalize;
 pub mod transcript;
@@ -143,13 +145,15 @@ pub use consequence::{
 };
 pub use error::VarEffectError;
 pub use fasta::FastaReader;
-pub use hgvs_reverse::{GenomicVariant, ResolvedHgvsC};
+pub use hgvs_reverse::ResolvedHgvsC;
 pub use locate::{
     IndelLocation, IndelRegion, LocateIndex, SpliceOverlapDetail, SpliceSide, VariantLocation,
     locate_indel, locate_variant,
 };
 pub use transcript::TranscriptStore;
-pub use types::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
+pub use types::{
+    Biotype, CdsSegment, Exon, GenomicVariant, Strand, TranscriptModel, TranscriptTier,
+};
 pub use var_effect::VarEffect;
 
 // Compile-time proof that the runtime types are thread-safe to share across

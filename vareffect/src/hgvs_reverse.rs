@@ -34,21 +34,10 @@ use crate::types::{Biotype, Strand, TranscriptModel};
 // Public output type
 // ---------------------------------------------------------------------------
 
-/// A genomic variant in VCF-style coordinates.
-///
-/// All coordinates are 0-based (matching the internal convention used
-/// throughout `vareffect`). Alleles are plus-strand, uppercase ASCII.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GenomicVariant {
-    /// UCSC-style chromosome name (e.g., `"chr17"`).
-    pub chrom: String,
-    /// 0-based genomic position of the first REF base.
-    pub pos: u64,
-    /// Reference allele (plus-strand, uppercase ASCII).
-    pub ref_allele: Vec<u8>,
-    /// Alternate allele (plus-strand, uppercase ASCII).
-    pub alt_allele: Vec<u8>,
-}
+// `GenomicVariant` now lives in `crate::types` (it is the shared output type of
+// both the c. and g. reverse resolvers). Re-exported here so the historical
+// path `vareffect::hgvs_reverse::GenomicVariant` keeps resolving.
+pub use crate::types::GenomicVariant;
 
 /// HGVS c. resolution result with transcript-version provenance.
 ///
@@ -355,7 +344,10 @@ fn parse_single_position(s: &str, input: &str) -> Result<HgvsCPosition, VarEffec
 }
 
 /// Parse a nucleotide sequence string (e.g. `"ACG"`) into uppercase bytes.
-fn parse_seq(s: &str, input: &str) -> Result<Vec<u8>, VarEffectError> {
+///
+/// `pub(crate)` so the genomic reverse resolver ([`crate::hgvs_g_reverse`])
+/// can reuse the same A/C/G/T validation for stated del/dup/ins/delins bases.
+pub(crate) fn parse_seq(s: &str, input: &str) -> Result<Vec<u8>, VarEffectError> {
     if s.is_empty() {
         return Err(VarEffectError::HgvsParseError(format!(
             "empty nucleotide sequence: \"{input}\""
@@ -371,7 +363,10 @@ fn parse_seq(s: &str, input: &str) -> Result<Vec<u8>, VarEffectError> {
 }
 
 /// Validate that a byte is a standard nucleotide (A, C, G, T).
-fn validate_base(b: u8, input: &str) -> Result<(), VarEffectError> {
+///
+/// `pub(crate)` so [`crate::hgvs_g_reverse`] shares the exact A/C/G/T-only rule
+/// (which also rejects a stated `N`).
+pub(crate) fn validate_base(b: u8, input: &str) -> Result<(), VarEffectError> {
     match b.to_ascii_uppercase() {
         b'A' | b'C' | b'G' | b'T' => Ok(()),
         _ => Err(VarEffectError::HgvsParseError(format!(

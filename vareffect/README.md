@@ -152,6 +152,12 @@ binary and reads bytes directly.
 - **Reverse c.** — parse an HGVS c. string back to plus-strand 0-based
   genomic coordinates and alleles, round-tripped through the transcript
   store and verified against the genome.
+- **Reverse g.** — parse a genomic HGVS string (`NC_000017.11:g.7674220C>G`;
+  `m.` mitochondrial notation accepted) back to plus-strand 0-based
+  coordinates for substitution, deletion, duplication, insertion, delins, and
+  inversion. Output is **left-aligned to the VCF-canonical form** (bcftools /
+  biocommons `hgvs_to_vcf` concordant); identity (`=`), imprecise/templated
+  notation, and non-chromosomal references (`NG_`/`LRG_`) fail closed.
 
 ### Variant localization
 - Classify variants as CDS exon, intron, 5' / 3' UTR, splice donor /
@@ -299,6 +305,28 @@ let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
 `resolve_hgvs_c` supports substitutions, deletions, insertions,
 duplications, and delins across CDS, 5' UTR, 3' UTR, and intronic
 positions.
+
+The genomic counterpart `resolve_hgvs_g` takes a `g.` (or `m.`) string
+directly — no transcript needed — and returns the **left-aligned,
+VCF-canonical** variant:
+
+```rust,no_run
+# use vareffect::VarEffect;
+# fn example(ve: &VarEffect) -> Result<(), vareffect::VarEffectError> {
+let gv = ve.resolve_hgvs_g("NC_000017.11:g.43057065dup")?;
+// Left-aligned: chr17, 0-based 43057061, T > TG (bcftools-concordant).
+let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
+# let _ = results;
+# Ok(())
+# }
+```
+
+It covers substitution, deletion, duplication, insertion, delins, and
+inversion. Unlike `resolve_hgvs_c` (which emits the raw form), `resolve_hgvs_g`
+left-aligns indels/dups to the 5'-most parsimonious locus, so the same
+repeat-region variant can differ between the two paths — normalize both before
+hashing an identity. Identity (`=`), imprecise/templated notation, and
+non-chromosomal references are rejected rather than mis-mapped.
 
 ## Threading model
 
