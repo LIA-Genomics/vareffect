@@ -3,13 +3,13 @@ members = ["vareffect", "vareffect-cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 rust-version = "1.94.1"
 edition = "2024"
 
 [workspace.dependencies]
 # Internal crate
-vareffect = { path = "vareffect", version = "0.3.1" }
+vareffect = { path = "vareffect", version = "0.4.0" }
 
 # External crates: pinned versions shared across workspace members
 anyhow             = "1"
