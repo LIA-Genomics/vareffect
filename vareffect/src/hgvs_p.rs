@@ -644,7 +644,7 @@ pub(crate) fn format_hgvs_p_inframe_ins(
     }
 
     // Pure insertion. Check if stop gained (alone).
-    if consequences.contains(&Consequence::StopGained) && inserted_aas == [b'*'] {
+    if consequences.contains(&Consequence::StopGained) && inserted_aas == *b"*" {
         // The insertion introduced a premature stop at the ref codon position.
         let pos = protein_start + prefix_len as u32;
         if prefix_len > 0 {
