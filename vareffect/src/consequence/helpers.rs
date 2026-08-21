@@ -111,6 +111,7 @@ pub(super) fn build_base_result(
         hgvs_c: None,
         hgvs_p: None,
         predicts_nmd: false,
+        ptc: super::PtcStatus::NotApplicable,
     }
 }
 

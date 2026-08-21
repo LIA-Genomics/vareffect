@@ -61,10 +61,22 @@ pipeline keys on the SO term string it will need a one-line adapter.
 as NMD. `vareffect` does not emit this biotype-level term; if your store
 contains explicitly NMD-flagged transcripts, filter them in the caller.
 
-The rule checks the distance from the premature termination codon to the
-last exon-exon junction in the CDS. Variants in single-exon genes
-(`PRNP`, the mitochondrial genome) are correctly reported as
-`predicts_nmd = false` because there is no junction.
+`predicts_nmd` measures the distance from the **variant's own CDS
+position** to the last exon-exon junction, not from the termination codon.
+That is VEP's `NMD.pm` convention and this field keeps it for parity. The
+two coincide for `stop_gained`, but for `frameshift_variant` the
+termination codon lies downstream of the variant and may sit in a later
+exon — so `predicts_nmd` can report NMD for a frameshift whose actual
+termination codon escapes it.
+
+`ConsequenceResult::ptc` carries that codon's own residue position and an
+NMD verdict computed there. Consumers applying the ClinGen SVI PVS1
+decision tree (Abou Tayoun et al. 2018, PMID 30192042,
+doi:10.1002/humu.23626) must read `ptc`, not `predicts_nmd`.
+
+Variants in single-exon genes (`PRNP`, the mitochondrial genome) are
+correctly reported as `predicts_nmd = false`, and `ptc` is NMD-negative,
+because there is no junction.
 
 ### HGVS 3' normalization is always on
 
@@ -232,14 +244,21 @@ truth.
 
 ## Known edge cases
 
-- **NMD with final-exon 3'UTR tails.** The 50-nucleotide rule is applied
-  to the distance from the PTC to the last exon-exon CDS junction. For
-  transcripts where the final exon's CDS portion is under 50 nt but the
-  3'UTR extends well beyond, the rule is conservative — a variant just
-  inside the last coding exon may be flagged as NMD-predicted when VEP
-  would let it escape. This matches the ClinGen-recommended
-  interpretation of the rule but may produce false positives in rare
-  transcript architectures.
+- **NMD is measured at the variant site, not the termination codon.**
+  `predicts_nmd` applies the 50-nucleotide rule to the variant's own CDS
+  position, for VEP `NMD.pm` parity. For a frameshift the termination
+  codon is downstream and can fall in a later exon, so `predicts_nmd` may
+  report NMD where the real termination codon escapes it.
+  `ConsequenceResult::ptc` reports that codon's position and an NMD
+  verdict computed there; it is the field to use for PVS1. Worked
+  example: BRCA1 `NM_007294.4` c.5266dup (`p.Gln1756ProfsTer74`,
+  `predicts_nmd = true`) terminates at residue 1829 (c.5485), inside the
+  last coding exon c.5468-5592 — an NMD escape.
+- **NMD with final-exon 3'UTR tails.** The junction set is built from CDS
+  segments only. For transcripts where the final exon's CDS portion is
+  under 50 nt but the 3'UTR extends well beyond, the rule is conservative
+  — a variant just inside the last coding exon may be flagged as
+  NMD-predicted when VEP would let it escape.
 - **Patch-contig lookups.** The reference genome binary can be built with
   or without NCBI patch contigs. When you need patch lookups, use
   `VarEffect::open_with_patch_aliases` and supply a `refseq,ucsc` alias

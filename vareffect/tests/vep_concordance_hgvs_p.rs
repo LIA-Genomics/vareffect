@@ -65,7 +65,6 @@ fn load_fasta() -> FastaReader {
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
-                .and_then(|p| p.parent())
                 .expect("workspace root")
                 .join("data/vareffect/patch_chrom_aliases.csv")
                 .as_ref(),

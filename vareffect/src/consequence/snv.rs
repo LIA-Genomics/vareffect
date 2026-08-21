@@ -317,6 +317,22 @@ fn annotate_cds_snv(
     let predicts_nmd = coding_consequence == Consequence::StopGained
         && super::nmd::predicts_nmd(cds_offset + 1, index);
 
+    // An SNV replaces one base with one base, so the CDS length is unchanged
+    // and the variant's own codon is the termination codon.
+    let ptc = if coding_consequence == Consequence::StopGained {
+        super::nmd::resolve_ptc(
+            crate::hgvs_p::PtcSite::Residue(codon_number),
+            &crate::hgvs_p::CdsEdit {
+                start: cds_offset,
+                del_len: 1,
+                ins_len: 1,
+            },
+            index,
+        )
+    } else {
+        super::PtcStatus::NotApplicable
+    };
+
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
         gene_symbol: transcript.gene_symbol.clone(),
@@ -341,5 +357,6 @@ fn annotate_cds_snv(
         hgvs_c: None,
         hgvs_p: None,
         predicts_nmd,
+        ptc,
     })
 }

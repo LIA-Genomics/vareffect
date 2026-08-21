@@ -417,11 +417,16 @@ pub(super) fn annotate_cds_frameshift(
         (cds_offset_start + 1, last_offset + 1, cdna_start, cdna_end)
     };
 
-    // Generate HGVS protein notation for the frameshift.
-    let hgvs_p = if start_lost {
-        Some("p.Met1?".to_string())
+    // Generate HGVS protein notation for the frameshift, and with it the
+    // termination codon the formatter locates on the way.
+    //
+    // When the start codon is destroyed there is no defined reading frame, so
+    // the formatter is skipped and the termination codon is genuinely
+    // undetermined -- consistent with `predicts_nmd` being forced false above.
+    let (hgvs_p, ptc) = if start_lost {
+        (Some("p.Met1?".to_string()), super::PtcStatus::Indeterminate)
     } else {
-        crate::hgvs_p::format_hgvs_p_frameshift(
+        let frameshift = crate::hgvs_p::format_hgvs_p_frameshift(
             cds_offset_start,
             cds_offset_end,
             &coding_inserted_for_hgvs,
@@ -430,7 +435,9 @@ pub(super) fn annotate_cds_frameshift(
             index,
             fasta,
             dna_shift,
-        )?
+        )?;
+        let ptc = super::nmd::resolve_ptc(frameshift.ptc, &frameshift.edit, index);
+        (frameshift.notation, ptc)
     };
 
     Ok(ConsequenceResult {
@@ -457,6 +464,7 @@ pub(super) fn annotate_cds_frameshift(
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
+        ptc,
     })
 }
 
@@ -565,6 +573,24 @@ fn annotate_cds_inframe_deletion(
     let predicts_nmd = consequences.contains(&Consequence::StopGained)
         && super::nmd::predicts_nmd(cds_offset_start + 1, index);
 
+    // The new stop can sit anywhere in the retained window, so locate it
+    // rather than assuming it coincides with the variant.
+    let ptc = if consequences.contains(&Consequence::StopGained) {
+        super::nmd::ptc_from_alt_window(
+            &alt_aas,
+            &ref_aas,
+            first_codon,
+            &crate::hgvs_p::CdsEdit {
+                start: cds_offset_start,
+                del_len: cds_offset_end - cds_offset_start,
+                ins_len: 0,
+            },
+            index,
+        )
+    } else {
+        super::PtcStatus::NotApplicable
+    };
+
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
         gene_symbol: transcript.gene_symbol.clone(),
@@ -594,6 +620,7 @@ fn annotate_cds_inframe_deletion(
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
+        ptc,
     })
 }
 
@@ -813,6 +840,24 @@ fn annotate_cds_inframe_insertion(
     let predicts_nmd = consequences.contains(&Consequence::StopGained)
         && super::nmd::predicts_nmd(cds_offset + 1, index);
 
+    // An in-frame insertion can carry its own stop codon, so the termination
+    // codon may lie inside the inserted sequence rather than at the variant.
+    let ptc = if consequences.contains(&Consequence::StopGained) {
+        super::nmd::ptc_from_alt_window(
+            &alt_aas,
+            &ref_aas,
+            first_codon,
+            &crate::hgvs_p::CdsEdit {
+                start: cds_offset,
+                del_len: 0,
+                ins_len: inserted_bases.len() as u32,
+            },
+            index,
+        )
+    } else {
+        super::PtcStatus::NotApplicable
+    };
+
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
         gene_symbol: transcript.gene_symbol.clone(),
@@ -842,6 +887,7 @@ fn annotate_cds_inframe_insertion(
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
+        ptc,
     })
 }
 

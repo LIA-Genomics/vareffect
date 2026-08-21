@@ -277,6 +277,91 @@ impl Consequence {
     }
 }
 
+/// Where a variant's premature termination codon (PTC) sits, and whether that
+/// codon is predicted to trigger nonsense-mediated mRNA decay.
+///
+/// Every verdict here is measured **at the termination codon**, unlike
+/// [`ConsequenceResult::predicts_nmd`], which measures at the variant site for
+/// Ensembl VEP `NMD.pm` parity. The termination codon is what the ClinGen SVI
+/// PVS1 decision tree asks for (Abou Tayoun et al. 2018, PMID 30192042,
+/// doi:10.1002/humu.23626), so this is the field to use for ACMG PVS1.
+///
+/// `#[non_exhaustive]` leaves room for future states (a distinguished
+/// read-through / stop-loss terminus, say) without a SemVer break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PtcStatus {
+    /// The variant introduces no premature termination codon: it is neither a
+    /// `stop_gained` nor a `frameshift_variant`, or it falls outside the CDS.
+    NotApplicable,
+    /// The variant is truncating but the termination codon could not be
+    /// located -- the alternate allele yields no complete codon, produces no
+    /// observable change, the alternate protein is shorter than the first
+    /// changed residue, or the start codon is destroyed so no reading frame is
+    /// defined.
+    ///
+    /// This is missing data. It is **not** a statement that NMD is absent, and
+    /// must never be collapsed into one.
+    Indeterminate,
+    /// The alternate reading frame runs to the end of the 3'UTR without
+    /// reaching a stop codon (HGVS `fsTer?`). There is no termination codon,
+    /// so the 50-nucleotide rule does not apply and NMD is not predicted.
+    NoStopCodon,
+    /// The termination codon was located.
+    At {
+        /// 1-based residue position of the termination codon in the
+        /// **alternate** protein.
+        ///
+        /// For a frameshift this is the residue the HGVS `fsTer` count points
+        /// at: `p.Gln1756ProfsTer74` gives `1756 + 74 - 1 = 1829`. For a
+        /// `stop_gained` it is the residue of the codon the variant turned
+        /// into a stop.
+        protein_position: u32,
+        /// Whether this termination codon lies more than 50 nucleotides
+        /// upstream of the last exon-exon junction in the CDS.
+        ///
+        /// Deliberately **not** named `predicts_nmd`: it answers the same
+        /// question at a different position, and for a frameshift the two can
+        /// disagree. See [`ConsequenceResult::predicts_nmd`].
+        nmd_at_ptc: bool,
+    },
+}
+
+impl PtcStatus {
+    /// 1-based alternate-protein residue of the termination codon.
+    ///
+    /// # Returns
+    ///
+    /// `None` when no termination codon was located or none exists.
+    pub fn protein_position(&self) -> Option<u32> {
+        match self {
+            Self::At {
+                protein_position, ..
+            } => Some(*protein_position),
+            _ => None,
+        }
+    }
+
+    /// NMD verdict measured at the termination codon.
+    ///
+    /// # Returns
+    ///
+    /// `Some(false)` for [`PtcStatus::NoStopCodon`] -- the alternate frame was
+    /// fully scanned and no stop exists, so NMD cannot be triggered.
+    /// `Some(v)` for [`PtcStatus::At`]. `None` for both
+    /// [`PtcStatus::NotApplicable`] and [`PtcStatus::Indeterminate`], which
+    /// are absences of an answer rather than a negative answer -- treating
+    /// either as `false` would let a missense and a genuine last-exon
+    /// termination codon take the same branch.
+    pub fn nmd_at_ptc(&self) -> Option<bool> {
+        match self {
+            Self::At { nmd_at_ptc, .. } => Some(*nmd_at_ptc),
+            Self::NoStopCodon => Some(false),
+            Self::NotApplicable | Self::Indeterminate => None,
+        }
+    }
+}
+
 /// Per-transcript consequence annotation for a variant.
 ///
 /// Populated by [`annotate_snv`] for SNVs, [`annotate_deletion`] /
@@ -284,7 +369,11 @@ impl Consequence {
 /// dispatcher (called via [`VarEffect::annotate`](crate::VarEffect::annotate)).
 /// `hgvs_c` and `hgvs_p` are `None` when the variant does not affect
 /// the transcript or protein (UTR, intron, splice-region).
+///
+/// `#[non_exhaustive]` so future annotation fields can be added without a
+/// SemVer break for downstream construction sites.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ConsequenceResult {
     /// RefSeq transcript accession with version (e.g., `"NM_006772.2"`).
     pub transcript: String,
@@ -338,14 +427,83 @@ pub struct ConsequenceResult {
     pub hgvs_c: Option<String>,
     /// HGVS protein notation.
     pub hgvs_p: Option<String>,
-    /// Whether the variant is predicted to trigger nonsense-mediated mRNA
-    /// decay via the 50-nucleotide rule. `true` when a PTC (from
-    /// `StopGained` or `FrameshiftVariant`) is >50 nt upstream of the last
-    /// exon-exon junction in CDS coordinates. Used by downstream ACMG PVS1
-    /// strength modulation -- NOT a consequence term (VEP's
-    /// `NMD_transcript_variant` SO:0001621 is biotype-based, irrelevant for
-    /// MANE/RefSeq Select transcripts).
+    /// Whether the **variant site** is predicted to trigger nonsense-mediated
+    /// mRNA decay under the 50-nucleotide rule.
+    ///
+    /// Measures the distance from the variant's own CDS position to the last
+    /// exon-exon junction in the CDS, for `StopGained` and `FrameshiftVariant`
+    /// consequences. That is Ensembl VEP's `NMD.pm` convention, and this field
+    /// keeps it for parity.
+    ///
+    /// For a `StopGained` variant the variant site *is* the termination codon,
+    /// so this field is correct and is the right PVS1 input. **For a
+    /// `FrameshiftVariant` they differ**: the termination codon lies
+    /// downstream of the variant, often in a later exon, and this flag ignores
+    /// that displacement -- so it can report NMD for a frameshift whose actual
+    /// termination codon escapes it. Use [`ConsequenceResult::ptc`] instead.
+    ///
+    /// Not a consequence term: VEP's `NMD_transcript_variant` (SO:0001621) is
+    /// biotype-based and irrelevant for MANE / RefSeq Select transcripts.
     pub predicts_nmd: bool,
+    /// The premature termination codon's position and its own NMD verdict.
+    ///
+    /// Populated for `stop_gained` and `frameshift_variant`;
+    /// [`PtcStatus::NotApplicable`] otherwise. Prefer this over
+    /// [`ConsequenceResult::predicts_nmd`] for ACMG PVS1 -- it measures at the
+    /// termination codon, which is what the decision tree asks for.
+    pub ptc: PtcStatus,
+}
+
+impl ConsequenceResult {
+    /// A minimal result for one transcript, with no positional annotation.
+    ///
+    /// Every optional field is `None`, `consequences` is empty, `impact` is
+    /// [`Impact::Modifier`], and both NMD fields carry no information
+    /// (`predicts_nmd` is `false`, `ptc` is [`PtcStatus::NotApplicable`]).
+    /// Callers fill in what applies.
+    ///
+    /// `ConsequenceResult` is `#[non_exhaustive]`, so this is the only way to
+    /// build one outside this crate.
+    ///
+    /// # Arguments
+    ///
+    /// * `transcript` -- RefSeq accession with version.
+    /// * `gene_symbol` -- HGNC gene symbol.
+    /// * `strand` -- transcript strand.
+    /// * `biotype` -- transcript biotype.
+    pub fn new(
+        transcript: impl Into<String>,
+        gene_symbol: impl Into<String>,
+        strand: crate::types::Strand,
+        biotype: Biotype,
+    ) -> Self {
+        Self {
+            transcript: transcript.into(),
+            gene_symbol: gene_symbol.into(),
+            protein_accession: None,
+            consequences: Vec::new(),
+            impact: Impact::Modifier,
+            protein_start: None,
+            protein_end: None,
+            codons: None,
+            amino_acids: None,
+            exon: None,
+            intron: None,
+            cds_position: None,
+            cds_position_end: None,
+            cdna_position: None,
+            cdna_position_end: None,
+            strand,
+            biotype,
+            is_mane_select: false,
+            is_mane_plus_clinical: false,
+            is_refseq_select: false,
+            hgvs_c: None,
+            hgvs_p: None,
+            predicts_nmd: false,
+            ptc: PtcStatus::NotApplicable,
+        }
+    }
 }
 
 /// Annotate a variant against all overlapping transcripts.
@@ -525,6 +683,7 @@ pub(crate) fn annotate(
             hgvs_c: None,
             hgvs_p: None,
             predicts_nmd: false,
+            ptc: PtcStatus::NotApplicable,
         }]);
     }
 

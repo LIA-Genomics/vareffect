@@ -140,7 +140,7 @@ mod vep_json;
 pub(crate) mod test_fixtures;
 
 pub use consequence::{
-    Breakend, BreakendMate, BreakendOrientation, Consequence, ConsequenceResult, Impact,
+    Breakend, BreakendMate, BreakendOrientation, Consequence, ConsequenceResult, Impact, PtcStatus,
     SvConsequenceResult, SvKind, annotate_deletion, annotate_insertion, annotate_snv,
 };
 pub use error::VarEffectError;

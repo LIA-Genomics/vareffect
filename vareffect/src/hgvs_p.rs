@@ -264,6 +264,67 @@ fn fetch_3prime_utr_coding_seq(
 // Indel / complex-variant formatters
 // ---------------------------------------------------------------------------
 
+/// The reference-CDS edit a frameshift describes, after HGVS 3' normalization.
+///
+/// Anchors the alternate-to-reference coordinate mapping: exon-exon junctions
+/// downstream of `start` shift by [`CdsEdit::delta`] in the alternate
+/// transcript, junctions at or before it do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CdsEdit {
+    /// 0-based CDS offset where the edit begins (3'-normalized).
+    pub(crate) start: u32,
+    /// Reference CDS bases replaced. Zero for a pure insertion.
+    pub(crate) del_len: u32,
+    /// Bases inserted at `start`. Zero for a pure deletion.
+    pub(crate) ins_len: u32,
+}
+
+impl CdsEdit {
+    /// Net CDS length change. Positive lengthens the alternate transcript.
+    pub(crate) fn delta(&self) -> i64 {
+        i64::from(self.ins_len) - i64::from(self.del_len)
+    }
+
+    /// 1-based CDS position of the last reference base the edit replaces.
+    /// Equals `start` for a pure insertion, which sits between `start` and
+    /// `start + 1`.
+    pub(crate) fn last_replaced_pos(&self) -> u32 {
+        self.start + self.del_len
+    }
+}
+
+/// Where a frameshift's new termination codon sits, in **alternate**-protein
+/// residue numbering.
+///
+/// Each variant names one outcome of the stop scan so a caller cannot confuse
+/// "no stop exists" with "the stop could not be located" — they carry opposite
+/// clinical meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PtcSite {
+    /// The termination codon could not be located: the alternate allele yields
+    /// no complete codon, produces no observable change, or the alternate
+    /// protein is shorter than the first changed residue. Missing data, never
+    /// an assertion that no stop exists.
+    Indeterminate,
+    /// The alternate reading frame runs to the end of the 3'UTR without
+    /// reaching a stop codon (HGVS `fsTer?`).
+    NoStopCodon,
+    /// 1-based residue of the termination codon in the alternate protein.
+    Residue(u32),
+}
+
+/// Protein-level result of a frameshift: the HGVS notation, the located
+/// termination codon, and the edit that anchors its coordinate space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrameshiftProtein {
+    /// HGVS p. notation, or `None` when no protein change is describable.
+    pub(crate) notation: Option<String>,
+    /// The new termination codon, in alternate-protein residue numbering.
+    pub(crate) ptc: PtcSite,
+    /// The 3'-normalized CDS edit these positions are relative to.
+    pub(crate) edit: CdsEdit,
+}
+
 /// Generate HGVS p. notation for a frameshift variant.
 ///
 /// Fetches the remaining CDS from the variant site to the end, builds the
@@ -278,6 +339,14 @@ fn fetch_3prime_utr_coding_seq(
 ///    NOT `fsTer1`.
 /// 3. Stop position counted from the first changed AA (position 1).
 /// 4. `fsTer?` if no stop found.
+///
+/// # Returns
+///
+/// A [`FrameshiftProtein`] carrying the notation, the located termination
+/// codon in alternate-protein numbering, and the 3'-normalized [`CdsEdit`]
+/// those positions are relative to. The caller translates the termination
+/// codon into an NMD verdict via `consequence::nmd::resolve_ptc`; this
+/// function deliberately makes no NMD prediction of its own.
 ///
 /// # Arguments
 ///
@@ -298,7 +367,7 @@ pub(crate) fn format_hgvs_p_frameshift(
     index: &LocateIndex,
     fasta: &FastaReader,
     dna_shift: u32,
-) -> Result<Option<String>, VarEffectError> {
+) -> Result<FrameshiftProtein, VarEffectError> {
     let total_cds = index.total_cds_length();
     let is_mito = transcript.chrom == "chrM";
 
@@ -322,6 +391,14 @@ pub(crate) fn format_hgvs_p_frameshift(
         }
     } else {
         (cds_offset_start, cds_offset_end)
+    };
+
+    // The 3'-normalized edit anchors every position this function returns.
+    // `eff_end == eff_start` for insertions, so `del_len` is 0 there.
+    let edit = CdsEdit {
+        start: eff_start,
+        del_len: eff_end - eff_start,
+        ins_len: inserted_coding_bases.len() as u32,
     };
 
     let codon_start = (eff_start / 3) * 3;
@@ -373,7 +450,11 @@ pub(crate) fn format_hgvs_p_frameshift(
     };
     if alt_complete_len == 0 {
         // Entire alt is incomplete — no protein produced.
-        return Ok(None);
+        return Ok(FrameshiftProtein {
+            notation: None,
+            ptc: PtcSite::Indeterminate,
+            edit,
+        });
     }
     let alt_protein = crate::codon::translate_sequence(&alt_seq[..alt_complete_len], is_mito)?;
 
@@ -385,7 +466,12 @@ pub(crate) fn format_hgvs_p_frameshift(
             // the truncation point (alt is shorter due to deletion).
             let idx = ref_protein.len().min(alt_protein.len());
             if idx >= ref_protein.len() {
-                return Ok(None); // no observable change
+                // No observable change.
+                return Ok(FrameshiftProtein {
+                    notation: None,
+                    ptc: PtcSite::Indeterminate,
+                    edit,
+                });
             }
             idx
         }
@@ -397,11 +483,13 @@ pub(crate) fn format_hgvs_p_frameshift(
     // Check if first changed AA in alt is a stop → nonsense, not fs.
     if let Some(&alt_aa) = alt_protein.get(change_idx) {
         if alt_aa == b'*' {
-            return Ok(Some(format!(
-                "p.{}{}Ter",
-                aa_three_letter(ref_aa),
-                protein_pos,
-            )));
+            // The first changed residue is itself a stop, so it *is* the
+            // termination codon — there is no `stop_n` offset to add.
+            return Ok(FrameshiftProtein {
+                notation: Some(format!("p.{}{}Ter", aa_three_letter(ref_aa), protein_pos,)),
+                ptc: PtcSite::Residue(protein_pos),
+                edit,
+            });
         }
 
         // Scan for stop in the alt protein from the change point onward.
@@ -410,13 +498,19 @@ pub(crate) fn format_hgvs_p_frameshift(
             // star_pos is 0-based from change_idx. HGVS position is
             // 1-based.
             let stop_n = star_pos as u32 + 1;
-            return Ok(Some(format!(
-                "p.{}{}{}fsTer{}",
-                aa_three_letter(ref_aa),
-                protein_pos,
-                aa_three_letter(alt_aa),
-                stop_n,
-            )));
+            return Ok(FrameshiftProtein {
+                notation: Some(format!(
+                    "p.{}{}{}fsTer{}",
+                    aa_three_letter(ref_aa),
+                    protein_pos,
+                    aa_three_letter(alt_aa),
+                    stop_n,
+                )),
+                // HGVS counts `fsTer` from the first changed residue as
+                // codon 1, so the terminating residue is `pos + n - 1`.
+                ptc: PtcSite::Residue(protein_pos + stop_n - 1),
+                edit,
+            });
         }
 
         // No stop in CDS portion. Continue into 3'UTR with trailing
@@ -431,32 +525,44 @@ pub(crate) fn format_hgvs_p_frameshift(
 
             if let Some(utr_stop) = scan_for_stop_codon(&continuation, is_mito) {
                 let stop_n = codons_past_change as u32 + utr_stop;
-                return Ok(Some(format!(
-                    "p.{}{}{}fsTer{}",
-                    aa_three_letter(ref_aa),
-                    protein_pos,
-                    aa_three_letter(alt_aa),
-                    stop_n,
-                )));
+                return Ok(FrameshiftProtein {
+                    notation: Some(format!(
+                        "p.{}{}{}fsTer{}",
+                        aa_three_letter(ref_aa),
+                        protein_pos,
+                        aa_three_letter(alt_aa),
+                        stop_n,
+                    )),
+                    ptc: PtcSite::Residue(protein_pos + stop_n - 1),
+                    edit,
+                });
             }
         }
 
         // No stop found anywhere.
-        return Ok(Some(format!(
-            "p.{}{}{}fsTer?",
-            aa_three_letter(ref_aa),
-            protein_pos,
-            aa_three_letter(alt_aa),
-        )));
+        return Ok(FrameshiftProtein {
+            notation: Some(format!(
+                "p.{}{}{}fsTer?",
+                aa_three_letter(ref_aa),
+                protein_pos,
+                aa_three_letter(alt_aa),
+            )),
+            ptc: PtcSite::NoStopCodon,
+            edit,
+        });
     }
 
     // alt_protein shorter than change_idx — the change is beyond the alt
     // protein. This can happen for very large deletions. Report unknown.
-    Ok(Some(format!(
-        "p.{}{}?fsTer?",
-        aa_three_letter(ref_aa),
-        protein_pos,
-    )))
+    Ok(FrameshiftProtein {
+        notation: Some(format!(
+            "p.{}{}?fsTer?",
+            aa_three_letter(ref_aa),
+            protein_pos,
+        )),
+        ptc: PtcSite::Indeterminate,
+        edit,
+    })
 }
 
 /// Generate HGVS p. notation for an inframe deletion.
