@@ -135,7 +135,9 @@ binary and reads bytes directly.
   transcript; the caller picks a canonical isoform if desired (every result
   carries MANE Select / MANE Plus Clinical / RefSeq Select tier metadata).
 - **NMD prediction** — the 50-nucleotide rule applied to truncating variants
-  (`stop_gained`, `frameshift_variant`).
+  (`stop_gained`, `frameshift_variant`), both at the variant site
+  (`predicts_nmd`, for VEP `NMD.pm` parity) and at the termination codon
+  (`ptc`, which is what ACMG PVS1 asks for; the two differ for frameshifts).
 - **Standard and mitochondrial genetic codes** — `chrM` variants translate
   with NCBI table 2 automatically.
 

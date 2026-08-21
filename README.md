@@ -93,7 +93,9 @@ let ve = Arc::new(VarEffect::open(transcripts, genome)?);
 - **24 SO consequence terms** covering SNVs, insertions, deletions, MNVs, and complex indels
 - **HGVS c./n. and p. notation** -- substitutions, deletions, insertions, duplications, delins, intronic/UTR offsets, frameshift extension walks
 - **HGVS reverse resolution** -- parse `NM_000546.6:c.742C>T` back to genomic coordinates
-- **NMD prediction** via the 50-nucleotide rule on truncating variants
+- **NMD prediction** via the 50-nucleotide rule on truncating variants -- at the
+  variant site (`predicts_nmd`, VEP parity) and at the termination codon (`ptc`,
+  what ACMG PVS1 asks for)
 - **IMPACT ranking** -- HIGH / MODERATE / LOW / MODIFIER, matching VEP's severity scale
 - **Multi-transcript annotation** -- one result per overlapping transcript with MANE Select / MANE Plus Clinical / RefSeq Select tier metadata
 - **Memory-mapped genome** -- ~5 ns base fetches via mmap'd flat binary
@@ -223,7 +225,7 @@ Elapsed:    0.2s
 |------|---------------------|---------------|
 | Splice sub-terms | All emitted as `splice_region_variant` | Optionally emits `splice_polypyrimidine_tract_variant`, `splice_donor_region_variant`, `splice_donor_5th_base_variant` |
 | Non-coding introns | Emits `intron_variant` | May emit `non_coding_transcript_variant` |
-| NMD | `predicts_nmd` boolean via 50-nt rule | Separate `NMD_transcript_variant` SO term |
+| NMD | `predicts_nmd` (at the variant site, VEP `NMD.pm` parity) plus `ptc` (at the termination codon) via the 50-nt rule | Separate `NMD_transcript_variant` SO term |
 | HGVS 3' shift | Always on (no toggle) | Configurable via `--shift_hgvs` |
 
 ### Not yet implemented

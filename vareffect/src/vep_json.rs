@@ -84,6 +84,14 @@
 //!   variant effect prediction itself.
 //! - `colocated_variants[*].id` -- no dbSNP rsID lookup.
 //! - `input`, `id` -- VEP echoes the query string; we don't carry one.
+//!
+//! # vareffect-only fields, not serialized
+//!
+//! The converse case: [`ConsequenceResult::predicts_nmd`] and
+//! [`ConsequenceResult::ptc`] have no VEP REST counterpart, so emitting them
+//! would break the drop-in-replacement contract. Read them from
+//! [`ConsequenceResult`] directly -- `annotate_to_vep_json` is a VEP-shape
+//! adapter, not a superset.
 
 use serde_json::{Map, Value, json};
 
@@ -338,6 +346,7 @@ mod tests {
             hgvs_c: None,
             hgvs_p: None,
             predicts_nmd: false,
+            ptc: crate::consequence::PtcStatus::NotApplicable,
         }
     }
 

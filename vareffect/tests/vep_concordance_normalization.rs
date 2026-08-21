@@ -36,13 +36,15 @@
 //!   Last junction CDS pos = 1101 (1-based).
 //! - APC NM_000038.6: exon 16/16 is the last and largest exon (~6500bp CDS).
 //!   CDS positions 3927 and 4348 are both in the last exon.
-//! - BRCA1 NM_007294.4: 24 exons, CDS pos 68 is in exon 2 (far from last junction).
+//! - BRCA1 NM_007294.4: 23 exons, CDS pos 68 is in exon 2 (far from last junction).
+//!   (GenBank NM_007294.4 and the annotator both report 23; earlier notes here
+//!   said 24, which was wrong.)
 //! - PRNP NM_000311.5: single-exon gene → no exon-exon junction → NMD impossible.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use vareffect::{FastaReader, TranscriptStore, VarEffect};
+use vareffect::{FastaReader, PtcStatus, TranscriptStore, VarEffect};
 
 // ---------------------------------------------------------------------------
 // Test infrastructure (same pattern as vep_concordance_hgvs.rs)
@@ -74,7 +76,6 @@ fn load_fasta() -> FastaReader {
         Some(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .parent()
-                .and_then(|p| p.parent())
                 .expect("workspace root")
                 .join("data/vareffect/patch_chrom_aliases.csv")
                 .as_ref(),
@@ -118,6 +119,12 @@ struct ExpectedAnnotation {
     assert_not_intergenic: bool,
     /// If `Some`, assert `predicts_nmd` matches.
     expected_nmd: Option<bool>,
+    /// If `Some`, assert `ptc` matches: `(protein_position, nmd_at_ptc)`.
+    ///
+    /// Unlike `expected_nmd`, which mirrors the implementation's own
+    /// arithmetic, these values are derived independently from the GenBank
+    /// record for the transcript -- see the per-variant rationale.
+    expected_ptc: Option<(u32, bool)>,
     /// Category tag for logging.
     category: &'static str,
 }
@@ -140,10 +147,18 @@ const VARIANTS: &[ExpectedAnnotation] = &[
     //   strand. The dup shifts to c.5266 (3'-most position), matching VEP's
     //   `--shift_hgvs` default.
     //
-    //   NMD: CDS 5266 in a 5592-nt CDS with 24 exons. Far from last
-    //   junction → NMD predicted.
+    //   NMD at the variant site: CDS 5266 in a 5592-nt CDS with 23 exons.
+    //   Far from the last junction → `predicts_nmd` true (VEP `NMD.pm`
+    //   parity, which measures at the variant).
     //
-    //   Combined check: 3' shift + consequence + NMD in one variant.
+    //   NMD at the termination codon: the frameshift terminates at
+    //   p.Gln1756ProfsTer74 → residue 1756 + 74 - 1 = 1829 → c.5485. GenBank
+    //   NM_007294.4 gives `CDS 114..5705` and a final exon at cDNA
+    //   5581..7088, so the last coding exon is c.5468-5592. c.5485 lies
+    //   inside it → NMD escape. The two fields therefore disagree here, which
+    //   is the whole point of `ptc`.
+    //
+    //   Combined check: 3' shift + consequence + both NMD measurements.
     //
     //   Source: hgvs test #13, ClinVar notation (NM_007294.4 retired from VEP).
     ExpectedAnnotation {
@@ -158,6 +173,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["frameshift_variant"]),
         assert_not_intergenic: false,
         expected_nmd: Some(true),
+        expected_ptc: Some((1829, false)),
         category: "A: 3' norm (dup, minus)",
     },
     // #2 — ERBB2 exon20 12bp insertion: plus-strand ins→dup conversion.
@@ -182,6 +198,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: None,
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "A: 3' norm (ins→dup, plus)",
     },
     // -----------------------------------------------------------------------
@@ -204,6 +221,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: None,
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "B: 3' norm (del, mono-A)",
     },
     // #4 — CFTR deltaF508: plus-strand 3bp inframe deletion, no repeat.
@@ -223,6 +241,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: None,
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "B: 3' norm (del, no shift, regression)",
     },
     // -----------------------------------------------------------------------
@@ -246,6 +265,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: None,
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "C: 3' norm (ins, non-dup)",
     },
     // #6 — EGFR exon20 3bp inframe insertion: plus-strand, non-dup, non-repeat.
@@ -268,6 +288,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: None,
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "C: 3' norm (ins, non-repeat, regression)",
     },
     // -----------------------------------------------------------------------
@@ -290,6 +311,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["intergenic_variant"]),
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "D: intergenic",
     },
     // #8 — Gene desert (chr13 pericentromeric): no RefSeq genes.
@@ -306,6 +328,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["intergenic_variant"]),
         assert_not_intergenic: false,
         expected_nmd: None,
+        expected_ptc: None,
         category: "D: intergenic",
     },
     // #9 — TP53 R248W: negative control — coding variant must NOT get
@@ -324,6 +347,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["missense_variant"]),
         assert_not_intergenic: true,
         expected_nmd: None,
+        expected_ptc: None,
         category: "D: NOT intergenic (negative control)",
     },
     // -----------------------------------------------------------------------
@@ -349,6 +373,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["stop_gained"]),
         assert_not_intergenic: false,
         expected_nmd: Some(true),
+        expected_ptc: None,
         category: "E: NMD (stop_gained, early, true)",
     },
     // #11 — APC R1450X: stop_gained in last exon (16/16), NMD escape.
@@ -368,6 +393,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["stop_gained"]),
         assert_not_intergenic: false,
         expected_nmd: Some(false),
+        expected_ptc: None,
         category: "E: NMD (stop_gained, last exon, false)",
     },
     // #12 — TP53 R342X: stop_gained in penultimate CDS segment, >50nt from
@@ -387,10 +413,11 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["stop_gained"]),
         assert_not_intergenic: false,
         expected_nmd: Some(true),
+        expected_ptc: None,
         category: "E: NMD (stop_gained, penultimate, true)",
     },
     // #13 — BRCA1 c.68_69del: frameshift early in CDS, NMD predicted.
-    //   CDS position 68 in exon 2 of 24 exons. Distance to last junction
+    //   CDS position 68 in exon 2 of 23 exons. Distance to last junction
     //   is thousands of bases. NMD = true.
     //   Source: indel test #1, hgvs test #18, hgvs_p test #11.
     ExpectedAnnotation {
@@ -405,6 +432,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["frameshift_variant"]),
         assert_not_intergenic: false,
         expected_nmd: Some(true),
+        expected_ptc: None,
         category: "E: NMD (frameshift, early, true)",
     },
     // #14 — APC c.3927_3931del: frameshift in last exon (16/16), NMD escape.
@@ -422,6 +450,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["frameshift_variant"]),
         assert_not_intergenic: false,
         expected_nmd: Some(false),
+        expected_ptc: None,
         category: "E: NMD (frameshift, last exon, false)",
     },
     // #15 — PRNP p.Gln160Ter: stop_gained in a single-exon gene.
@@ -441,6 +470,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["stop_gained"]),
         assert_not_intergenic: false,
         expected_nmd: Some(false),
+        expected_ptc: None,
         category: "E: NMD (single-exon, false)",
     },
     // #16 — TP53 50-nt boundary: stop_gained at exactly 50 nt from last
@@ -465,6 +495,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["stop_gained"]),
         assert_not_intergenic: false,
         expected_nmd: Some(false),
+        expected_ptc: None,
         category: "E: NMD (boundary, dist=50, false)",
     },
     // #17 — TP53 51-nt boundary: frameshift at exactly 51 nt from last
@@ -491,6 +522,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["frameshift_variant"]),
         assert_not_intergenic: false,
         expected_nmd: Some(true),
+        expected_ptc: None,
         category: "E: NMD (boundary, dist=51, true)",
     },
     // -----------------------------------------------------------------------
@@ -516,6 +548,7 @@ const VARIANTS: &[ExpectedAnnotation] = &[
         expected_consequences: Some(&["synonymous_variant"]),
         assert_not_intergenic: false,
         expected_nmd: Some(false),
+        expected_ptc: None,
         category: "F: synonymous (no NMD)",
     },
 ];
@@ -607,7 +640,7 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>
         mismatches.push("intergenic_variant found but should NOT be present".into());
     }
 
-    // predicts_nmd.
+    // predicts_nmd (measured at the variant site).
     if let Some(expected_nmd) = exp.expected_nmd
         && result.predicts_nmd != expected_nmd
     {
@@ -615,6 +648,17 @@ fn check_variant(ve: &VarEffect, exp: &ExpectedAnnotation) -> Result<Vec<String>
             "predicts_nmd: expected {expected_nmd}, got {}",
             result.predicts_nmd,
         ));
+    }
+
+    // ptc (measured at the termination codon).
+    if let Some((position, nmd)) = exp.expected_ptc {
+        let expected = PtcStatus::At {
+            protein_position: position,
+            nmd_at_ptc: nmd,
+        };
+        if result.ptc != expected {
+            mismatches.push(format!("ptc: expected {expected:?}, got {:?}", result.ptc));
+        }
     }
 
     Ok(mismatches)

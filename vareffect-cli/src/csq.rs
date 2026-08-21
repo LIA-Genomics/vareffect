@@ -237,33 +237,21 @@ mod tests {
     use vareffect::consequence::{Consequence, Impact};
     use vareffect::types::Biotype;
 
-    /// Minimal fixture with sensible defaults. Tests override relevant fields.
-    fn make_result(transcript: &str, gene: &str) -> ConsequenceResult {
-        ConsequenceResult {
-            transcript: transcript.to_string(),
-            gene_symbol: gene.to_string(),
-            protein_accession: None,
-            consequences: Vec::new(),
-            impact: Impact::Modifier,
-            protein_start: None,
-            protein_end: None,
-            codons: None,
-            amino_acids: None,
-            exon: None,
-            intron: None,
-            cds_position: None,
-            cds_position_end: None,
-            cdna_position: None,
-            cdna_position_end: None,
-            strand: Strand::Plus,
-            biotype: Biotype::ProteinCoding,
-            is_mane_select: false,
-            is_mane_plus_clinical: false,
-            is_refseq_select: false,
-            hgvs_c: None,
-            hgvs_p: None,
-            predicts_nmd: false,
-        }
+    /// Minimal fixture with sensible defaults; `overrides` sets the fields a
+    /// test cares about.
+    ///
+    /// `ConsequenceResult` is `#[non_exhaustive]`, so an external crate cannot
+    /// build one with struct-literal or functional-update syntax; it goes
+    /// through [`ConsequenceResult::new`] and assigns.
+    fn make_result(
+        transcript: &str,
+        gene: &str,
+        overrides: impl FnOnce(&mut ConsequenceResult),
+    ) -> ConsequenceResult {
+        let mut result =
+            ConsequenceResult::new(transcript, gene, Strand::Plus, Biotype::ProteinCoding);
+        overrides(&mut result);
+        result
     }
 
     #[test]
@@ -299,25 +287,24 @@ mod tests {
 
     #[test]
     fn format_csq_missense_full() {
-        let r = ConsequenceResult {
-            consequences: vec![Consequence::MissenseVariant],
-            impact: Impact::Moderate,
-            protein_start: Some(248),
-            protein_end: Some(248),
-            codons: Some("cGg/cTg".to_string()),
-            amino_acids: Some("R/W".to_string()),
-            exon: Some("7/11".to_string()),
-            cds_position: Some(742),
-            cds_position_end: Some(742),
-            cdna_position: Some(884),
-            cdna_position_end: Some(884),
-            strand: Strand::Minus,
-            is_mane_select: true,
-            hgvs_c: Some("NM_000546.6:c.742C>T".to_string()),
-            hgvs_p: Some("p.Arg248Trp".to_string()),
-            protein_accession: Some("NP_000537.3".to_string()),
-            ..make_result("NM_000546.6", "TP53")
-        };
+        let r = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![Consequence::MissenseVariant];
+            r.impact = Impact::Moderate;
+            r.protein_start = Some(248);
+            r.protein_end = Some(248);
+            r.codons = Some("cGg/cTg".to_string());
+            r.amino_acids = Some("R/W".to_string());
+            r.exon = Some("7/11".to_string());
+            r.cds_position = Some(742);
+            r.cds_position_end = Some(742);
+            r.cdna_position = Some(884);
+            r.cdna_position_end = Some(884);
+            r.strand = Strand::Minus;
+            r.is_mane_select = true;
+            r.hgvs_c = Some("NM_000546.6:c.742C>T".to_string());
+            r.hgvs_p = Some("p.Arg248Trp".to_string());
+            r.protein_accession = Some("NP_000537.3".to_string());
+        });
 
         let csq = format_csq("T", &r);
         let fields: Vec<&str> = csq.split('|').collect();
@@ -345,12 +332,11 @@ mod tests {
 
     #[test]
     fn format_csq_intronic_many_empty() {
-        let r = ConsequenceResult {
-            consequences: vec![Consequence::IntronVariant],
-            intron: Some("7/10".to_string()),
-            hgvs_c: Some("NM_000546.6:c.782+131C>T".to_string()),
-            ..make_result("NM_000546.6", "TP53")
-        };
+        let r = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![Consequence::IntronVariant];
+            r.intron = Some("7/10".to_string());
+            r.hgvs_c = Some("NM_000546.6:c.782+131C>T".to_string());
+        });
 
         let csq = format_csq("A", &r);
         let fields: Vec<&str> = csq.split('|').collect();
@@ -370,14 +356,13 @@ mod tests {
 
     #[test]
     fn format_csq_multiple_consequences() {
-        let r = ConsequenceResult {
-            consequences: vec![
+        let r = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![
                 Consequence::SpliceRegionVariant,
                 Consequence::MissenseVariant,
-            ],
-            impact: Impact::Moderate,
-            ..make_result("NM_000546.6", "TP53")
-        };
+            ];
+            r.impact = Impact::Moderate;
+        });
 
         let csq = format_csq("T", &r);
         let fields: Vec<&str> = csq.split('|').collect();
@@ -386,11 +371,10 @@ mod tests {
 
     #[test]
     fn format_csq_hgvsp_omitted_without_protein_accession() {
-        let r = ConsequenceResult {
-            hgvs_p: Some("p.?".to_string()),
-            protein_accession: None,
-            ..make_result("NR_046018.2", "DDX11L1")
-        };
+        let r = make_result("NR_046018.2", "DDX11L1", |r| {
+            r.hgvs_p = Some("p.?".to_string());
+            r.protein_accession = None;
+        });
 
         let csq = format_csq("A", &r);
         let fields: Vec<&str> = csq.split('|').collect();
@@ -399,17 +383,16 @@ mod tests {
 
     #[test]
     fn format_csq_position_range_for_indel() {
-        let r = ConsequenceResult {
-            consequences: vec![Consequence::InframeDeletion],
-            impact: Impact::Moderate,
-            cds_position: Some(742),
-            cds_position_end: Some(744),
-            cdna_position: Some(884),
-            cdna_position_end: Some(886),
-            protein_start: Some(248),
-            protein_end: Some(248),
-            ..make_result("NM_000546.6", "TP53")
-        };
+        let r = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![Consequence::InframeDeletion];
+            r.impact = Impact::Moderate;
+            r.cds_position = Some(742);
+            r.cds_position_end = Some(744);
+            r.cdna_position = Some(884);
+            r.cdna_position_end = Some(886);
+            r.protein_start = Some(248);
+            r.protein_end = Some(248);
+        });
 
         let csq = format_csq("-", &r);
         let fields: Vec<&str> = csq.split('|').collect();
@@ -420,16 +403,14 @@ mod tests {
 
     #[test]
     fn format_variant_csq_multiple_transcripts() {
-        let r1 = ConsequenceResult {
-            consequences: vec![Consequence::MissenseVariant],
-            impact: Impact::Moderate,
-            ..make_result("NM_000546.6", "TP53")
-        };
-        let r2 = ConsequenceResult {
-            consequences: vec![Consequence::SynonymousVariant],
-            impact: Impact::Low,
-            ..make_result("NM_001126112.3", "TP53")
-        };
+        let r1 = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![Consequence::MissenseVariant];
+            r.impact = Impact::Moderate;
+        });
+        let r2 = make_result("NM_001126112.3", "TP53", |r| {
+            r.consequences = vec![Consequence::SynonymousVariant];
+            r.impact = Impact::Low;
+        });
 
         let csq = format_variant_csq("T", &[r1, r2]);
         let entries: Vec<&str> = csq.split(',').collect();
@@ -440,15 +421,13 @@ mod tests {
 
     #[test]
     fn format_variant_csq_skips_intergenic() {
-        let intergenic = ConsequenceResult {
-            consequences: vec![Consequence::IntergenicVariant],
-            ..make_result("", "")
-        };
-        let coding = ConsequenceResult {
-            consequences: vec![Consequence::MissenseVariant],
-            impact: Impact::Moderate,
-            ..make_result("NM_000546.6", "TP53")
-        };
+        let intergenic = make_result("", "", |r| {
+            r.consequences = vec![Consequence::IntergenicVariant];
+        });
+        let coding = make_result("NM_000546.6", "TP53", |r| {
+            r.consequences = vec![Consequence::MissenseVariant];
+            r.impact = Impact::Moderate;
+        });
 
         let csq = format_variant_csq("T", &[intergenic, coding]);
         let entries: Vec<&str> = csq.split(',').collect();
@@ -459,10 +438,9 @@ mod tests {
 
     #[test]
     fn format_variant_csq_all_intergenic_returns_empty() {
-        let intergenic = ConsequenceResult {
-            consequences: vec![Consequence::IntergenicVariant],
-            ..make_result("", "")
-        };
+        let intergenic = make_result("", "", |r| {
+            r.consequences = vec![Consequence::IntergenicVariant];
+        });
 
         let csq = format_variant_csq("T", &[intergenic]);
         assert!(csq.is_empty());
