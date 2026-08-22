@@ -509,7 +509,13 @@ fn annotate_cds_inframe_deletion(
         consequences.push(Consequence::StartLost);
     }
 
-    if alt_aas.contains(&b'*') {
+    // The `!ref_aas.contains(b'*')` half is load-bearing, not symmetry: an
+    // inframe deletion overlapping the reference terminator can fuse the
+    // flanking bases into a fresh stop at essentially the same place, which is
+    // not a premature termination. VEP guards it the same way -- its
+    // `stop_gained` predicate is `($alt_pep =~ /\*/) and ($ref_pep !~ /\*/)`
+    // (`ensembl-variation`, `VariationEffect.pm::stop_gained`).
+    if alt_aas.contains(&b'*') && !ref_aas.contains(&b'*') {
         consequences.push(Consequence::StopGained);
     }
 
@@ -575,21 +581,18 @@ fn annotate_cds_inframe_deletion(
 
     // The new stop can sit anywhere in the retained window, so locate it
     // rather than assuming it coincides with the variant.
-    let ptc = if consequences.contains(&Consequence::StopGained) {
-        super::nmd::ptc_from_alt_window(
-            &alt_aas,
-            &ref_aas,
-            first_codon,
-            &crate::hgvs_p::CdsEdit {
-                start: cds_offset_start,
-                del_len: cds_offset_end - cds_offset_start,
-                ins_len: 0,
-            },
-            index,
-        )
-    } else {
-        super::PtcStatus::NotApplicable
-    };
+    let ptc = super::nmd::ptc_for_window(
+        &consequences,
+        &alt_aas,
+        &ref_aas,
+        first_codon,
+        &crate::hgvs_p::CdsEdit {
+            start: cds_offset_start,
+            del_len: cds_offset_end - cds_offset_start,
+            ins_len: 0,
+        },
+        index,
+    );
 
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
@@ -842,21 +845,18 @@ fn annotate_cds_inframe_insertion(
 
     // An in-frame insertion can carry its own stop codon, so the termination
     // codon may lie inside the inserted sequence rather than at the variant.
-    let ptc = if consequences.contains(&Consequence::StopGained) {
-        super::nmd::ptc_from_alt_window(
-            &alt_aas,
-            &ref_aas,
-            first_codon,
-            &crate::hgvs_p::CdsEdit {
-                start: cds_offset,
-                del_len: 0,
-                ins_len: inserted_bases.len() as u32,
-            },
-            index,
-        )
-    } else {
-        super::PtcStatus::NotApplicable
-    };
+    let ptc = super::nmd::ptc_for_window(
+        &consequences,
+        &alt_aas,
+        &ref_aas,
+        first_codon,
+        &crate::hgvs_p::CdsEdit {
+            start: cds_offset,
+            del_len: 0,
+            ins_len: inserted_bases.len() as u32,
+        },
+        index,
+    );
 
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),

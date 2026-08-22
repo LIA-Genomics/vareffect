@@ -682,6 +682,17 @@ fn vep_concordance_normalization_18() {
     for (i, exp) in VARIANTS.iter().enumerate() {
         let num = i + 1;
         match check_variant(&ve, exp) {
+            // A variant carrying an independently-derived `expected_ptc` is
+            // the only real-transcript check on that field. Letting it skip
+            // would report green while asserting nothing.
+            Err(msg) if msg.contains("not found") && exp.expected_ptc.is_some() => {
+                eprintln!(
+                    "  [{num:>2}/{total}] FAIL  {} [{}]: {msg}",
+                    exp.label, exp.category,
+                );
+                failures.push(format!("#{num} {}: {msg}", exp.label));
+                fail += 1;
+            }
             Err(msg) if msg.contains("not found") => {
                 eprintln!(
                     "  [{num:>2}/{total}] SKIP  {} [{}]: {msg}",

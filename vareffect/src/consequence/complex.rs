@@ -213,7 +213,18 @@ pub(super) fn annotate_boundary_spanning_deletion(
     if !cds_del_len.is_multiple_of(3) {
         // Frameshift
         let first_codon = global_cds_start / 3;
+        // VEP raises `start_lost` for any deletion that alters the start codon
+        // and is not an inframe indel, independently of `frameshift`
+        // (`ensembl-variation`, `VariationEffect.pm::start_lost` via
+        // `_ins_del_start_altered`); both predicates fire and both terms are
+        // emitted. A deletion reaching here removes at least one base, so
+        // touching codon 1 at all destroys the initiator methionine -- the
+        // same rule `annotate_cds_frameshift` applies on the pure-CDS path.
+        let start_lost = global_cds_start < 3;
         let mut consequences = vec![Consequence::FrameshiftVariant];
+        if start_lost {
+            consequences.push(Consequence::StartLost);
+        }
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
@@ -228,16 +239,25 @@ pub(super) fn annotate_boundary_spanning_deletion(
             b'X'
         };
 
-        let frameshift = crate::hgvs_p::format_hgvs_p_frameshift(
-            global_cds_start,
-            global_cds_end,
-            &[], // pure deletion, no inserted bases
-            chrom,
-            transcript,
-            locate_index,
-            fasta,
-            0, // no 3' shift for boundary-spanning deletions
-        )?;
+        // With codon 1 destroyed there is no defined reading frame: HGVS names
+        // that `p.Met1?`, and no termination codon may be claimed against a
+        // frame that does not exist.
+        let (hgvs_p, ptc) = if start_lost {
+            (Some("p.Met1?".to_string()), PtcStatus::Indeterminate)
+        } else {
+            let frameshift = crate::hgvs_p::format_hgvs_p_frameshift(
+                global_cds_start,
+                global_cds_end,
+                &[], // pure deletion, no inserted bases
+                chrom,
+                transcript,
+                locate_index,
+                fasta,
+                0, // no 3' shift for boundary-spanning deletions
+            )?;
+            let ptc = super::nmd::resolve_ptc(frameshift.ptc, &frameshift.edit, locate_index);
+            (frameshift.notation, ptc)
+        };
 
         let mut result = build_base_result(transcript, consequences);
         result.impact = impact;
@@ -246,17 +266,10 @@ pub(super) fn annotate_boundary_spanning_deletion(
         result.amino_acids = Some(format!("{}/X", char::from(ref_aa)));
         result.cds_position = Some(global_cds_start + 1);
         result.cds_position_end = Some(global_cds_end);
-        result.hgvs_p = frameshift.notation;
-        result.predicts_nmd = super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
-        // Unlike `annotate_cds_frameshift`, this branch has no start-codon
-        // check, so a deletion beginning inside codon 1 reaches here without
-        // `StartLost`. Withhold a positive termination-codon claim there
-        // rather than assert one against a possibly destroyed reading frame.
-        result.ptc = if global_cds_start < 3 {
-            PtcStatus::Indeterminate
-        } else {
-            super::nmd::resolve_ptc(frameshift.ptc, &frameshift.edit, locate_index)
-        };
+        result.hgvs_p = hgvs_p;
+        result.predicts_nmd =
+            !start_lost && super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
+        result.ptc = ptc;
         if let Some(exon_idx) = location.exon_index {
             result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
         }
@@ -366,21 +379,18 @@ pub(super) fn annotate_boundary_spanning_deletion(
     let predicts_nmd = consequences.contains(&Consequence::StopGained)
         && super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
 
-    let ptc = if consequences.contains(&Consequence::StopGained) {
-        super::nmd::ptc_from_alt_window(
-            &alt_aas,
-            &ref_aas,
-            first_codon,
-            &crate::hgvs_p::CdsEdit {
-                start: global_cds_start,
-                del_len: global_cds_end - global_cds_start,
-                ins_len: 0,
-            },
-            locate_index,
-        )
-    } else {
-        PtcStatus::NotApplicable
-    };
+    let ptc = super::nmd::ptc_for_window(
+        &consequences,
+        &alt_aas,
+        &ref_aas,
+        first_codon,
+        &crate::hgvs_p::CdsEdit {
+            start: global_cds_start,
+            del_len: global_cds_end - global_cds_start,
+            ins_len: 0,
+        },
+        locate_index,
+    );
 
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
@@ -577,21 +587,18 @@ pub(super) fn annotate_complex_delins(
                     && super::nmd::predicts_nmd(cds_offset_start + 1, locate_index);
                 // A delins can carry its own stop codon, so the termination
                 // codon may lie inside the inserted sequence.
-                let ptc = if consequences.contains(&Consequence::StopGained) {
-                    super::nmd::ptc_from_alt_window(
-                        &alt_aas,
-                        &ref_aas,
-                        first_codon,
-                        &crate::hgvs_p::CdsEdit {
-                            start: *cds_offset_start,
-                            del_len: cds_offset_end - *cds_offset_start,
-                            ins_len: coding_alt.len() as u32,
-                        },
-                        locate_index,
-                    )
-                } else {
-                    PtcStatus::NotApplicable
-                };
+                let ptc = super::nmd::ptc_for_window(
+                    &consequences,
+                    &alt_aas,
+                    &ref_aas,
+                    first_codon,
+                    &crate::hgvs_p::CdsEdit {
+                        start: *cds_offset_start,
+                        del_len: cds_offset_end - *cds_offset_start,
+                        ins_len: coding_alt.len() as u32,
+                    },
+                    locate_index,
+                );
                 let mut result = ConsequenceResult {
                     transcript: transcript.accession.clone(),
                     gene_symbol: transcript.gene_symbol.clone(),
@@ -784,22 +791,19 @@ pub(super) fn annotate_mnv(
             let predicts_nmd = consequences.contains(&Consequence::StopGained)
                 && super::nmd::predicts_nmd(cds_offset_start + 1, locate_index);
             // An MNV substitutes base-for-base, so the CDS length is unchanged.
-            let ptc = if consequences.contains(&Consequence::StopGained) {
-                let span = cds_offset_end - *cds_offset_start;
-                super::nmd::ptc_from_alt_window(
-                    &alt_aas,
-                    &ref_aas,
-                    first_codon,
-                    &crate::hgvs_p::CdsEdit {
-                        start: *cds_offset_start,
-                        del_len: span,
-                        ins_len: span,
-                    },
-                    locate_index,
-                )
-            } else {
-                PtcStatus::NotApplicable
-            };
+            let span = cds_offset_end - *cds_offset_start;
+            let ptc = super::nmd::ptc_for_window(
+                &consequences,
+                &alt_aas,
+                &ref_aas,
+                first_codon,
+                &crate::hgvs_p::CdsEdit {
+                    start: *cds_offset_start,
+                    del_len: span,
+                    ins_len: span,
+                },
+                locate_index,
+            );
             Ok(ConsequenceResult {
                 transcript: transcript.accession.clone(),
                 gene_symbol: transcript.gene_symbol.clone(),
