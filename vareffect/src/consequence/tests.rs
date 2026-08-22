@@ -1716,38 +1716,58 @@ fn inframe_deletion_across_the_terminator_is_not_stop_gained() {
     );
 }
 
-/// A deletion spanning the 5'UTR/CDS boundary inside one exon reaches
-/// `annotate_boundary_spanning_deletion`'s frameshift branch with the edit
-/// starting inside codon 1. It must reach the same verdict the pure-CDS path
-/// reaches for the same geometry: `start_lost` alongside `frameshift_variant`
-/// (VEP fires both predicates), `p.Met1?`, and no positive claim about a
-/// reading frame that no longer exists.
+/// A deletion spanning the 5'UTR/CDS boundary reaches the start-codon branch
+/// whatever its length, and must carry the `5_prime_UTR_variant` term without
+/// `frameshift_variant`.
+///
+/// VEP reports exactly `{5_prime_UTR_variant, start_lost}` for this geometry
+/// even when the CDS bases removed are not a multiple of three, because its
+/// `frameshift` predicate short-circuits on the undefined `cds_start` — the
+/// same short-circuit this file already replicates at the 3' end. Recorded
+/// ground truth: `ALPL` NM_000478.6 chr1:21554077 `GCACCATGATTT>G`, 7 CDS
+/// bases deleted.
+///
+/// Both lengths are asserted together because the branch boundary used to sit
+/// between them, sending a 1-2 base deletion down the frameshift path.
 #[test]
-fn boundary_frameshift_inside_the_first_codon_is_start_lost() {
+fn utr_spanning_deletion_into_the_start_codon_never_frameshifts() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
 
-    // CDS begins at genomic 1500. Delete [1498,1501): two 5'UTR bases plus the
-    // first CDS base, so cds_del_len == 1 (a frameshift) at CDS offset 0.
-    let result = annotate_deletion("chr1", 1498, 1501, b"AAA", &tx, &idx, &fasta).unwrap();
+    // CDS begins at genomic 1500, `ATG` at 1500-1502, body `CGT` from 1503.
+    let one_cds_base = annotate_deletion("chr1", 1498, 1501, b"AAA", &tx, &idx, &fasta).unwrap();
+    let four_cds_bases =
+        annotate_deletion("chr1", 1497, 1504, b"AAAATGC", &tx, &idx, &fasta).unwrap();
 
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
-        "expected the boundary-spanning frameshift branch, got {:?}",
-        result.consequences,
-    );
-    assert!(
-        result.consequences.contains(&Consequence::StartLost),
-        "the deletion removes the first base of the initiator codon, got {:?}",
-        result.consequences,
-    );
-    assert_eq!(result.hgvs_p.as_deref(), Some("p.Met1?"));
-    assert!(
-        !result.predicts_nmd,
-        "with no reading frame there is no termination codon to place",
-    );
-    assert_eq!(result.ptc, PtcStatus::Indeterminate);
+    for (label, result) in [
+        ("1 CDS base", one_cds_base),
+        ("4 CDS bases", four_cds_bases),
+    ] {
+        assert!(
+            result.consequences.contains(&Consequence::StartLost),
+            "{label}: the deletion reaches the initiator codon, got {:?}",
+            result.consequences,
+        );
+        assert!(
+            result
+                .consequences
+                .contains(&Consequence::FivePrimeUtrVariant),
+            "{label}: the footprint extends into the 5'UTR, got {:?}",
+            result.consequences,
+        );
+        assert!(
+            !result
+                .consequences
+                .contains(&Consequence::FrameshiftVariant),
+            "{label}: VEP withholds the frameshift term on this geometry, got {:?}",
+            result.consequences,
+        );
+        assert_eq!(result.impact, Impact::High, "{label}");
+        assert!(
+            !result.predicts_nmd,
+            "{label}: with no reading frame there is no termination codon to place",
+        );
+        assert_eq!(result.ptc, PtcStatus::NotApplicable, "{label}");
+    }
 }

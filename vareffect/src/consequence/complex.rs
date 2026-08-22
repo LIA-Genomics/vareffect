@@ -142,9 +142,44 @@ pub(super) fn annotate_boundary_spanning_deletion(
         .expect("cds_offsets verified non-empty")
         .1;
 
-    // Start codon removal
-    if global_cds_start == 0 && cds_del_len >= 3 {
+    // Both UTR-spanning branches below need the CDS genomic bounds.
+    let cds_genomic_start = transcript.cds_genomic_start.ok_or_else(|| {
+        VarEffectError::Malformed(format!(
+            "{}: coding transcript has no cds_genomic_start",
+            transcript.accession,
+        ))
+    })?;
+    let cds_genomic_end = transcript.cds_genomic_end.ok_or_else(|| {
+        VarEffectError::Malformed(format!(
+            "{}: coding transcript has no cds_genomic_end",
+            transcript.accession,
+        ))
+    })?;
+
+    // Start-codon removal, the 5' mirror of the stop-codon branch below. The
+    // deletion reaches the first CDS base, so the initiator methionine cannot
+    // survive. When the footprint also extends into the 5'UTR, VEP emits
+    // `{5_prime_UTR_variant, start_lost}` and **no** `frameshift_variant`,
+    // however many CDS bases are removed: its `frameshift` predicate
+    // short-circuits on the undefined `cds_start` exactly as it does on
+    // `cds_end` at the 3' end (`ensembl-variation`,
+    // `VariationEffect.pm::frameshift`). Ground truth for a frameshifting
+    // case: `ALPL` NM_000478.6 chr1:21554077 `GCACCATGATTT>G` deletes 7 CDS
+    // bases and VEP still reports only that pair.
+    //
+    // A deletion starting at CDS offset 1 or 2 instead leaves the first base
+    // intact, so VEP's `cds_start` *is* defined and both `start_lost` and
+    // `frameshift_variant` fire. That case belongs to the frameshift branch
+    // below, which handles it.
+    let extends_into_5utr = match transcript.strand {
+        Strand::Plus => start < cds_genomic_start,
+        Strand::Minus => end > cds_genomic_end,
+    };
+    if global_cds_start == 0 {
         let mut consequences = vec![Consequence::StartLost];
+        if extends_into_5utr {
+            consequences.push(Consequence::FivePrimeUtrVariant);
+        }
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
@@ -173,18 +208,6 @@ pub(super) fn annotate_boundary_spanning_deletion(
     // `touches_stop`: deletion overlaps the last CDS codon `[total_cds-3, total_cds)`.
     // `extends_into_3utr`: genomic footprint crosses past `cds_genomic_end`
     // (plus strand) or before `cds_genomic_start` (minus strand).
-    let cds_genomic_start = transcript.cds_genomic_start.ok_or_else(|| {
-        VarEffectError::Malformed(format!(
-            "{}: coding transcript has no cds_genomic_start",
-            transcript.accession,
-        ))
-    })?;
-    let cds_genomic_end = transcript.cds_genomic_end.ok_or_else(|| {
-        VarEffectError::Malformed(format!(
-            "{}: coding transcript has no cds_genomic_end",
-            transcript.accession,
-        ))
-    })?;
     let touches_stop = total_cds >= 3 && global_cds_end + 3 > total_cds;
     let extends_into_3utr = match transcript.strand {
         Strand::Plus => end > cds_genomic_end,
@@ -213,13 +236,16 @@ pub(super) fn annotate_boundary_spanning_deletion(
     if !cds_del_len.is_multiple_of(3) {
         // Frameshift
         let first_codon = global_cds_start / 3;
-        // VEP raises `start_lost` for any deletion that alters the start codon
-        // and is not an inframe indel, independently of `frameshift`
-        // (`ensembl-variation`, `VariationEffect.pm::start_lost` via
-        // `_ins_del_start_altered`); both predicates fire and both terms are
-        // emitted. A deletion reaching here removes at least one base, so
-        // touching codon 1 at all destroys the initiator methionine -- the
-        // same rule `annotate_cds_frameshift` applies on the pure-CDS path.
+        // Offset 0 was taken by the start-codon branch above, so this would be
+        // a deletion beginning at CDS offset 1 or 2: the first CDS base
+        // survives, VEP's `cds_start` is therefore defined, and `start_lost`
+        // and `frameshift` both fire (`ensembl-variation`,
+        // `VariationEffect.pm::start_lost` via `_ins_del_start_altered`) -- the
+        // pairing VEP reports for `chr1:152114079 AT>A`. Currently unreachable:
+        // arriving here means spanning a CDS/UTR boundary, which starts at
+        // offset 0, or an exon boundary, which covers the canonical splice
+        // dinucleotides and is diverted above. Handle it rather than assume a
+        // surviving reading frame.
         let start_lost = global_cds_start < 3;
         let mut consequences = vec![Consequence::FrameshiftVariant];
         if start_lost {
