@@ -7,6 +7,85 @@ use crate::test_fixtures::{minus_strand_coding, noncoding_2_exon, plus_strand_co
 use crate::types::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
 use tempfile::TempDir;
 
+// -- PTC fixture ------------------------------------------------------------
+
+/// Transcript for the premature-termination-codon tests.
+///
+/// Same geometry as [`plus_strand_coding`] — 3 exons, CDS segments
+/// `[1500,2000) + [3000,3500) + [4000,4500)`, last CDS junction at 1-based CDS
+/// position 1001 — but on `chr4`, so its planted stop codons cannot perturb
+/// any existing test.
+fn ptc_transcript() -> TranscriptModel {
+    let mut tx = plus_strand_coding();
+    tx.accession = "NM_TEST_PTC.1".into();
+    tx.protein_accession = Some("NP_TEST_PTC.1".into());
+    tx.gene_symbol = "TESTPTC".into();
+    tx.hgnc_id = Some("HGNC:99904".into());
+    tx.chrom = "chr4".into();
+    tx
+}
+
+/// Genome for [`ptc_transcript`], carrying stops we can actually reach.
+///
+/// The CDS body is `CGT` repeating, which reads `CGT` / `GTC` / `TCG` in the
+/// three frames — no stop in any of them. Every stop below is therefore one
+/// planted deliberately, at a CDS offset chosen so it is read in exactly one
+/// shifted frame:
+///
+/// - offset % 3 == 1 → reached after a **1-base deletion**
+/// - offset % 3 == 2 → reached after a **2-base deletion**
+///
+/// That separation is what lets one fixture serve both an NMD-predicted and an
+/// NMD-escaping frameshift. `write_test_fasta`'s chr1 cannot do this at all:
+/// its shifted frames read `GTC`/`TCG` forever and its 3'UTR is poly-A, so
+/// every frameshift there ends in `fsTer?`.
+fn write_ptc_fasta() -> (TempDir, FastaReader) {
+    let tmp = TempDir::new().unwrap();
+    let mut chr4 = vec![b'A'; 6000];
+
+    let mut cds = Vec::with_capacity(1500);
+    cds.extend_from_slice(b"ATG");
+    while cds.len() < 1500 {
+        cds.extend_from_slice(b"CGT");
+    }
+    cds.truncate(1500);
+
+    // Reference terminator, preceded by a codon chosen so an in-frame
+    // deletion can fuse across it into a *new* stop (`TAC|TAA`, delete
+    // `AC`+`T` -> `TAA`). That is the one case where `alt_aas` holds a stop
+    // while `ref_aas` still holds the reference one.
+    cds[1494..1497].copy_from_slice(b"TAC");
+    cds[1497..1500].copy_from_slice(b"TAA");
+    // Premature stop reached only after a 2-base deletion (401 % 3 == 2).
+    // Upstream of the junction, so the PTC is NMD-predicted.
+    cds[401..404].copy_from_slice(b"TAA");
+    // Premature stop reached only after a 1-base deletion (1150 % 3 == 1).
+    // Inside the last coding exon, so the PTC escapes NMD even though the
+    // variant itself sits far upstream — the divergence this field exists for.
+    cds[1150..1153].copy_from_slice(b"TAA");
+
+    for (offset, base) in cds.iter().enumerate() {
+        let genomic = match offset {
+            0..500 => 1500 + offset,
+            500..1000 => 3000 + (offset - 500),
+            _ => 4000 + (offset - 1000),
+        };
+        chr4[genomic] = *base;
+    }
+
+    // 3'UTR [4500,5000) is poly-A — no stop in any frame — except one planted
+    // TAA that only the 2-base-deletion frame reads as a codon. The 1-base
+    // frame reads it as `ATA`, so it still runs off the end as `fsTer?`.
+    chr4[4502..4505].copy_from_slice(b"TAA");
+
+    let contigs: Vec<(&str, &[u8])> = vec![("chr4", &chr4)];
+    let bin_path = tmp.path().join("ptc.bin");
+    let idx_path = tmp.path().join("ptc.bin.idx");
+    write_genome_binary(&contigs, "ptc", &bin_path, &idx_path).unwrap();
+    let reader = FastaReader::open(&bin_path).unwrap();
+    (tmp, reader)
+}
+
 // -- Synthetic FASTA fixture ------------------------------------------------
 
 /// Build a synthetic FASTA covering the test transcript models.
@@ -932,6 +1011,9 @@ fn plus_strand_frameshift_start_lost() {
         result.consequences,
     );
     assert_eq!(result.impact, Impact::High);
+    // With codon 1 destroyed there is no defined reading frame, so no
+    // termination codon may be claimed — the formatter is skipped entirely.
+    assert_eq!(result.ptc, PtcStatus::Indeterminate);
 }
 
 #[test]
@@ -1456,4 +1538,216 @@ fn frameshift_immediate_stop_still_gets_nmd() {
         result.consequences,
     );
     assert!(result.predicts_nmd);
+}
+
+// -- PTC through the real annotate pipeline ---------------------------------
+
+/// The divergence the `ptc` field exists for: the variant sits far upstream of
+/// the last junction (so `predicts_nmd` reports NMD), while the termination
+/// codon it actually creates lands inside the last coding exon and escapes.
+#[test]
+fn ptc_frameshift_escapes_nmd_while_variant_site_predicts_it() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    // 1-base deletion at CDS offset 100 (genomic 1600) -> reads the %3==1
+    // frame -> first stop at CDS 1150, i.e. alt residue 384.
+    let result = annotate_deletion("chr4", 1600, 1601, b"G", &tx, &idx, &fasta).unwrap();
+
+    assert!(
+        result
+            .consequences
+            .contains(&Consequence::FrameshiftVariant)
+    );
+    assert!(
+        result.predicts_nmd,
+        "the variant site is 900 nt upstream of the junction, so the \
+         VEP-parity field must still report NMD"
+    );
+    assert_eq!(
+        result.ptc,
+        PtcStatus::At {
+            protein_position: 384,
+            nmd_at_ptc: false,
+        },
+        "the termination codon is in the last coding exon and escapes"
+    );
+}
+
+/// The agreeing case: both fields report NMD when the termination codon is
+/// also well upstream of the junction.
+#[test]
+fn ptc_frameshift_predicts_nmd_when_codon_is_upstream() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    // 2-base deletion at CDS offset 100 -> reads the %3==2 frame -> first stop
+    // at CDS 401, i.e. alt residue 134.
+    let result = annotate_deletion("chr4", 1600, 1602, b"GT", &tx, &idx, &fasta).unwrap();
+
+    assert!(result.predicts_nmd);
+    assert_eq!(
+        result.ptc,
+        PtcStatus::At {
+            protein_position: 134,
+            nmd_at_ptc: true,
+        }
+    );
+}
+
+/// A frameshift whose alternate frame reaches a stop only in the 3'UTR still
+/// yields a located codon — the continuation scan is part of the PTC search.
+#[test]
+fn ptc_frameshift_finds_a_stop_in_the_3prime_utr() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    // 2-base deletion at CDS offset 1200 (genomic 4200): the %3==2 frame has
+    // no remaining CDS stop, so the scan continues into the UTR.
+    let result = annotate_deletion("chr4", 4200, 4202, b"GT", &tx, &idx, &fasta).unwrap();
+
+    let position = result
+        .ptc
+        .protein_position()
+        .expect("a UTR stop is still a located termination codon");
+    assert!(
+        position > 499,
+        "a UTR-derived codon lies past the 499-residue reference protein, got {position}"
+    );
+    assert_eq!(result.ptc.nmd_at_ptc(), Some(false), "past the junction");
+}
+
+/// HGVS `fsTer?`: the alternate frame runs off the end of the 3'UTR with no
+/// stop at all. Distinct from `Indeterminate`, and never a located position.
+#[test]
+fn ptc_frameshift_with_no_reachable_stop_is_no_stop_codon() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    // 1-base deletion at CDS offset 1200: the %3==1 frame reads the planted
+    // UTR stop as `ATA`, so nothing terminates it.
+    let result = annotate_deletion("chr4", 4200, 4201, b"G", &tx, &idx, &fasta).unwrap();
+
+    assert!(
+        result
+            .hgvs_p
+            .as_deref()
+            .is_some_and(|p| p.ends_with("fsTer?")),
+        "expected fsTer? notation, got {:?}",
+        result.hgvs_p
+    );
+    assert_eq!(result.ptc, PtcStatus::NoStopCodon);
+    assert_eq!(result.ptc.protein_position(), None);
+}
+
+/// Every located codon must agree with the `fsTer` count the same call emits.
+#[test]
+fn ptc_agrees_with_the_emitted_hgvs_notation() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    for (start, end, deleted) in [
+        (1600u64, 1601u64, &b"G"[..]),
+        (1600, 1602, &b"GT"[..]),
+        (4200, 4202, &b"GT"[..]),
+    ] {
+        let result = annotate_deletion("chr4", start, end, deleted, &tx, &idx, &fasta).unwrap();
+        let hgvs_p = result.hgvs_p.clone().expect("frameshift notation");
+        let (first, count) = parse_fs_ter(&hgvs_p).expect("fsTer notation");
+        assert_eq!(
+            result.ptc.protein_position(),
+            Some(first + count - 1),
+            "ptc must equal N + M - 1 from {hgvs_p}"
+        );
+    }
+}
+
+/// Extract `(N, M)` from `p.{Aaa}{N}{Bbb}fsTer{M}`.
+fn parse_fs_ter(hgvs_p: &str) -> Option<(u32, u32)> {
+    let (head, tail) = hgvs_p.split_once("fsTer")?;
+    let count: u32 = tail.parse().ok()?;
+    let digits: String = head
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    Some((digits.parse().ok()?, count))
+}
+
+/// An in-frame deletion fusing across the reference terminator leaves a stop
+/// in the alternate window, but it is the normal terminator re-formed one
+/// codon earlier, not a premature one. `annotate_cds_inframe_deletion` must
+/// not call that `stop_gained`: VEP's own predicate is
+/// `($alt_pep =~ /\*/) and ($ref_pep !~ /\*/)`, and a HIGH-impact nonsense
+/// term here would be a truncation claim about a protein that terminates
+/// where it always did.
+#[test]
+fn inframe_deletion_across_the_terminator_is_not_stop_gained() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+
+    // Delete CDS offsets 1495-1497 (genomic 4495-4497): `TAC|TAA` -> `TAA`.
+    let result = annotate_deletion("chr4", 4495, 4498, b"ACT", &tx, &idx, &fasta).unwrap();
+
+    assert!(
+        !result.consequences.contains(&Consequence::StopGained),
+        "the reference window still holds the normal terminator, so no \
+         premature stop was gained; got {:?}",
+        result.consequences,
+    );
+    assert!(
+        result.consequences.contains(&Consequence::InframeDeletion),
+        "expected the inframe-deletion term to stand alone, got {:?}",
+        result.consequences,
+    );
+    assert_eq!(result.impact, Impact::Moderate);
+    assert!(!result.predicts_nmd);
+    assert_eq!(
+        result.ptc,
+        PtcStatus::NotApplicable,
+        "nothing truncating happened, so there is no termination codon to \
+         report",
+    );
+}
+
+/// A deletion spanning the 5'UTR/CDS boundary inside one exon reaches
+/// `annotate_boundary_spanning_deletion`'s frameshift branch with the edit
+/// starting inside codon 1. It must reach the same verdict the pure-CDS path
+/// reaches for the same geometry: `start_lost` alongside `frameshift_variant`
+/// (VEP fires both predicates), `p.Met1?`, and no positive claim about a
+/// reading frame that no longer exists.
+#[test]
+fn boundary_frameshift_inside_the_first_codon_is_start_lost() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let idx = build_index(&tx);
+
+    // CDS begins at genomic 1500. Delete [1498,1501): two 5'UTR bases plus the
+    // first CDS base, so cds_del_len == 1 (a frameshift) at CDS offset 0.
+    let result = annotate_deletion("chr1", 1498, 1501, b"AAA", &tx, &idx, &fasta).unwrap();
+
+    assert!(
+        result
+            .consequences
+            .contains(&Consequence::FrameshiftVariant),
+        "expected the boundary-spanning frameshift branch, got {:?}",
+        result.consequences,
+    );
+    assert!(
+        result.consequences.contains(&Consequence::StartLost),
+        "the deletion removes the first base of the initiator codon, got {:?}",
+        result.consequences,
+    );
+    assert_eq!(result.hgvs_p.as_deref(), Some("p.Met1?"));
+    assert!(
+        !result.predicts_nmd,
+        "with no reading frame there is no termination codon to place",
+    );
+    assert_eq!(result.ptc, PtcStatus::Indeterminate);
 }

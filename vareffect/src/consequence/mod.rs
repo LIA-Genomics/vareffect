@@ -291,8 +291,14 @@ impl Consequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PtcStatus {
-    /// The variant introduces no premature termination codon: it is neither a
-    /// `stop_gained` nor a `frameshift_variant`, or it falls outside the CDS.
+    /// No termination codon was evaluated: the consequence is neither
+    /// `stop_gained` nor `frameshift_variant`, or the variant falls outside
+    /// the CDS.
+    ///
+    /// This states scope, not absence. Canonical splice variants land here,
+    /// and aberrant splicing routinely creates a downstream termination codon
+    /// that this crate does not model -- so `NotApplicable` must not be read
+    /// as "this variant is not truncating".
     NotApplicable,
     /// The variant is truncating but the termination codon could not be
     /// located -- the alternate allele yields no complete codon, produces no
@@ -319,6 +325,23 @@ pub enum PtcStatus {
         protein_position: u32,
         /// Whether this termination codon lies more than 50 nucleotides
         /// upstream of the last exon-exon junction in the CDS.
+        ///
+        /// The distance is measured from the codon's **3'-most base**, so the
+        /// codon escapes as soon as any of its three bases falls inside the
+        /// 3'-most 50 nucleotides of the penultimate coding exon -- the
+        /// reading of the ClinGen SVI rule that does not overcall NMD.
+        ///
+        /// The last-junction rule is the **only** escape rule applied, because
+        /// it is the only one the ClinGen SVI PVS1 decision tree uses. Two
+        /// further rules from the NMD literature -- start-proximal escape
+        /// (within 150 nt of the coding start site) and long-exon escape
+        /// (a termination codon inside an exon longer than 407 bp), both after
+        /// Lindeboom et al., PMID 27618451 and PMID 31659324 -- are
+        /// deliberately **not** applied. Either would withdraw PVS1's full
+        /// strength from a large class of established loss-of-function
+        /// alleles, which is a guideline decision rather than an annotation
+        /// one; `protein_position` is everything a consumer needs to layer
+        /// them itself.
         ///
         /// Deliberately **not** named `predicts_nmd`: it answers the same
         /// question at a different position, and for a frameshift the two can
@@ -353,6 +376,15 @@ impl PtcStatus {
     /// are absences of an answer rather than a negative answer -- treating
     /// either as `false` would let a missense and a genuine last-exon
     /// termination codon take the same branch.
+    ///
+    /// **This accessor is lossy, and PVS1 consumers should match on the enum
+    /// instead.** A `Some(false)` from [`PtcStatus::NoStopCodon`] and one from
+    /// a last-exon [`PtcStatus::At`] are not the same clinical object: the
+    /// first has no termination codon to assess at all (the transcript is a
+    /// non-stop-decay substrate) and yields no `protein_position`, while the
+    /// second carries the position the decision tree's next step needs. How a
+    /// stop-less transcript should be scored is a clinical question this crate
+    /// does not answer.
     pub fn nmd_at_ptc(&self) -> Option<bool> {
         match self {
             Self::At { nmd_at_ptc, .. } => Some(*nmd_at_ptc),
@@ -432,15 +464,31 @@ pub struct ConsequenceResult {
     ///
     /// Measures the distance from the variant's own CDS position to the last
     /// exon-exon junction in the CDS, for `StopGained` and `FrameshiftVariant`
-    /// consequences. That is Ensembl VEP's `NMD.pm` convention, and this field
-    /// keeps it for parity.
+    /// consequences.
     ///
-    /// For a `StopGained` variant the variant site *is* the termination codon,
-    /// so this field is correct and is the right PVS1 input. **For a
-    /// `FrameshiftVariant` they differ**: the termination codon lies
-    /// downstream of the variant, often in a later exon, and this flag ignores
-    /// that displacement -- so it can report NMD for a frameshift whose actual
-    /// termination codon escapes it. Use [`ConsequenceResult::ptc`] instead.
+    /// Measuring at the variant site follows Ensembl VEP's `NMD.pm`, but the
+    /// agreement is partial and worth stating exactly. Matching: the variant
+    /// site as the anchor, the last-junction distance rule, and the intronless
+    /// case. Diverging: `NMD.pm` also escapes a variant in the first ~100
+    /// coding bases (its rule 3, which this crate does not implement), it
+    /// walks all transcript exons where this crate uses CDS segments only, and
+    /// its penultimate-exon window is 51 bases inclusive against the 50 used
+    /// here. Both of the first two make this field predict NMD where `NMD.pm`
+    /// escapes.
+    ///
+    /// For a `StopGained` variant the variant site is the termination codon,
+    /// so this field is correct at codon granularity and is a sound PVS1
+    /// input. **For a `FrameshiftVariant` they differ substantively**: the
+    /// termination codon lies downstream of the variant, often in a later
+    /// exon, and this flag ignores that displacement -- so it can report NMD
+    /// for a frameshift whose actual termination codon escapes it. Use
+    /// [`ConsequenceResult::ptc`] instead.
+    ///
+    /// The two anchors also differ by up to two bases even for `StopGained`:
+    /// this field measures from the variant's own base, while
+    /// [`PtcStatus::At::nmd_at_ptc`] measures from the 3'-most base of the
+    /// termination codon. Where the 50-nucleotide boundary falls inside a
+    /// codon, the two can disagree.
     ///
     /// Not a consequence term: VEP's `NMD_transcript_variant` (SO:0001621) is
     /// biotype-based and irrelevant for MANE / RefSeq Select transcripts.

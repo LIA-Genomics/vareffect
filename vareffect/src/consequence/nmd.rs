@@ -1,7 +1,10 @@
 //! NMD prediction via the 50-nucleotide rule.
 //!
 //! Predicts whether a premature termination codon triggers nonsense-mediated
-//! mRNA decay. Used to populate [`super::ConsequenceResult::predicts_nmd`].
+//! mRNA decay. Populates [`super::ConsequenceResult::predicts_nmd`] (measured
+//! at the variant site, for Ensembl VEP `NMD.pm` parity) and
+//! [`super::ConsequenceResult::ptc`] (measured at the termination codon, for
+//! ACMG PVS1).
 //!
 //! Uses CDS-only junctions via [`LocateIndex`]. For MANE Select transcripts
 //! where the stop codon is in the last exon (>99% of cases), this is
@@ -9,6 +12,38 @@
 //! where 3'UTR spans additional exons, the CDS-only approach may miss
 //! some NMD predictions (conservative: reports NMD escape, which leads to
 //! PVS1 downgrade rather than overcalling pathogenicity).
+//!
+//! # Which escape rules this implements, and which it does not
+//!
+//! The termination-codon verdict implements the **last-junction rule only**,
+//! because that is the rule the ClinGen SVI PVS1 decision tree is written
+//! against (Abou Tayoun et al. 2018, PMID 30192042, doi:10.1002/humu.23626),
+//! and PVS1 is what this field exists to feed. `AutoPVS1`, the published
+//! reference implementation of that flowchart (Xiang et al. 2020, PMID
+//! 32442321, doi:10.1002/humu.24051), likewise implements no other escape
+//! rule.
+//!
+//! Three further escape rules are well described in the NMD literature and are
+//! **deliberately not applied here**:
+//!
+//! - **Start-proximal escape.** A termination codon close to the coding start
+//!   site can be bypassed by translational re-initiation. `aenmd` puts the
+//!   default cutoff at 150 nt downstream of the coding start site, after
+//!   Lindeboom et al. (PMID 27618451, doi:10.1038/ng.3664; PMID 31659324,
+//!   doi:10.1038/s41588-019-0517-5). Ensembl VEP's `NMD.pm` plugin carries a
+//!   coarser variant of it — escape when the variant's `cds_end` is `<= 101`.
+//! - **Long-exon escape.** A termination codon inside an exon longer than
+//!   407 bp, same sources.
+//! - **Intronless transcripts**, which this module *does* honour, but as a
+//!   consequence of there being no CDS junction rather than as a named rule.
+//!
+//! Applying the first two would withdraw NMD — and with it PVS1's full
+//! strength — from every truncating variant in the first 150 coding bases or
+//! in a long exon, a large and clinically well-established class of
+//! loss-of-function alleles. That is a guideline change, not an annotation
+//! detail, so it belongs to the consumer: this module reports the termination
+//! codon's position, which is everything a consumer needs to layer either rule
+//! itself.
 
 use crate::hgvs_p::{CdsEdit, PtcSite};
 use crate::locate::LocateIndex;
@@ -34,7 +69,10 @@ const NMD_MIN_UPSTREAM_DISTANCE_NT: u32 = 50;
 ///   variant position rather than the predicted termination site.
 /// * `index` -- Precomputed locate index for the transcript.
 pub(super) fn predicts_nmd(cds_position: u32, index: &LocateIndex) -> bool {
-    let Some(last_junction_cds_pos) = last_junction_cds_pos(index) else {
+    // Both `Absent` and `Unknown` yield `false` here, preserving this
+    // function's exact pre-existing behavior. Only `nmd_at_residue`
+    // distinguishes them, because only it can report "no answer".
+    let LastJunction::At(last_junction_cds_pos) = last_junction_cds_pos(index) else {
         return false;
     };
 
@@ -47,28 +85,45 @@ pub(super) fn predicts_nmd(cds_position: u32, index: &LocateIndex) -> bool {
     last_junction_cds_pos - cds_position > NMD_MIN_UPSTREAM_DISTANCE_NT
 }
 
-/// 1-based reference-CDS position at which the last coding exon begins.
+/// Where the last coding exon begins, or why that could not be determined.
 ///
-/// `None` when the transcript has no CDS exon-exon junction at all: a
-/// non-coding transcript, a missing segment mapping, or a single CDS segment
-/// (an intronless transcript deposits no exon-junction complex).
-fn last_junction_cds_pos(index: &LocateIndex) -> Option<u32> {
-    let cds_end_exon = index.cds_end_exon_idx()?;
+/// [`LastJunction::Absent`] and [`LastJunction::Unknown`] are deliberately
+/// distinct: the first is a real answer (there is no junction, so NMD cannot
+/// be triggered), the second is missing data. Collapsing the second into a
+/// negative NMD verdict would turn an absent index into a clinical assertion.
+enum LastJunction {
+    /// 1-based reference-CDS position at which the last coding exon begins.
+    At(u32),
+    /// The transcript has no CDS exon-exon junction: it is non-coding, or its
+    /// CDS lies in a single segment, so no exon-junction complex is deposited.
+    Absent,
+    /// The exon-to-CDS-segment mapping is missing, so the junction cannot be
+    /// located. Never a verdict.
+    Unknown,
+}
+
+/// Locate the last CDS exon-exon junction.
+fn last_junction_cds_pos(index: &LocateIndex) -> LastJunction {
+    let Some(cds_end_exon) = index.cds_end_exon_idx() else {
+        return LastJunction::Absent; // non-coding transcript
+    };
 
     let last_seg_idx = match index.exon_to_cds_seg().get(cds_end_exon) {
         Some(Some(seg)) => *seg as usize,
-        _ => return None,
+        // The CDS-end exon carries no CDS segment, or is out of range: the
+        // index disagrees with itself. Missing data, not "no junction".
+        _ => return LastJunction::Unknown,
     };
 
     // Single CDS segment -> no exon-exon junction within CDS.
     if last_seg_idx == 0 {
-        return None;
+        return LastJunction::Absent;
     }
 
     // cumulative_cds[i] = total CDS bases in segments 0..i (prefix sum), so
     // cumulative_cds[last_seg_idx] is the 0-based CDS offset where the last
     // segment begins. Convert to 1-based for comparison.
-    Some(index.cumulative_cds()[last_seg_idx] + 1)
+    LastJunction::At(index.cumulative_cds()[last_seg_idx] + 1)
 }
 
 /// Attach an NMD verdict to a located termination codon.
@@ -107,10 +162,42 @@ pub(super) fn resolve_ptc(site: PtcSite, edit: &CdsEdit, index: &LocateIndex) ->
         PtcSite::Residue(r) => r,
     };
 
-    PtcStatus::At {
-        protein_position: residue,
-        nmd_at_ptc: nmd_at_residue(residue, edit, index),
+    match nmd_at_residue(residue, edit, index) {
+        Some(nmd_at_ptc) => PtcStatus::At {
+            protein_position: residue,
+            nmd_at_ptc,
+        },
+        // The codon was located but no NMD verdict could be reached. Reporting
+        // the position with a guessed verdict would be worse than withholding.
+        None => PtcStatus::Indeterminate,
     }
+}
+
+/// Resolve the PTC for a result whose consequence set may or may not be
+/// truncating.
+///
+/// Folds the `StopGained` gate in once so the six coding call sites cannot
+/// drift apart: a change to what counts as truncating lands in one place.
+///
+/// # Arguments
+///
+/// * `consequences` -- the finalized consequence set for this result.
+/// * `alt_aas`, `ref_aas` -- translated alternate and reference windows.
+/// * `first_codon` -- 0-based codon index the windows begin at.
+/// * `edit` -- the CDS edit the windows describe.
+/// * `index` -- precomputed locate index for the transcript.
+pub(super) fn ptc_for_window(
+    consequences: &[super::Consequence],
+    alt_aas: &[u8],
+    ref_aas: &[u8],
+    first_codon: u32,
+    edit: &CdsEdit,
+    index: &LocateIndex,
+) -> PtcStatus {
+    if !consequences.contains(&super::Consequence::StopGained) {
+        return PtcStatus::NotApplicable;
+    }
+    ptc_from_alt_window(alt_aas, ref_aas, first_codon, edit, index)
 }
 
 /// Locate a premature termination codon in a translated alternate window.
@@ -120,11 +207,11 @@ pub(super) fn resolve_ptc(site: PtcSite, edit: &CdsEdit, index: &LocateIndex) ->
 ///
 /// Returns [`PtcStatus::Indeterminate`] when the reference window already
 /// contained a stop, because the `*` found in `alt_aas` may then be the
-/// transcript's normal termination codon rather than a premature one. Most
-/// callers already guard `StopGained` on `!ref_aas.contains(&b'*')`, but
-/// `annotate_cds_inframe_deletion` does not -- an in-frame deletion
-/// overlapping the normal stop reaches here with the reference stop still in
-/// view, and naming it a PTC would be a false truncation claim.
+/// transcript's normal termination codon rather than a premature one. Every
+/// caller now guards `StopGained` on `!ref_aas.contains(&b'*')` as well, so
+/// this is a second line of defence rather than the only one: a future caller
+/// that forgets the guard gets a withheld verdict instead of a false
+/// truncation claim.
 ///
 /// # Arguments
 ///
@@ -151,23 +238,61 @@ pub(super) fn ptc_from_alt_window(
 }
 
 /// Evaluate the 50-nucleotide rule at a 1-based alternate-protein residue.
-fn nmd_at_residue(residue: u32, edit: &CdsEdit, index: &LocateIndex) -> bool {
-    let Some(junction_ref) = last_junction_cds_pos(index) else {
-        return false;
+///
+/// # The anchor base
+///
+/// Measured from the **3'-most base** of the termination codon. ClinGen SVI
+/// states the rule as "NMD is not predicted to occur if the premature
+/// termination codon occurs in the 3' most exon or within the 3'-most 50
+/// nucleotides of the penultimate exon" (Abou Tayoun et al. 2018). A codon
+/// spans three bases, so "occurs within" is read as *overlaps*: if any base of
+/// the codon lies in that window the codon escapes, and the 3'-most base is
+/// the one that decides it. Anchoring on the codon's first base instead would
+/// shrink the escape window to 48 nucleotides and predict NMD for two codon
+/// positions the guideline places outside it — an overcall, since predicting
+/// NMD is what earns PVS1 its full strength.
+///
+/// # Returns
+///
+/// `None` when no verdict can be reached — the junction index is
+/// self-inconsistent, or the junction falls inside the edited span so its
+/// position in the alternate transcript is undefined. Never guess in those
+/// cases: an invented verdict here becomes a PVS1 strength downstream.
+fn nmd_at_residue(residue: u32, edit: &CdsEdit, index: &LocateIndex) -> Option<bool> {
+    let junction_ref = match last_junction_cds_pos(index) {
+        LastJunction::At(pos) => pos,
+        // No junction at all -> nothing to measure against, and NMD genuinely
+        // cannot be triggered. That is an answer.
+        LastJunction::Absent => return Some(false),
+        LastJunction::Unknown => return None,
     };
 
-    // First base of the terminating codon, 1-based in the alternate CDS.
-    let ptc_pos = i64::from(residue) * 3 - 2;
+    // 3'-most base of the terminating codon, 1-based in the alternate CDS.
+    let ptc_last_base = i64::from(residue) * 3;
 
-    // Project the junction into alternate-CDS space. Only a junction strictly
-    // downstream of the replaced span moves.
+    // Project the junction into alternate-CDS space.
     let junction_alt = if junction_ref > edit.last_replaced_pos() {
+        // Downstream of the replaced span: it shifts by the length change.
         i64::from(junction_ref) + edit.delta()
+    } else if junction_ref > edit.start {
+        // Inside the replaced span: the bases carrying this junction are gone,
+        // so it has no well-defined alternate-transcript position. Currently
+        // unreachable -- a contiguous deletion spanning two CDS segments must
+        // cover the canonical splice dinucleotides and is diverted to the
+        // splice path first (`complex.rs`, `overlaps_splice_canonical`) -- but
+        // withhold rather than silently treat it as unmoved.
+        return None;
     } else {
+        // At or before the edit: unmoved. The termination codon is at or after
+        // the edit, so it necessarily lies in the last exon and escapes.
         i64::from(junction_ref)
     };
 
-    ptc_pos < junction_alt && junction_alt - ptc_pos > i64::from(NMD_MIN_UPSTREAM_DISTANCE_NT)
+    // A separate "is it upstream of the junction" test would be redundant:
+    // exceeding the 50-nt distance already implies it, and the arithmetic is
+    // signed so a codon inside the last exon simply yields a negative
+    // distance.
+    Some(junction_alt - ptc_last_base > i64::from(NMD_MIN_UPSTREAM_DISTANCE_NT))
 }
 
 #[cfg(test)]
@@ -293,7 +418,7 @@ mod tests {
     fn resolve_ptc_upstream_residue_predicts_nmd() {
         let tx = plus_strand_coding();
         let idx = build_index(&tx);
-        // Residue 100 -> CDS 298; junction 1001 -> distance 703 > 50.
+        // Residue 100 -> last base CDS 300; junction 1001 -> distance 701.
         assert_eq!(
             resolve_ptc(PtcSite::Residue(100), &neutral_edit(297), &idx),
             PtcStatus::At {
@@ -307,7 +432,7 @@ mod tests {
     fn resolve_ptc_last_exon_residue_escapes() {
         let tx = plus_strand_coding();
         let idx = build_index(&tx);
-        // Residue 400 -> CDS 1198, past the junction at 1001.
+        // Residue 400 -> last base CDS 1200, past the junction at 1001.
         assert_eq!(
             resolve_ptc(PtcSite::Residue(400), &neutral_edit(1197), &idx),
             PtcStatus::At {
@@ -322,11 +447,11 @@ mod tests {
         let tx = plus_strand_coding();
         let idx = build_index(&tx);
         // A 100 bp deletion at CDS offset 880 pulls the junction back to 901
-        // in the alternate transcript. The termination codon at alt CDS 880
-        // is then only 21 nt upstream of it -> escape.
+        // in the alternate transcript. Residue 294 ends at alt CDS 882, only
+        // 19 nt upstream of it -> escape.
         //
         // Comparing the alternate-space codon against the *reference* junction
-        // would give 1001 - 880 = 121 and wrongly predict NMD.
+        // would give 1001 - 882 = 119 and wrongly predict NMD.
         let edit = CdsEdit {
             start: 880,
             del_len: 100,
@@ -348,10 +473,11 @@ mod tests {
         // The edit sits inside the last exon, so the junction does not move.
         // The termination codon is downstream of it either way -> escape.
         //
-        // Applying the +99 delta unconditionally would place the codon at
-        // 913, i.e. 88 nt "upstream" of the junction, and manufacture an NMD
-        // prediction for a variant that plainly escapes. This test fails if
-        // the junction-projection guard is removed.
+        // Applying the +99 delta unconditionally would move the junction to
+        // 1100, leaving the codon at 1014 an apparent 86 nt upstream of it,
+        // and manufacture an NMD prediction for a variant that plainly
+        // escapes. This test fails if the junction-projection guard is
+        // removed.
         let edit = CdsEdit {
             start: 1010,
             del_len: 1,
@@ -366,22 +492,31 @@ mod tests {
         );
     }
 
+    /// The escape window is the 3'-most 50 nucleotides of the penultimate
+    /// coding exon -- CDS 951..=1000 here -- and a codon escapes as soon as it
+    /// reaches into it. Residue 317 ends exactly on 951, the first base of the
+    /// window, so it escapes; residue 316 ends on 948 and does not.
+    ///
+    /// This is the pair that pins the anchor base. Measuring from the codon's
+    /// first base instead would put residue 317 at CDS 949, 52 nt from the
+    /// junction, and predict NMD for a codon the guideline places inside the
+    /// escape window.
     #[test]
-    fn resolve_ptc_boundary_is_strictly_greater_than_50() {
+    fn resolve_ptc_boundary_is_the_3prime_most_base_of_the_codon() {
         let tx = plus_strand_coding();
         let idx = build_index(&tx);
         // No length change, so the junction stays at 1001.
-        // Residue 318 -> CDS 952; distance 49 -> escape.
+        // Residue 317 -> last base CDS 951; distance 50, not > 50 -> escape.
         assert!(matches!(
-            resolve_ptc(PtcSite::Residue(318), &neutral_edit(951), &idx),
+            resolve_ptc(PtcSite::Residue(317), &neutral_edit(948), &idx),
             PtcStatus::At {
                 nmd_at_ptc: false,
                 ..
             }
         ));
-        // Residue 317 -> CDS 949; distance 52 -> NMD.
+        // Residue 316 -> last base CDS 948; distance 53 -> NMD.
         assert!(matches!(
-            resolve_ptc(PtcSite::Residue(317), &neutral_edit(948), &idx),
+            resolve_ptc(PtcSite::Residue(316), &neutral_edit(945), &idx),
             PtcStatus::At {
                 nmd_at_ptc: true,
                 ..
@@ -391,6 +526,81 @@ mod tests {
 
     #[test]
     fn resolve_ptc_single_exon_never_predicts_nmd() {
+        let tx = single_exon_coding();
+        let idx = build_index(&tx);
+        assert_eq!(
+            resolve_ptc(PtcSite::Residue(5), &neutral_edit(12), &idx),
+            PtcStatus::At {
+                protein_position: 5,
+                nmd_at_ptc: false,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_ptc_minus_strand() {
+        // minus_strand_coding(): CDS segments [1500, 2000, 1000],
+        // cumulative_cds = [0, 1500, 3500, 4500] -> last junction at 3501.
+        // The projection is pure CDS space, so strand does not enter it --
+        // this pins that, since every other resolve_ptc test is plus-strand.
+        let tx = minus_strand_coding();
+        let idx = build_index(&tx);
+
+        // Residue 100 -> last base CDS 300; distance 3201 -> NMD.
+        assert_eq!(
+            resolve_ptc(PtcSite::Residue(100), &neutral_edit(297), &idx),
+            PtcStatus::At {
+                protein_position: 100,
+                nmd_at_ptc: true,
+            }
+        );
+        // Residue 1200 -> last base CDS 3600, past the junction -> escape.
+        assert_eq!(
+            resolve_ptc(PtcSite::Residue(1200), &neutral_edit(3597), &idx),
+            PtcStatus::At {
+                protein_position: 1200,
+                nmd_at_ptc: false,
+            }
+        );
+        // An upstream deletion drags the junction back with it: a 300 bp
+        // deletion at CDS offset 3000 puts the junction at 3201, leaving the
+        // codon ending at alt CDS 3183 only 18 nt upstream -> escape.
+        let edit = CdsEdit {
+            start: 3000,
+            del_len: 300,
+            ins_len: 0,
+        };
+        assert_eq!(
+            resolve_ptc(PtcSite::Residue(1061), &edit, &idx),
+            PtcStatus::At {
+                protein_position: 1061,
+                nmd_at_ptc: false,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_ptc_withholds_when_junction_is_inside_the_edit() {
+        let tx = plus_strand_coding();
+        let idx = build_index(&tx);
+        // The deletion spans CDS 951..1050, swallowing the junction at 1001.
+        // That junction has no position in the alternate transcript, so no
+        // verdict is available and the codon position must not be reported
+        // with a guessed one.
+        let edit = CdsEdit {
+            start: 950,
+            del_len: 100,
+            ins_len: 0,
+        };
+        assert_eq!(
+            resolve_ptc(PtcSite::Residue(318), &edit, &idx),
+            PtcStatus::Indeterminate
+        );
+    }
+
+    #[test]
+    fn resolve_ptc_reports_escape_for_an_intronless_transcript() {
+        // Absent (no junction) is a real answer, unlike Unknown.
         let tx = single_exon_coding();
         let idx = build_index(&tx);
         assert_eq!(
