@@ -284,6 +284,18 @@ truth.
 
 ## Known edge cases
 
+- **A deletion spanning a CDS/UTR boundary is not a frameshift.** VEP's
+  `frameshift` predicate opens with `return 0 unless defined $bvfo->cds_start
+  && defined $bvfo->cds_end`, so a deletion that begins in the 5'UTR or runs
+  into the 3'UTR never draws `frameshift_variant` — however many CDS bases it
+  removes. This crate replicates that on both ends: `{5_prime_UTR_variant,
+  start_lost}` at the 5' boundary and `{stop_lost, 3_prime_UTR_variant}` at the
+  3'. Neither result carries an NMD prediction or a termination codon, since
+  the reading frame is undefined. A deletion beginning at CDS offset 1 or 2
+  leaves `cds_start` defined and does draw `frameshift_variant` alongside
+  `start_lost`. Still divergent on these variants: `hgvs_p` (VEP emits
+  `p.Met1_?5`-style range notation, this crate emits nothing) and
+  `protein_start` (VEP `None`, this crate `Some(1)`).
 - **NMD is measured at the variant site, not the termination codon.**
   `predicts_nmd` applies the 50-nucleotide rule to the variant's own CDS
   position, for VEP `NMD.pm` parity. For a frameshift the termination

@@ -72,14 +72,21 @@ For releases before `0.5.0`, see the git history.
   sites in this crate already did. Two rows in the GRCh38 ClinVar release:
   `HRAS` `NM_005343.4` p.Ser189del and `USH1C` `NM_005709.4` p.Phe552del, both
   deletions of the protein's final residue.
-- A boundary-spanning deletion that removes part of the initiator codon now
-  reports `start_lost` alongside `frameshift_variant`, emits `p.Met1?`, and
-  withholds both the NMD prediction and the termination codon. It previously
-  named a downstream termination codon and asserted NMD against a reading frame
-  that no longer exists. VEP fires `start_lost` and `frameshift` independently
-  here (`VariationEffect.pm::start_lost` via `_ins_del_start_altered`), which
-  the pure-CDS path in this crate already matched. 41 rows in the GRCh38
-  ClinVar release.
+- A deletion spanning the 5'UTR/CDS boundary into the initiator codon now
+  reports `{5_prime_UTR_variant, start_lost}` regardless of how many CDS bases
+  it removes, and no longer names a termination codon or predicts NMD against a
+  reading frame that no longer exists. Two things were wrong: a 1-2 base
+  deletion took the frameshift path and asserted a downstream PTC (41 rows),
+  and the `5_prime_UTR_variant` term was missing throughout (190 rows). VEP
+  withholds `frameshift_variant` on this geometry however long the deletion —
+  its `frameshift` predicate short-circuits on the undefined `cds_start`
+  (`VariationEffect.pm::frameshift`), the same short-circuit this crate already
+  replicated at the 3' end for `stop_lost`. Verified against recorded VEP
+  output for seven such variants, e.g. `ALPL` `NM_000478.6`
+  chr1:21554077 `GCACCATGATTT>G`, which removes 7 CDS bases and is still not a
+  frameshift to VEP. A deletion beginning at CDS offset 1 or 2 leaves
+  `cds_start` defined and does draw both terms; that case keeps the
+  pure-CDS-path treatment.
 
 ### Migration
 
