@@ -176,10 +176,8 @@ fn apply_protein_3prime_rule(ref_protein: &[u8], del_len: usize, initial_pos: us
 /// counted in the return value (i.e., if the 8th codon is a stop, returns
 /// `Some(8)`).
 fn scan_for_stop_codon(seq: &[u8], is_mito: bool) -> Option<u32> {
-    for (i, codon_bytes) in seq.chunks_exact(3).enumerate() {
-        // SAFETY: chunks_exact(3) guarantees exactly 3 bytes.
-        let codon: [u8; 3] = [codon_bytes[0], codon_bytes[1], codon_bytes[2]];
-        let aa = translate_codon_for_transcript(&codon, is_mito);
+    for (i, codon) in seq.as_chunks::<3>().0.iter().enumerate() {
+        let aa = translate_codon_for_transcript(codon, is_mito);
         if aa == b'*' {
             return Some(i as u32 + 1);
         }

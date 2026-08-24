@@ -395,10 +395,7 @@ pub fn translate_sequence(
         )));
     }
     let mut aas = Vec::with_capacity(seq.len() / 3);
-    for codon_bytes in seq.chunks_exact(3) {
-        let codon: &[u8; 3] = codon_bytes
-            .try_into()
-            .expect("chunks_exact(3) always yields a 3-byte slice");
+    for codon in seq.as_chunks::<3>().0 {
         aas.push(translate_codon_for_transcript(codon, is_mitochondrial));
     }
     Ok(aas)
