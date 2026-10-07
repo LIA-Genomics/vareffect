@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Args;
 use console::style;
+use vareffect::transcript::TRANSCRIPT_STORE_FORMAT_VERSION;
+use vareffect::{TranscriptStore, VarEffectError};
 
 use crate::common::format_size;
 use crate::config;
@@ -79,16 +81,6 @@ fn print_result(result: &CheckResult, quiet: bool) {
 fn check_file_readable(path: &Path) -> Result<()> {
     File::open(path).with_context(|| format!("{}", path.display()))?;
     Ok(())
-}
-
-/// Read the `record_count` field from a `.manifest.json` sidecar.
-///
-/// Returns `None` if the manifest does not exist or cannot be parsed.
-fn read_manifest_record_count(bin_path: &Path) -> Option<u64> {
-    let manifest_path = bin_path.with_extension("manifest.json");
-    let content = fs::read_to_string(&manifest_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    json.get("record_count")?.as_u64()
 }
 
 /// Run the `vareffect check` subcommand.
@@ -190,21 +182,28 @@ pub fn run(args: &CheckArgs) -> Result<bool> {
             }
         }
 
-        // C5: Transcript DB exists and is readable.
+        // C5: Transcript DB loads exactly as `annotate` would load it.
         let transcript_path = output_dir.join("transcript_models.bin");
-        match check_file_readable(&transcript_path) {
-            Ok(()) => {
-                let count_str = read_manifest_record_count(&transcript_path)
-                    .map(|n| format!(" ({n} transcripts)"))
-                    .unwrap_or_default();
+        match TranscriptStore::load_from_path(&transcript_path) {
+            Ok(store) => {
                 results.push(CheckResult::pass(format!(
-                    "Transcript DB: {}{count_str}",
+                    "Transcript DB: {} (format version {TRANSCRIPT_STORE_FORMAT_VERSION}, \
+                     {} transcripts)",
+                    transcript_path.display(),
+                    store.len(),
+                )));
+            }
+            Err(VarEffectError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                results.push(CheckResult::fail(format!(
+                    "Transcript DB not found: {}",
                     transcript_path.display(),
                 )));
             }
-            Err(_) => {
+            Err(error) => {
                 results.push(CheckResult::fail(format!(
-                    "Transcript DB not found: {}",
+                    "Transcript DB {}: {error}",
                     transcript_path.display(),
                 )));
             }
@@ -323,7 +322,7 @@ output_dir = "{output_dir}"
         // Create dummy data files.
         fs::write(data_dir.join("GRCh38.bin"), b"genome").unwrap();
         fs::write(data_dir.join("GRCh38.bin.idx"), b"index").unwrap();
-        fs::write(data_dir.join("transcript_models.bin"), b"transcripts").unwrap();
+        fs::write(data_dir.join("transcript_models.bin"), versioned_store()).unwrap();
 
         let config_path = write_test_config(tmp.path(), &data_dir.display().to_string());
 
@@ -335,29 +334,59 @@ output_dir = "{output_dir}"
         assert!(result);
     }
 
-    #[test]
-    fn manifest_record_count_read() {
-        let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
-        fs::write(&bin_path, b"data").unwrap();
-
-        let manifest = serde_json::json!({
-            "store_name": "transcript_models",
-            "record_count": 1234,
-        });
-        fs::write(
-            tmp.path().join("transcript_models.manifest.json"),
-            serde_json::to_string(&manifest).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(read_manifest_record_count(&bin_path), Some(1234));
+    /// A complete one-transcript store as `vareffect setup` writes it.
+    fn versioned_store() -> Vec<u8> {
+        let transcript = vareffect::TranscriptModel {
+            accession: "NM_000001.1".into(),
+            protein_accession: None,
+            gene_symbol: "FAKE1".into(),
+            hgnc_id: None,
+            ensembl_accession: None,
+            chrom: "chr1".into(),
+            strand: vareffect::Strand::Plus,
+            tx_start: 1_000,
+            tx_end: 2_000,
+            cds_genomic_start: None,
+            cds_genomic_end: None,
+            exons: vec![vareffect::Exon {
+                exon_number: 1,
+                genomic_start: 1_000,
+                genomic_end: 2_000,
+            }],
+            cds_segments: Vec::new(),
+            tier: vareffect::TranscriptTier::ManeSelect,
+            biotype: vareffect::Biotype::NonCodingRna,
+            exon_count: 1,
+        };
+        vareffect::encode_transcript_store(&[transcript]).expect("encode")
     }
 
     #[test]
-    fn manifest_record_count_missing_manifest() {
-        let tmp = TempDir::new().unwrap();
-        let bin_path = tmp.path().join("transcript_models.bin");
-        assert_eq!(read_manifest_record_count(&bin_path), None);
+    fn check_fails_for_unloadable_transcript_store() {
+        let header_only = versioned_store()[..12].to_vec();
+        let mut truncated = versioned_store();
+        truncated.truncate(truncated.len() - 3);
+        let cases: [(&str, Vec<u8>); 5] = [
+            ("unversioned", vec![0x91, 0xc0]),
+            ("truncated header", b"VEFX".to_vec()),
+            ("foreign", b"transcripts".to_vec()),
+            ("header only", header_only),
+            ("truncated payload", truncated),
+        ];
+        for (label, contents) in cases {
+            let tmp = TempDir::new().unwrap();
+            let data_dir = tmp.path().join("data");
+            fs::create_dir_all(&data_dir).unwrap();
+            fs::write(data_dir.join("GRCh38.bin"), b"genome").unwrap();
+            fs::write(data_dir.join("GRCh38.bin.idx"), b"index").unwrap();
+            fs::write(data_dir.join("transcript_models.bin"), contents).unwrap();
+            let config_path = write_test_config(tmp.path(), &data_dir.display().to_string());
+
+            let args = CheckArgs {
+                config: Some(config_path),
+                quiet: false,
+            };
+            assert!(!run(&args).expect("check should not error"), "{label}");
+        }
     }
 }

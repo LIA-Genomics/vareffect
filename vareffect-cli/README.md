@@ -92,7 +92,7 @@ After setup, `data/vareffect/` contains:
 | File | Purpose |
 |------|---------|
 | `GRCh38.bin` + `.idx` | Flat-binary genome + MessagePack contig index |
-| `transcript_models.bin` | MANE transcript models (MessagePack) |
+| `transcript_models.bin` | MANE transcript models (versioned store: 12-byte header + MessagePack) |
 | `patch_chrom_aliases.csv` | UCSC <-> RefSeq patch-contig mapping |
 
 ### Partial runs

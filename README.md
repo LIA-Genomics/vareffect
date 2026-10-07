@@ -54,7 +54,7 @@ Annotation runs on all logical cores by default (`--threads N` to limit). Output
 ```toml
 # Cargo.toml
 [dependencies]
-vareffect = "0.3"
+vareffect = "0.6"
 ```
 
 ```rust

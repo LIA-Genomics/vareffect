@@ -1,8 +1,10 @@
 //! Shared build utilities for store construction.
 //!
 //! Every store build produces three sidecar files:
-//! - `{name}.bin` -- MessagePack serialized data
-//! - `{name}.bin.sha256` -- hex-encoded SHA-256 of the .bin file
+//! - `{name}.bin` -- the store file (for the transcript store: a 12-byte
+//!   versioned header followed by MessagePack, see
+//!   [`vareffect::encode_transcript_store`])
+//! - `{name}.bin.sha256` -- hex-encoded SHA-256 of the whole .bin file
 //! - `{name}.manifest.json` -- build metadata (version, record count, etc.)
 
 use std::path::{Path, PathBuf};
@@ -10,8 +12,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
+use vareffect::TranscriptModel;
+use vareffect::transcript::{TRANSCRIPT_STORE_FORMAT_VERSION, TRANSCRIPT_STORE_HEADER_LEN};
 
 /// Metadata returned after a successful store build.
 #[derive(Debug)]
@@ -31,18 +34,35 @@ pub struct BuildOutput {
     pub source_file_sha256: Option<String>,
 }
 
+/// Provenance and format fields written into a store's manifest.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestFields {
+    /// Number of records in the store.
+    pub record_count: u64,
+    /// Upstream data version string (e.g. `"1.5"` for MANE v1.5).
+    pub source_version: String,
+    /// Original input filename.
+    pub source_file: String,
+    /// Hex SHA-256 of the raw input file, when known.
+    pub source_file_sha256: Option<String>,
+    /// Store file format version, for stores that carry a versioned header.
+    pub format_version: Option<u32>,
+    /// Hex SHA-256 of the payload after the header. It links builds whose
+    /// files differ only by the header: across the move from unversioned
+    /// stores to format version 1 the payload was untouched. Across later
+    /// format versions the link key is (`format_version`, `payload_sha256`),
+    /// since a version bump may change meaning without changing bytes.
+    pub payload_sha256: Option<String>,
+}
+
 /// Write the .bin file, compute SHA-256, and create sidecar files.
 ///
 /// # Arguments
 ///
 /// * `name` -- Store name used as the file stem (e.g. "transcript_models").
 /// * `output_dir` -- Directory to write files into (created if absent).
-/// * `data` -- Pre-serialized MessagePack bytes (`rmp_serde::to_vec_named()`).
-/// * `record_count` -- Number of records for the manifest.
-/// * `source_version` -- Upstream data version string.
-/// * `source_file` -- Original input filename for provenance.
-/// * `source_file_sha256` -- SHA-256 of the raw input file. Pass `None` for
-///   individual builder invocations where diffing is not needed.
+/// * `data` -- Complete store file contents.
+/// * `fields` -- Manifest provenance and format fields.
 ///
 /// # Returns
 ///
@@ -55,10 +75,7 @@ pub fn finalize_store(
     name: &str,
     output_dir: &Path,
     data: &[u8],
-    record_count: u64,
-    source_version: &str,
-    source_file: &str,
-    source_file_sha256: Option<&str>,
+    fields: &ManifestFields,
 ) -> Result<BuildOutput> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("creating output directory {}", output_dir.display()))?;
@@ -76,16 +93,22 @@ pub fn finalize_store(
     // 3. Write manifest
     let mut manifest = serde_json::json!({
         "store_name": name,
-        "source_version": source_version,
-        "source_file": source_file,
-        "record_count": record_count,
+        "source_version": fields.source_version,
+        "source_file": fields.source_file,
+        "record_count": fields.record_count,
         "bin_size_bytes": data.len(),
         "sha256": sha256,
         "built_at": Utc::now().to_rfc3339(),
         "built_by": format!("vareffect-cli {}", env!("CARGO_PKG_VERSION")),
     });
-    if let Some(src_sha) = source_file_sha256 {
-        manifest["source_file_sha256"] = serde_json::Value::String(src_sha.to_string());
+    if let Some(src_sha) = &fields.source_file_sha256 {
+        manifest["source_file_sha256"] = serde_json::Value::String(src_sha.clone());
+    }
+    if let Some(format_version) = fields.format_version {
+        manifest["format_version"] = serde_json::Value::from(format_version);
+    }
+    if let Some(payload_sha) = &fields.payload_sha256 {
+        manifest["payload_sha256"] = serde_json::Value::String(payload_sha.clone());
     }
     let manifest_path = output_dir.join(format!("{name}.manifest.json"));
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
@@ -94,9 +117,9 @@ pub fn finalize_store(
     Ok(BuildOutput {
         store_path: bin_path,
         sha256,
-        record_count,
-        source_version: source_version.to_string(),
-        source_file_sha256: source_file_sha256.map(String::from),
+        record_count: fields.record_count,
+        source_version: fields.source_version.clone(),
+        source_file_sha256: fields.source_file_sha256.clone(),
     })
 }
 
@@ -119,54 +142,90 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Serialize a store to MessagePack and write sidecar files.
+/// Stream a file through SHA-256 without holding it in memory.
 ///
-/// Combines `rmp_serde::to_vec_named`, source filename extraction, and
-/// [`finalize_store`] into a single call.
+/// # Arguments
+///
+/// * `path` -- File to hash.
+///
+/// # Returns
+///
+/// The hex-encoded digest.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read.
+fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening {} to checksum it", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("checksumming {}", path.display()));
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Encode transcript models as a versioned store and write its sidecar files.
+///
+/// Encodes through [`vareffect::encode_transcript_store`], so the builder and
+/// the library's reader share one format implementation. The manifest records
+/// the format version, the payload SHA-256 and the source file's SHA-256.
 ///
 /// # Arguments
 ///
 /// * `name` -- Store name used as the file stem (e.g. `"transcript_models"`).
-/// * `store` -- Any `Serialize`-able store struct.
-/// * `record_count` -- Number of records for the manifest.
-/// * `input` -- Original source file path (filename extracted for provenance).
+/// * `transcripts` -- The models to store.
+/// * `input` -- Original source file path (name and SHA-256 recorded for
+///   provenance).
 /// * `output_dir` -- Directory to write files into.
 /// * `version` -- Upstream data version string.
 ///
 /// # Returns
 ///
-/// Tuple of ([`BuildOutput`], serialized byte count).
+/// Tuple of ([`BuildOutput`], store file size in bytes).
 ///
 /// # Errors
 ///
-/// Returns an error if serialization or file I/O fails.
-pub(crate) fn serialize_and_finalize(
+/// Returns an error if `transcripts` is empty, encoding fails, or the source
+/// file or output files cannot be read or written.
+pub(crate) fn write_transcript_store(
     name: &str,
-    store: &impl Serialize,
-    record_count: u64,
+    transcripts: &[TranscriptModel],
     input: &Path,
     output_dir: &Path,
     version: &str,
 ) -> Result<(BuildOutput, usize)> {
-    let data =
-        rmp_serde::to_vec_named(store).with_context(|| format!("serializing {name} store"))?;
-    let data_len = data.len();
-
-    let source_file = input
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let output = finalize_store(
-        name,
-        output_dir,
-        &data,
-        record_count,
-        version,
-        &source_file,
-        None,
-    )?;
-    Ok((output, data_len))
+    let data = vareffect::encode_transcript_store(transcripts)
+        .with_context(|| format!("encoding {name} store"))?;
+    let source_sha256 = sha256_file(input)?;
+    let fields = ManifestFields {
+        record_count: transcripts.len() as u64,
+        source_version: version.to_string(),
+        source_file: input
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        source_file_sha256: Some(source_sha256),
+        format_version: Some(TRANSCRIPT_STORE_FORMAT_VERSION),
+        payload_sha256: Some(hex::encode(Sha256::digest(
+            &data[TRANSCRIPT_STORE_HEADER_LEN..],
+        ))),
+    };
+    let output = finalize_store(name, output_dir, &data, &fields)?;
+    Ok((output, data.len()))
 }
 
 /// Print the summary table header for build output.

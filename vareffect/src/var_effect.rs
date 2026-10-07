@@ -61,16 +61,19 @@ impl VarEffect {
 
     /// Load both stores from disk and assemble a `VarEffect`.
     ///
-    /// `transcript_models_path` should point at the MessagePack file produced
-    /// by your transcript build pipeline (typically `transcript_models.bin`).
-    /// `genome_path` should point at the flat-binary genome with its
-    /// `.bin.idx` sidecar (typically `GRCh38.bin` + `GRCh38.bin.idx`).
+    /// `transcript_models_path` should point at a versioned transcript store
+    /// written by `vareffect setup` or [`crate::encode_transcript_store`]
+    /// (typically `transcript_models.bin`). `genome_path` should point at the
+    /// flat-binary genome with its `.bin.idx` sidecar (typically `GRCh38.bin`
+    /// with `GRCh38.bin.idx`).
     ///
     /// # Errors
     ///
     /// Propagates the union of errors from [`TranscriptStore::load_from_path`]
-    /// and [`FastaReader::open`] — file I/O failures, malformed payloads, or
-    /// version mismatches.
+    /// and [`FastaReader::open`] — file I/O failures, malformed payloads, an
+    /// unsupported store format ([`VarEffectError::UnsupportedStoreFormat`],
+    /// for example a store written before vareffect 0.6), an empty store
+    /// ([`VarEffectError::EmptyStore`]), or a genome index version mismatch.
     pub fn open(transcript_models_path: &Path, genome_path: &Path) -> Result<Self, VarEffectError> {
         let transcripts = TranscriptStore::load_from_path(transcript_models_path)?;
         let fasta = FastaReader::open(genome_path)?;
