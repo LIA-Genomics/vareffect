@@ -58,7 +58,7 @@ These clauses state required behavior that current code does not yet meet. Each 
 
 - **V-3 (VCF output).** An annotation error, REF mismatch or caught panic passes the VCF line through without `CSQ`, byte-identical to an intergenic variant; only stderr counters differ (`vareffect-cli/src/annotate.rs`, module docs and the `catch_unwind` branch).
 - **V-3 / V-9 (structural variants).** `annotate_interval`, `annotate_breakend` and `annotate_sv_insertion` do not check that the chromosome exists, and the overlap query returns an empty result for an unknown chromosome, so an unrecognized name yields the documented "trustworthy" empty result. Fixing it changes contract meaning (V-6).
-- **V-5 (load and exclusions).** The transcript store is a bare MessagePack vector with no format version, and the library never reads its checksum or manifest; only the genome index carries a version. The genome build writes no manifest or checksum. The GFF3 builder skips malformed rows (short rows, unparsable coordinates, unknown strand, genes without an ID) without counting them.
+- **V-5 (load and exclusions).** The library never reads the transcript store's checksum or manifest (the store's format version is checked since 0.6.0). The genome build writes no manifest or checksum. The GFF3 builder skips malformed rows (short rows, unparsable coordinates, unknown strand, genes without an ID) without counting them.
 - **V-2 (platform), open.** Per-transcript result order follows the interval tree's callback order, whose callback type differs by SIMD backend; whether order is identical across platforms is unverified.
 
 ## The standing human-authority limit

@@ -1,6 +1,7 @@
 //! In-memory transcript store with per-chromosome interval tree indexing.
 //!
-//! The store is built from a MessagePack-serialized `Vec<TranscriptModel>`
+//! The store is loaded from a versioned store file (a 12-byte header followed
+//! by a MessagePack `Vec<TranscriptModel>`, see [`encode_transcript_store`])
 //! produced offline by `vareffect-cli`. At load time it constructs:
 //!
 //! 1. A shared `Arc<[TranscriptModel]>` slice for O(1) index lookup and cheap
@@ -21,12 +22,19 @@ use coitrees::{COITree, IntervalNode, IntervalTree};
 
 use crate::error::VarEffectError;
 use crate::locate::LocateIndex;
+use crate::store_format::decode_transcript_store;
 use crate::types::TranscriptModel;
+
+pub use crate::store_format::{
+    StoreFormat, TRANSCRIPT_STORE_FORMAT_VERSION, TRANSCRIPT_STORE_HEADER_LEN,
+    encode_transcript_store, store_format,
+};
 
 /// In-memory transcript model store indexed by genomic interval and by
 /// accession.
 ///
-/// Construct via [`TranscriptStore::load_from_path`] (production) or
+/// Construct via [`TranscriptStore::load_from_path`] (production),
+/// [`TranscriptStore::from_bytes`] (a store file already in memory) or
 /// [`TranscriptStore::from_transcripts`] (tests and build-time callers).
 ///
 /// `Debug` is implemented manually (the `COITree` field does not derive
@@ -54,23 +62,50 @@ pub struct TranscriptStore {
 }
 
 impl TranscriptStore {
-    /// Load and index a MessagePack-serialized `Vec<TranscriptModel>` from
-    /// disk.
+    /// Load and index a versioned transcript store file from disk.
+    ///
+    /// Reads the file once and decodes it with [`TranscriptStore::from_bytes`].
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to a `transcript_models.bin` written by `vareffect setup`
+    ///   or [`encode_transcript_store`]
     ///
     /// # Errors
     ///
     /// * [`VarEffectError::Io`] if the file cannot be read.
-    /// * [`VarEffectError::Deserialize`] if the MessagePack payload is
-    ///   malformed or the wrong type.
-    /// * [`VarEffectError::Malformed`] if any record violates a coordinate
-    ///   invariant (`tx_end <= tx_start` or `tx_end > i32::MAX`).
+    /// * Every error of [`TranscriptStore::from_bytes`].
     pub fn load_from_path(path: &Path) -> Result<Self, VarEffectError> {
         let bytes = std::fs::read(path).map_err(|source| VarEffectError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let transcripts: Vec<TranscriptModel> = rmp_serde::from_slice(&bytes)?;
-        Self::try_from_transcripts(transcripts)
+        Self::from_bytes(&bytes)
+    }
+
+    /// Decode and index a versioned transcript store held in memory.
+    ///
+    /// For callers that need the exact bytes they loaded, for example to hash
+    /// them for provenance, and so read the file themselves.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Complete store file contents
+    ///
+    /// # Errors
+    ///
+    /// * [`VarEffectError::UnsupportedStoreFormat`] if the header is missing,
+    ///   truncated or carries a version other than
+    ///   [`TRANSCRIPT_STORE_FORMAT_VERSION`]; the remedy is to rebuild the
+    ///   store with `vareffect setup`.
+    /// * [`VarEffectError::Deserialize`] if the MessagePack payload is
+    ///   malformed or the wrong type.
+    /// * [`VarEffectError::Malformed`] if bytes follow the payload, or any
+    ///   record violates a coordinate invariant (`tx_end <= tx_start`,
+    ///   `tx_end > i32::MAX`, duplicate accession).
+    /// * [`VarEffectError::EmptyStore`] if the store holds no transcripts.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, VarEffectError> {
+        Self::try_from_transcripts(decode_transcript_store(bytes)?)
     }
 
     /// Build a store from an owned `Vec<TranscriptModel>`.
@@ -532,9 +567,8 @@ mod tests {
             minus_strand_5_exon(),
             noncoding_1_exon(),
         ];
-        let bytes = rmp_serde::to_vec_named(&original).expect("serialize");
-        let decoded: Vec<TranscriptModel> = rmp_serde::from_slice(&bytes).expect("deserialize");
-        let store = TranscriptStore::from_transcripts(decoded);
+        let bytes = encode_transcript_store(&original).expect("encode");
+        let store = TranscriptStore::from_bytes(&bytes).expect("decode");
 
         let (tx, _) = store.get_by_accession("NM_000001.1").unwrap();
         assert_eq!(tx.strand, Strand::Plus);
@@ -610,6 +644,31 @@ mod tests {
             Err(VarEffectError::Malformed(msg)) => assert!(msg.contains("duplicate")),
             Err(other) => panic!("expected Malformed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_from_path_reads_a_versioned_store_file() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let bytes = encode_transcript_store(&[plus_strand_3_exon()]).expect("encode");
+        std::fs::write(file.path(), &bytes).expect("write");
+        let store = TranscriptStore::load_from_path(file.path()).expect("load");
+        assert!(store.get_by_accession("NM_000001.1").is_some());
+    }
+
+    #[test]
+    fn load_from_path_refuses_an_unversioned_store_file() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let legacy = rmp_serde::to_vec_named(&vec![plus_strand_3_exon()]).expect("encode");
+        std::fs::write(file.path(), &legacy).expect("write");
+        let error = TranscriptStore::load_from_path(file.path()).expect_err("must refuse");
+        assert!(matches!(
+            error,
+            VarEffectError::UnsupportedStoreFormat {
+                found: StoreFormat::Unversioned,
+                expected: TRANSCRIPT_STORE_FORMAT_VERSION,
+            }
+        ));
+        assert!(error.to_string().contains("vareffect setup"), "{error}");
     }
 
     #[test]

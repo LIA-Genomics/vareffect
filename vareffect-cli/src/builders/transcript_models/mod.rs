@@ -3,8 +3,8 @@
 //!
 //! Parses NCBI's MANE GFF3 release
 //! (`MANE.GRCh38.vX.X.refseq_genomic.gff.gz`) into
-//! `Vec<vareffect::TranscriptModel>` and writes it as MessagePack via the
-//! shared [`serialize_and_finalize`] helper. Every record carries full
+//! `Vec<vareffect::TranscriptModel>` and writes it as a versioned store file via
+//! the shared [`write_transcript_store`] helper. Every record carries full
 //! exon structure, CDS bounds, protein accessions, Ensembl cross-refs,
 //! biotype, and MANE tier, in 0-based half-open (BED/UCSC) coordinates.
 //!
@@ -49,7 +49,7 @@ use gff3_attrs::{
     extract_protein_id_from_cds_attrs, extract_refseq_acc_from_dbxref, extract_transcript_from_id,
 };
 
-use crate::common::{BuildOutput, serialize_and_finalize};
+use crate::common::{BuildOutput, write_transcript_store};
 
 /// GFF3 feature types that carry the MANE tag on MANE Select / MANE Plus
 /// Clinical transcripts in release v1.5. Any admitted transcript whose
@@ -87,14 +87,16 @@ const KNOWN_TRANSCRIPT_FEATURE_TYPES: &[&str] = &[
 ///
 /// # Returns
 ///
-/// Tuple of ([`BuildOutput`], serialized byte count).
+/// Tuple of ([`BuildOutput`], store file size in bytes).
 ///
 /// # Errors
 ///
 /// Returns an error if the GFF3 cannot be read, the summary TSV
 /// cross-validation fails, the patch-alias CSV cannot be read, or the
 /// output files cannot be written. Also errors if `summary_input` is
-/// provided without a matching `patch_aliases_input`.
+/// provided without a matching `patch_aliases_input`, or if the GFF3 admits
+/// no transcripts (no row tagged `MANE Select` / `MANE Plus Clinical`), so an
+/// empty store is never written.
 pub fn build(
     input: &Path,
     summary_input: Option<&Path>,
@@ -103,6 +105,13 @@ pub fn build(
     version: &str,
 ) -> Result<(BuildOutput, usize)> {
     let transcripts = parse_gff3(input)?;
+    if transcripts.is_empty() {
+        bail!(
+            "no transcripts admitted from {}: only rows tagged `MANE Select` or \
+             `MANE Plus Clinical` are kept, so check that the input is a MANE GFF3",
+            input.display()
+        );
+    }
 
     if let Some(summary_path) = summary_input {
         let aliases_path = patch_aliases_input.ok_or_else(|| {
@@ -126,11 +135,9 @@ pub fn build(
         })?;
     }
 
-    let count = transcripts.len() as u64;
-    serialize_and_finalize(
+    write_transcript_store(
         "transcript_models",
         &transcripts,
-        count,
         input,
         output_dir,
         version,
@@ -863,6 +870,54 @@ chr1\tNCBI\tgene\t10\t100\t.\t+\t.\tID=gene-OTHER;Name=OTHER
 chr1\tNCBI\tlnc_RNA\t10\t100\t.\t+\t.\tID=rna-XR_999.1;Parent=gene-OTHER;Name=XR_999.1
 chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
 ";
+
+    #[test]
+    fn build_writes_a_versioned_store_with_provenance() {
+        use sha2::{Digest, Sha256};
+
+        let input = write_temp(MINI_GFF);
+        let output = tempfile::tempdir().expect("tempdir");
+        let (built, size) = build(input.path(), None, None, output.path(), "1.5").expect("build");
+
+        let bin_path = output.path().join("transcript_models.bin");
+        let bin = std::fs::read(&bin_path).expect("read bin");
+        assert_eq!(size, bin.len());
+        assert_eq!(
+            &bin[..vareffect::transcript::TRANSCRIPT_STORE_HEADER_LEN],
+            b"VEFXTXM\0\x01\x00\x00\x00"
+        );
+        let store = vareffect::TranscriptStore::load_from_path(&bin_path).expect("load");
+        assert_eq!(store.len() as u64, built.record_count);
+
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(output.path().join("transcript_models.manifest.json"))
+                .expect("read manifest"),
+        )
+        .expect("parse manifest");
+        let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+        assert_eq!(manifest["sha256"], sha(&bin));
+        assert_eq!(manifest["payload_sha256"], sha(&bin[12..]));
+        assert_eq!(manifest["format_version"], 1);
+        assert_eq!(
+            manifest["source_file_sha256"],
+            sha(&std::fs::read(input.path()).expect("read input"))
+        );
+    }
+
+    #[test]
+    fn build_refuses_a_gff3_that_admits_no_transcripts() {
+        let input = write_temp(
+            "chr1\tNCBI\tgene\t10\t100\t.\t+\t.\tID=gene-OTHER;Name=OTHER\n\
+             chr1\tNCBI\tlnc_RNA\t10\t100\t.\t+\t.\tID=rna-XR_999.1;Parent=gene-OTHER;Name=XR_999.1\n",
+        );
+        let output = tempfile::tempdir().expect("tempdir");
+        let error = build(input.path(), None, None, output.path(), "1.5").expect_err("empty");
+        assert!(
+            error.to_string().contains("no transcripts admitted"),
+            "{error}"
+        );
+        assert!(!output.path().join("transcript_models.bin").exists());
+    }
 
     #[test]
     fn parses_mane_select_with_reversed_exons_and_cds() {

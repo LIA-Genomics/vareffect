@@ -30,7 +30,7 @@ provisions the reference data:
 ```toml
 # Cargo.toml
 [dependencies]
-vareffect = "0.3"
+vareffect = "0.6"
 ```
 
 ```bash
@@ -207,8 +207,12 @@ intentional divergences from VEP and features that are not yet implemented.
 
 `vareffect` does not ship reference data. You provide two files at runtime:
 
-1. **`transcript_models.bin`** — a MessagePack-serialised
-   `Vec<TranscriptModel>` built from a MANE / RefSeq Select GFF3.
+1. **`transcript_models.bin`** — a versioned store file: a 12-byte header
+   (magic plus format version) followed by a MessagePack
+   `Vec<TranscriptModel>`, built from a MANE / RefSeq Select GFF3. A store
+   from another format version, including one written before versioning
+   (vareffect 0.5 and earlier), is refused at load time; rebuild it with
+   `vareffect setup`.
 2. **`GRCh38.bin`** (or whatever build you use) — a flat uppercase-IUPAC
    binary plus a `.bin.idx` MessagePack sidecar produced by the builder.
 
@@ -252,7 +256,7 @@ After `vareffect setup` finishes, you have the layout the library expects:
 data/vareffect/
   GRCh38.bin               # flat-binary reference genome
   GRCh38.bin.idx           # MessagePack contig index
-  transcript_models.bin    # serialised Vec<TranscriptModel>
+  transcript_models.bin    # versioned transcript store
   patch_chrom_aliases.csv  # UCSC <-> RefSeq patch-contig map
 ```
 
@@ -283,9 +287,25 @@ write_genome_binary(
 ```
 
 Building the transcript store by hand means producing a
-`Vec<vareffect::TranscriptModel>` and MessagePack-serialising it with
-`rmp-serde`; see `crates/vareffect-cli/src/builders/` in the source tree
-for a worked example.
+`Vec<vareffect::TranscriptModel>` and writing it with
+[`encode_transcript_store`], which adds the versioned header the loader
+requires; see `vareffect-cli/src/builders/transcript_models/` in the source
+tree for a worked example.
+
+```rust,no_run
+use std::path::Path;
+use vareffect::{TranscriptModel, TranscriptStore, encode_transcript_store};
+
+# fn build_models() -> Vec<TranscriptModel> { unimplemented!() }
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+// At least one model: an empty store is refused (`VarEffectError::EmptyStore`).
+let models: Vec<TranscriptModel> = build_models();
+let bytes = encode_transcript_store(&models)?;
+std::fs::write("out/transcript_models.bin", &bytes)?;
+let store = TranscriptStore::load_from_path(Path::new("out/transcript_models.bin"))?;
+# Ok(())
+# }
+```
 
 ## HGVS reverse resolution
 

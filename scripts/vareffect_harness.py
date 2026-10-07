@@ -75,7 +75,7 @@ DIVERGENCES = "vareffect/vep_divergences.md"
 STORE_PATHS = (
     "vareffect-cli/src/builders/", "vareffect-cli/src/setup.rs", "vareffect-cli/src/common.rs",
     "vareffect-cli/vareffect_build.toml", "vareffect/src/types.rs", "vareffect/src/transcript.rs", "vareffect/src/fasta.rs",
-    "vareffect/src/chrom.rs",
+    "vareffect/src/chrom.rs", "vareffect/src/store_format.rs",
 )
 # Public contract surfaces (V-6): every library module re-exports or feeds public types, and the CSQ layout is
 # the CLI's output contract.

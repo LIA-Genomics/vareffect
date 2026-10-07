@@ -131,6 +131,7 @@ pub mod hgvs_reverse;
 mod left_align;
 pub mod locate;
 mod normalize;
+mod store_format;
 pub mod transcript;
 pub mod types;
 mod var_effect;
@@ -150,7 +151,7 @@ pub use locate::{
     IndelLocation, IndelRegion, LocateIndex, SpliceOverlapDetail, SpliceSide, VariantLocation,
     locate_indel, locate_variant,
 };
-pub use transcript::TranscriptStore;
+pub use transcript::{StoreFormat, TranscriptStore, encode_transcript_store};
 pub use types::{
     Biotype, CdsSegment, Exon, GenomicVariant, Strand, TranscriptModel, TranscriptTier,
 };

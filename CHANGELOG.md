@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 For releases before `0.5.0`, see the git history.
 
+## [0.6.0]
+
+### Added
+
+- A versioned transcript store format. `transcript_models.bin` now opens
+  with a 12-byte header (magic `VEFXTXM\0` plus a `u32` little-endian format
+  version) followed by the MessagePack `Vec<TranscriptModel>`. The version is
+  checked before the payload is decoded.
+- `TranscriptStore::from_bytes`, for callers that read the file themselves
+  (for example to hash exactly the bytes they load).
+  `TranscriptStore::load_from_path` now reads the file and calls it.
+- `encode_transcript_store`, the one supported way to write a store, and
+  `StoreFormat` (both re-exported at the crate root), plus
+  `transcript::{store_format, TRANSCRIPT_STORE_FORMAT_VERSION,
+  TRANSCRIPT_STORE_HEADER_LEN}`.
+- `VarEffectError::UnsupportedStoreFormat`, `VarEffectError::Serialize` and
+  `VarEffectError::EmptyStore`.
+- Store manifests record `format_version`, `payload_sha256` (SHA-256 of the
+  bytes after the header) and `source_file_sha256` (SHA-256 of the GFF3 the
+  store was built from).
+- `vareffect check` loads the transcript store the way `annotate` does and
+  reports its format version and record count, so an unversioned,
+  other-version, truncated or empty store fails the check.
+
+### Changed
+
+- **Breaking.** Stores written by vareffect 0.5 and earlier are refused with
+  `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`. Rebuild
+  them with `vareffect setup` (the transcript store rebuilds in seconds from
+  cached sources). A 0.5 reader given a 0.6 store fails at byte 0, so the CLI
+  and every library consumer upgrade together.
+- **Breaking.** The new `VarEffectError` variants break exhaustive matches on
+  the error type. The enum stays exhaustive on purpose, so downstream code is
+  told about every new failure mode at compile time.
+- **Breaking.** A store with no transcripts, or with bytes after the payload,
+  is an error at load time. The builder refuses a GFF3 that admits no
+  transcripts instead of writing an empty store, which would annotate every
+  variant as overlapping nothing.
+- The whole-file SHA-256 of a rebuilt store changes because of the header.
+  The models do not: for the MANE 1.5 GRCh38 store, `payload_sha256` equals
+  the 0.5 file's SHA-256 (`edff7c1416b2989a882186360c1782fefb33274edb6efe0441f5236a0ec38b84`).
+  To link provenance records across this upgrade, compute
+  `sha256(bytes[TRANSCRIPT_STORE_HEADER_LEN..])` over the bytes you loaded and
+  compare it with the 0.5 file SHA. That link holds only for this
+  header-only transition; across later format versions, key on
+  (`format_version`, `payload_sha256`).
+
 ## [0.5.0]
 
 ### Added

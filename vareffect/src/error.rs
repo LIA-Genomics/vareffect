@@ -25,6 +25,34 @@ pub enum VarEffectError {
     #[error("failed to deserialize transcript store: {0}")]
     Deserialize(#[from] rmp_serde::decode::Error),
 
+    /// Failed to encode transcript models as MessagePack
+    /// ([`crate::encode_transcript_store`]).
+    #[error("failed to serialize transcript store: {0}")]
+    Serialize(#[from] rmp_serde::encode::Error),
+
+    /// The transcript store file is not the format this version reads: it
+    /// predates format versioning, carries another version, has a truncated
+    /// header, or is not a store at all.
+    #[error(
+        "unsupported transcript store: found {found}, expected format version {expected}; \
+         rebuild it with `vareffect setup`"
+    )]
+    UnsupportedStoreFormat {
+        /// What the file's opening bytes say it is.
+        found: crate::StoreFormat,
+        /// The format version this build of vareffect reads.
+        expected: u32,
+    },
+
+    /// A transcript store holds no transcripts. An empty store would
+    /// annotate every variant as overlapping nothing, so
+    /// [`crate::encode_transcript_store`] refuses to write one and
+    /// [`crate::TranscriptStore::from_bytes`] refuses to decode one. Stores
+    /// built in memory with [`crate::TranscriptStore::try_from_transcripts`]
+    /// are not checked.
+    #[error("transcript store contains no transcripts")]
+    EmptyStore,
+
     /// The deserialized data violated an invariant (e.g. `tx_end <= tx_start`
     /// or a coordinate that exceeds `i32::MAX`). The inner string describes
     /// the offending record.
