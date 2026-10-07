@@ -26,6 +26,13 @@ jobs:
     env:
       RUSTDOCFLAGS: "-D warnings"
 
+  harness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/vareffect_harness.py check
+      - run: python3 -B scripts/test_vareffect_harness.py
+
   test-os:
     needs: check
     strategy:
