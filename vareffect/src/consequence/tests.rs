@@ -653,11 +653,14 @@ fn ref_mismatch_returns_error() {
 fn tp53_r248w() {
     let store_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .expect("workspace root")
         .join("data/vareffect/transcript_models.bin");
-    let store = crate::TranscriptStore::load_from_path(&store_path).unwrap();
+    let store = crate::TranscriptStore::load_from_path(&store_path).unwrap_or_else(|e| {
+        panic!(
+            "failed to load transcript store from {}: {e}",
+            store_path.display()
+        )
+    });
 
     let fasta_path = std::env::var("FASTA_PATH").expect("FASTA_PATH env var");
     let fasta = FastaReader::open(std::path::Path::new(&fasta_path)).unwrap();
@@ -667,12 +670,9 @@ fn tp53_r248w() {
         .expect("NM_000546.6 not found");
     let result = annotate_snv("chr17", 7_674_220, b'G', b'A', tx, idx, &fasta).unwrap();
 
-    assert!(
-        result.consequences.contains(&Consequence::MissenseVariant)
-            || result.consequences.contains(&Consequence::StopGained),
-        "unexpected consequences: {:?}",
-        result.consequences,
-    );
+    // VEP: NM_000546.6:c.742C>T, Cgg/Tgg, missense only (vep_concordance_snv.rs #1).
+    assert_eq!(result.consequences, vec![Consequence::MissenseVariant]);
+    assert_eq!(result.hgvs_p.as_deref(), Some("p.Arg248Trp"));
     assert_eq!(result.protein_start, Some(248));
 }
 

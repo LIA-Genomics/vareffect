@@ -1758,14 +1758,17 @@ mod tests {
 
     // -- Integration test helpers --------------------------------------------
 
+    /// Workspace root: the parent of this crate's manifest directory.
+    #[cfg(test)]
+    fn workspace_root() -> &'static std::path::Path {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+    }
+
     #[cfg(test)]
     fn load_store() -> TranscriptStore {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .expect("workspace root");
-        let path = workspace_root.join("data/vareffect/transcript_models.bin");
+        let path = workspace_root().join("data/vareffect/transcript_models.bin");
         TranscriptStore::load_from_path(&path).unwrap_or_else(|e| {
             panic!(
                 "failed to load transcript store from {}: {}",
@@ -1782,10 +1785,7 @@ mod tests {
         FastaReader::open_with_patch_aliases(
             std::path::Path::new(&path),
             Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .expect("workspace root")
+                workspace_root()
                     .join("data/vareffect/patch_chrom_aliases.csv")
                     .as_ref(),
             ),
