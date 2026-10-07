@@ -1,10 +1,17 @@
 /target
-.claude
+# Agent harness: the shared config under .claude/ is committed; local state is not.
+.claude/settings.local.json
+.claude/.review-cache/
+.claude/plans/
+.claude/worktrees/
+.vareffect-tasks/
+__pycache__/
 *.swp
 *.swo
 .DS_Store
 .idea/
-data/
+/data/
+vareffect/tests/data/store_accessions.txt
 # large concordance harness — per-run mismatch dump, never committed.
 # The ground-truth TSV in the same directory IS committed.
 *.log
