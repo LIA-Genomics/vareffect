@@ -1,0 +1,17 @@
+# Ensembl VEP REST release 116, GRCh38, fetched 2026-10-07, with numbers=1. Columns as vep_rest_wp1.tsv; insertions use region start = end + 1. Tool: tests/data/tools/vep_rows.py
+partial3_ins_5p_edge_2	2:46484424-46484423	-/GG	NM_001424184.1	inframe_insertion,incomplete_terminal_codon_variant,coding_sequence_variant	MODERATE	NM_001424184.1:c.657_658insGG	None	678	657	219	-/GG	-/X	3/3	None	-
+partial3_ins_5p_edge_3	2:46484424-46484423	-/GGG	NM_001424184.1	inframe_insertion,incomplete_terminal_codon_variant	MODERATE	NM_001424184.1:c.657_658insGGG	None	678	657	219	-/GGG	-/G	3/3	None	-
+partial3_ins_5p_edge_tga	2:46484424-46484423	-/TGA	NM_001424184.1	stop_gained,inframe_insertion,incomplete_terminal_codon_variant	HIGH	NM_001424184.1:c.658_659insGAT	NP_001411113.1:p.Ter220=	678	657	219	-/TGA	-/*	3/3	None	-
+partial3_ins_5p_edge_tag	2:46484424-46484423	-/TAG	NM_001424184.1	stop_gained,inframe_insertion,incomplete_terminal_codon_variant	HIGH	None	None	678	657	219	-/TAG	-/*	3/3	None	-
+partial3_ins_5p_edge_tgag	2:46484424-46484423	-/TGAG	NM_001424184.1	stop_gained,inframe_insertion,incomplete_terminal_codon_variant	HIGH	NM_001424184.1:c.658_659insGAGT	NP_001411113.1:p.Ter220delinsTer	678	657	219	-/TGAG	-/*	3/3	None	-
+minus_partial3_ins_5p_edge_2	1:233198969-233198968	-/CC	ENST00000518351	inframe_insertion,incomplete_terminal_codon_variant,coding_sequence_variant	MODERATE	ENST00000518351.2:c.543_544insGG	None	543	543	181	-/GG	-/X	5/5	None	cds_start_NF,cds_end_NF
+minus_partial3_ins_5p_edge_3	1:233198969-233198968	-/CCC	ENST00000518351	inframe_insertion,incomplete_terminal_codon_variant	MODERATE	ENST00000518351.2:c.543_544insGGG	None	543	543	181	-/GGG	-/G	5/5	None	cds_start_NF,cds_end_NF
+minus_partial3_ins_5p_edge_tag	1:233198969-233198968	-/CTA	ENST00000518351	stop_gained,inframe_insertion,incomplete_terminal_codon_variant	HIGH	ENST00000518351.2:c.543_544insTAG	None	543	543	181	-/TAG	-/*	5/5	None	cds_start_NF,cds_end_NF
+minus_partial3_ins_5p_edge_tgag	1:233198969-233198968	-/CTCA	ENST00000518351	stop_gained,inframe_insertion,incomplete_terminal_codon_variant	HIGH	ENST00000518351.2:c.543_544insTGAG	None	543	543	181	-/TGAG	-/*	5/5	None	cds_start_NF,cds_end_NF
+minus_ins_after_cds_no_utr_1	1:233198967-233198966	-/C	ENST00000518351	downstream_gene_variant	MODIFIER	None	None	None	None	None	None	None	None	None	cds_start_NF,cds_end_NF
+minus_ins_after_cds_no_utr_3	1:233198967-233198966	-/CCC	ENST00000518351	downstream_gene_variant	MODIFIER	None	None	None	None	None	None	None	None	None	cds_start_NF,cds_end_NF
+minus_ins_after_cds_utr_654733	3:197050600-197050599	-/C	ENST00000654733	3_prime_UTR_variant	MODIFIER	ENST00000654733.1:c.*1dup	None	2751	None	None	None	None	23/23	None	-
+minus_ins_after_cds_utr_428369	5:132213945-132213944	-/C	ENST00000428369	3_prime_UTR_variant	MODIFIER	ENST00000428369.7:c.440_*1insG	None	1205	None	None	None	None	5/15	None	-
+gap1_acceptor_window_del_9	1:151767212-151767214	CTC/-	ENST00000400999	inframe_deletion	MODERATE	ENST00000400999.7:c.218_220del	ENSP00000383784.3:p.Leu73del	284	217	73	CTC/-	L/-	2/6	None	-
+gap1_acceptor_window_del_14	1:151767207-151767209	CCT/-	ENST00000400999	inframe_deletion	MODERATE	ENST00000400999.7:c.212_214del	ENSP00000383784.3:p.Ser71del	279	212	71	tCCTgc/tgc	SC/C	2/6	None	-
+gap2_acceptor_window_del_9	3:44499311-44499313	TGG/-	ENST00000436261	inframe_deletion	MODERATE	ENST00000436261.7:c.1465_1467del	ENSP00000389841.2:p.His489del	1606	1464	488	gtCCAc/gtc	VH/V	4/5	None	-

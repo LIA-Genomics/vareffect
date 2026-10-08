@@ -322,20 +322,24 @@ pub fn aa_three_letter(one_letter: u8) -> &'static str {
 /// ```
 pub fn format_codons(ref_codon: &[u8; 3], alt_codon: &[u8; 3], changed_pos: u8) -> String {
     debug_assert!(changed_pos < 3, "codon position must be 0, 1, or 2");
-    let mut result = String::with_capacity(7); // "xxx/xxx"
-    for i in 0..3u8 {
-        if i == changed_pos {
-            result.push(ref_codon[i as usize] as char);
-        } else {
-            result.push((ref_codon[i as usize] as char).to_ascii_lowercase());
+    format_codon_bases(ref_codon, alt_codon, changed_pos)
+}
+
+/// [`format_codons`] for a codon of any length: the 1-2 bases of an
+/// incomplete terminal codon, which VEP prints as-is (`Ta/Aa`, `C/A`).
+pub(crate) fn format_codon_bases(ref_bases: &[u8], alt_bases: &[u8], changed_pos: u8) -> String {
+    let mut result = String::with_capacity(ref_bases.len() + alt_bases.len() + 1);
+    for bases in [ref_bases, alt_bases] {
+        if !result.is_empty() {
+            result.push('/');
         }
-    }
-    result.push('/');
-    for i in 0..3u8 {
-        if i == changed_pos {
-            result.push(alt_codon[i as usize] as char);
-        } else {
-            result.push((alt_codon[i as usize] as char).to_ascii_lowercase());
+        for (i, &base) in bases.iter().enumerate() {
+            let base = base as char;
+            if i == changed_pos as usize {
+                result.push(base);
+            } else {
+                result.push(base.to_ascii_lowercase());
+            }
         }
     }
     result
@@ -526,6 +530,15 @@ pub fn format_amino_acids_indel(ref_aas: &[u8], alt_aas: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_codon_bases_prints_partial_codons_as_vep_does() {
+        // VEP 116: NM_001424184.1 c.658T>A `Ta/Aa`, ENST00000379099.3
+        // c.925C>A `C/A`, ENST00000379099.3 c.3T>A `nnT/nnA`.
+        assert_eq!(super::format_codon_bases(b"TA", b"AA", 0), "Ta/Aa");
+        assert_eq!(super::format_codon_bases(b"C", b"A", 0), "C/A");
+        assert_eq!(super::format_codon_bases(b"NNT", b"NNA", 2), "nnT/nnA");
+    }
+
     use super::*;
 
     /// Verify every one of the 64 standard-code codons against the NCBI

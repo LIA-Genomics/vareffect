@@ -1,0 +1,19 @@
+# Ensembl VEP REST release 116, GRCh38, fetched 2026-10-07, with numbers=1. Same columns as vep_rest_wp1.tsv; insertions use region start = end + 1.
+pad_intron_snv	1:1287305-1287305	T/A	ENST00000379099	splice_donor_region_variant,intron_variant	LOW	ENST00000379099.3:c.191+6T>A	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_intron_snv	1:1287305-1287305	T/G	ENST00000379099	splice_donor_region_variant,intron_variant	LOW	ENST00000379099.3:c.191+6T>G	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_intron_del	1:1287305-1287305	T/-	ENST00000379099	splice_donor_region_variant,intron_variant	LOW	ENST00000379099.3:c.191+6del	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_exon2_snv	1:1287405-1287405	G/A	ENST00000379099	intron_variant	MODIFIER	ENST00000379099.3:c.192-103G>A	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_exon2_snv	1:1287405-1287405	G/C	ENST00000379099	intron_variant	MODIFIER	ENST00000379099.3:c.192-103G>C	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_exon2_snv	1:1287405-1287405	G/T	ENST00000379099	intron_variant	MODIFIER	ENST00000379099.3:c.192-103G>T	None	None	None	None	None	None	None	1/6	cds_start_NF,cds_end_NF
+pad_del_exonic	1:939278-939278	C/-	ENST00000455979	frameshift_variant	HIGH	ENST00000455979.1:c.4del	ENSP00000412228.1:p.Ala2GlyfsTer25	4	5	2	gCg/gg	A/X	1/7	None	cds_start_NF
+pad_ins_exonic	1:939279-939278	-/A	ENST00000455979	frameshift_variant	HIGH	ENST00000455979.1:c.4_5insA	ENSP00000412228.1:p.Leu3AlafsTer31	4	5	2	gcg/gcAg	A/AX	1/7	None	cds_start_NF
+pad_mnv_codon12	1:939276-939277	GG/AA	ENST00000455979	missense_variant,coding_sequence_variant	MODERATE	ENST00000455979.1:c.2_3delinsAA	ENSP00000412228.1:p.Ala2Thr	2	3	1	naGGcg/naAAcg	XA/XT	1/7	None	cds_start_NF
+pad_mnv_codon2	1:939277-939278	GC/TT	ENST00000455979	missense_variant	MODERATE	ENST00000455979.1:c.3_4delinsTT	ENSP00000412228.1:p.Ala2Leu	3	4	2	GCg/TTg	A/L	1/7	None	cds_start_NF
+pad_inframe_del_codon1	1:939275-939277	AGG/-	ENST00000455979	inframe_deletion	MODERATE	ENST00000455979.1:c.1_3del	ENSP00000412228.1:p.Ala2del	1	2	1	nAGGcg/ncg	XA/X	1/7	None	cds_start_NF
+partial3_del_scnn1d	1:1290943-1290943	C/-	ENST00000379099	protein_altering_variant,incomplete_terminal_codon_variant	MODERATE	ENST00000379099.3:c.923del	ENSP00000368393.3:p.Ter309del	923	925	309	C/-	X/-	7/7	None	cds_start_NF,cds_end_NF
+partial3_del_tmem247_1	2:46484424-46484424	T/-	NM_001424184.1	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	NM_001424184.1:c.658del	NP_001411113.1:p.Ter220=	679	658	220	Ta/a	X	3/3	None	-
+partial3_ins_tmem247	2:46484425-46484424	-/G	NM_001424184.1	stop_gained,incomplete_terminal_codon_variant,coding_sequence_variant	HIGH	NM_001424184.1:c.658_659insG	NP_001411113.1:p.Ter220=	679	658	220	ta/tGa	X/*	3/3	None	-
+fs_del_spanning	1:151767221-151767225	TCCTG/-	ENST00000400999	frameshift_variant	HIGH	ENST00000400999.7:c.226_229del	ENSP00000383784.3:p.Glu77ProfsTer2	293	226	76	TCCGAg/ag	SE/X	2-3/6	2/5	-
+fs_del_spanning_inframe	1:151767222-151767225	CCTG/-	ENST00000400999	stop_gained,inframe_deletion	HIGH	ENST00000400999.7:c.227_229del	ENSP00000383784.3:p.Ser76_Glu77delinsTer	294	227	76	tCCGAg/tag	SE/*	2-3/6	2/5	-
+fs_del_exon_after	1:151767225-151767225	G/-	ENST00000400999	splice_donor_variant,frameshift_variant	HIGH	ENST00000400999.7:c.229del	ENSP00000383784.3:p.Glu77SerfsTer3	296	229	77	Gag/ag	E/X	3/6	None	-
+fs_del_exon_before	1:151767223-151767223	C/-	ENST00000400999	splice_acceptor_variant,frameshift_variant	HIGH	ENST00000400999.7:c.228del	ENSP00000383784.3:p.Glu77SerfsTer3	295	228	76	tcC/tc	S/X	2/6	None	-

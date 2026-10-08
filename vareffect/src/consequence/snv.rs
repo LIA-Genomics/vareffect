@@ -1,15 +1,19 @@
 //! SNV (single-nucleotide variant) consequence annotation.
 
 use super::helpers::{
-    build_alt_codon, build_base_result, compute_cdna_position_exonic,
-    compute_cdna_position_for_cds, fetch_ref_codon, finalize_consequences,
-    is_incomplete_terminal_codon,
+    add_splice_spill, build_alt_codon, build_base_result, compute_cdna_position_exonic,
+    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
+    has_complete_start_codon, is_incomplete_terminal_codon,
 };
 use super::{Consequence, ConsequenceResult};
-use crate::codon::{complement, format_amino_acids, format_codons, translate_codon_for_transcript};
+use crate::codon::{
+    complement, format_amino_acids, format_codon_bases, format_codons,
+    translate_codon_for_transcript,
+};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_c;
+use crate::locate::helpers::exonic_splice_spill;
 use crate::locate::{
     LocateIndex, VariantLocation, format_exon_number, format_intron_number, locate_variant,
 };
@@ -196,6 +200,23 @@ pub(super) fn annotate_snv_verified(
             Ok(result)
         }
 
+        // VEP 116 gives a variant inside a frameshift intron no splice or
+        // intron term, and no exon number; the intron is still numbered
+        // (ENST00000400999.7 c.228+1T>A: intron 2/5; ENST00000609389.5
+        // n.281+6T>A: intron 3/5). Every such intron in a
+        // coding transcript lies inside the CDS in GENCODE v50 and RefSeq
+        // RS_2025_08.
+        VariantLocation::FrameshiftIntron { intron_index, .. } => {
+            let consequence = if transcript.cds_segments.is_empty() {
+                Consequence::NonCodingTranscriptVariant
+            } else {
+                Consequence::CodingSequenceVariant
+            };
+            let mut result = build_base_result(transcript, vec![consequence]);
+            result.intron = Some(format_intron_number(intron_index, transcript.exon_count));
+            Ok(result)
+        }
+
         VariantLocation::NonCodingIntron { intron_index, .. } => {
             let mut result = build_base_result(transcript, vec![Consequence::IntronVariant]);
             result.intron = Some(format_intron_number(intron_index, transcript.exon_count));
@@ -208,6 +229,10 @@ pub(super) fn annotate_snv_verified(
     }?;
 
     result.hgvs_c = hgvs_c;
+    add_splice_spill(
+        &mut result,
+        exonic_splice_spill(pos, pos + 1, transcript, locate_index),
+    );
 
     // Stop_lost: compute the actual extension distance via a 3'UTR scan.
     if result.consequences.contains(&Consequence::StopLost) {
@@ -252,10 +277,40 @@ fn annotate_cds_snv(
 ) -> Result<ConsequenceResult, VarEffectError> {
     let codon_start_offset = cds_offset - codon_position as u32;
 
+    // Complement the VCF ALT for minus-strand to get coding-strand base
+    let coding_alt = match transcript.strand {
+        Strand::Plus => alt_base,
+        Strand::Minus => complement(alt_base),
+    };
+
     if is_incomplete_terminal_codon(cds_offset, index) {
-        let consequences = vec![Consequence::IncompleteTerminalCodonVariant];
+        // VEP 116 on a 3' partial codon (ENST00000379099.3 c.925C>A,
+        // NM_001424184.1 c.658T>A): incomplete_terminal_codon_variant plus
+        // coding_sequence_variant, the partial codon's own bases as codons,
+        // amino acid X, protein position of the partial codon.
+        let ref_bases = fetch_cds_sequence(
+            codon_start_offset,
+            index.total_cds_length(),
+            chrom,
+            transcript,
+            index,
+            fasta,
+        )?;
+        let mut alt_bases = ref_bases.clone();
+        alt_bases[codon_position as usize] = coding_alt;
+        let mut consequences = vec![
+            Consequence::IncompleteTerminalCodonVariant,
+            Consequence::CodingSequenceVariant,
+        ];
+        if is_splice_region {
+            consequences.push(Consequence::SpliceRegionVariant);
+        }
         let mut result = build_base_result(transcript, consequences);
         result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+        result.protein_start = Some(codon_number);
+        result.protein_end = Some(codon_number);
+        result.codons = Some(format_codon_bases(&ref_bases, &alt_bases, codon_position));
+        result.amino_acids = Some("X".to_string());
         result.cds_position = Some(cds_offset + 1);
         result.cds_position_end = Some(cds_offset + 1);
         result.cdna_position = Some(compute_cdna_position_for_cds(cds_offset, index));
@@ -264,12 +319,6 @@ fn annotate_cds_snv(
     }
 
     let ref_codon = fetch_ref_codon(codon_start_offset, chrom, transcript, index, fasta)?;
-
-    // Complement the VCF ALT for minus-strand to get coding-strand base
-    let coding_alt = match transcript.strand {
-        Strand::Plus => alt_base,
-        Strand::Minus => complement(alt_base),
-    };
     let alt_codon = build_alt_codon(&ref_codon, codon_position, coding_alt);
 
     let is_mito = transcript.chrom == "chrM";
@@ -288,11 +337,22 @@ fn annotate_cds_snv(
         result.cds_position_end = Some(cds_offset + 1);
         result.cdna_position = Some(compute_cdna_position_for_cds(cds_offset, index));
         result.cdna_position_end = Some(compute_cdna_position_for_cds(cds_offset, index));
+        // The partial first codon of a 5'-incomplete CDS: VEP 116 reports
+        // its `N`-padded codons (`nnT/nnA`), amino acid X and protein
+        // position 1 (ENST00000379099.3 c.3T>A). A reference `N` elsewhere
+        // keeps the bare result.
+        if codon_number == 1 && index.cds_start_pad() > 0 {
+            result.protein_start = Some(1);
+            result.protein_end = Some(1);
+            result.codons = Some(format_codons(&ref_codon, &alt_codon, codon_position));
+            result.amino_acids = Some("X".to_string());
+        }
         return Ok(result);
     }
 
+    let is_start_codon = codon_number == 1 && has_complete_start_codon(index);
     let coding_consequence = if ref_aa == alt_aa {
-        if codon_number == 1 && ref_aa == b'M' {
+        if is_start_codon && ref_aa == b'M' {
             Consequence::StartRetainedVariant
         } else if ref_aa == b'*' {
             Consequence::StopRetainedVariant
@@ -303,7 +363,7 @@ fn annotate_cds_snv(
         Consequence::StopGained
     } else if ref_aa == b'*' {
         Consequence::StopLost
-    } else if codon_number == 1 && ref_aa == b'M' {
+    } else if is_start_codon && ref_aa == b'M' {
         Consequence::StartLost
     } else {
         Consequence::MissenseVariant

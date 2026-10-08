@@ -159,8 +159,12 @@ fn exon_boundary_hgvs_anchor(
         let offset = compute_utr_offset_3prime(boundary_pos, exon_idx, transcript, index)?;
         Ok(HgvsPosition::ThreePrimeUtr(offset))
     } else {
+        // VEP 116 anchors intronic offsets on genomic coding bases, without
+        // the pad of a 5'-incomplete CDS (ENST00000379099.3 `c.191+6T>A`).
         let cds = compute_cds_offset(boundary_pos, exon_idx, transcript, index)?;
-        Ok(HgvsPosition::Cds(cds.cds_offset + 1))
+        Ok(HgvsPosition::Cds(
+            cds.cds_offset - index.cds_start_pad() + 1,
+        ))
     }
 }
 
@@ -172,14 +176,25 @@ fn exon_boundary_hgvs_anchor(
 ///
 /// Returns `None` for `Upstream`, `Downstream`, and `Distal` variants which
 /// have no HGVS c./n. notation.
+///
+/// `padded` numbers an exonic CDS position in the padded frame of a
+/// 5'-incomplete CDS. VEP 116 does that only for substitutions (`c.4G>A`);
+/// deletions, insertions and delins count genomic coding bases (`c.4del`
+/// for the same transcript's CDS position 5). Identical on a complete CDS.
 fn position_for_variant_location(
     location: &VariantLocation,
     transcript: &TranscriptModel,
     index: &LocateIndex,
+    padded: bool,
 ) -> Result<Option<String>, VarEffectError> {
     match *location {
         VariantLocation::CdsExon { cds_offset, .. } => {
-            let pos = HgvsPosition::Cds(cds_offset + 1);
+            let offset = if padded {
+                cds_offset
+            } else {
+                cds_offset - index.cds_start_pad()
+            };
+            let pos = HgvsPosition::Cds(offset + 1);
             Ok(Some(format_position(&pos, None)))
         }
         VariantLocation::FivePrimeUtr {
@@ -220,6 +235,10 @@ fn position_for_variant_location(
             Ok(Some(format_position(&anchor, Some(distance))))
         }
         VariantLocation::Intron {
+            intron_index,
+            distance_to_nearest_exon,
+        }
+        | VariantLocation::FrameshiftIntron {
             intron_index,
             distance_to_nearest_exon,
         } => {
@@ -277,7 +296,7 @@ fn position_for_genomic(
         return Ok(Some(HgvsPosition::NonCoding(cdna).to_string()));
     }
 
-    position_for_variant_location(&loc, transcript, index)
+    position_for_variant_location(&loc, transcript, index, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +413,7 @@ pub(crate) fn format_snv_hgvs(
         )));
     }
 
-    let pos_str = match position_for_variant_location(location, transcript, index)? {
+    let pos_str = match position_for_variant_location(location, transcript, index, true)? {
         Some(s) => s,
         None => return Ok(None),
     };

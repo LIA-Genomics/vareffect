@@ -68,6 +68,14 @@ pub(crate) fn format_hgvs_p_snv(
         _ => return None,
     };
 
+    // A partial codon at either end of an incomplete CDS translates to X:
+    // the residue is unknown, so the protein effect is too. VEP prints
+    // `p.TerN=` here, which names a stop that is not there (recorded in
+    // VEP_DIVERGENCES.md).
+    if ref_aa == b'X' {
+        return Some("p.?".to_string());
+    }
+
     // Consequence-priority order (defensive — consequences are mutually
     // exclusive in annotate_cds_snv, but the ordering is safe regardless).
     if consequences.contains(&Consequence::StartLost) {
@@ -1038,6 +1046,24 @@ mod tests {
     // Helper: build a consequence slice from a single variant.
     fn csq(c: Consequence) -> Vec<Consequence> {
         vec![c]
+    }
+
+    #[test]
+    fn partial_codon_has_unknown_protein_effect() {
+        // VEP prints `p.Ter1=` / `p.Ter309=` for amino acid X; vareffect
+        // reports the unknown effect instead (VEP_DIVERGENCES.md).
+        let five_prime =
+            format_hgvs_p_snv(&csq(Consequence::CodingSequenceVariant), Some("X"), Some(1));
+        assert_eq!(five_prime.as_deref(), Some("p.?"));
+        let three_prime = format_hgvs_p_snv(
+            &[
+                Consequence::IncompleteTerminalCodonVariant,
+                Consequence::CodingSequenceVariant,
+            ],
+            Some("X"),
+            Some(309),
+        );
+        assert_eq!(three_prime.as_deref(), Some("p.?"));
     }
 
     #[test]

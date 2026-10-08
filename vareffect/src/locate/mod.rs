@@ -55,6 +55,16 @@ const SPLICE_REGION_INTRON_MAX_DONOR: u64 = 8;
 /// `_intron_effects`: `overlap(start, end, intron_end - 16, intron_end - 2)`.
 const SPLICE_REGION_INTRON_MAX_ACCEPTOR: u64 = 17;
 
+/// Largest exon gap, in bases, that is a frameshift intron rather than a
+/// real intron. Such gaps correct the genome against the transcript; VEP
+/// gives a variant inside one no splice or intron term.
+///
+/// Reference: `ensembl-variation` release/115 `BaseTranscriptVariation.pm`
+/// `_create_intron_trees`: `abs($intron_end - $intron_start) <= 12` on
+/// 1-based inclusive bounds, which is a gap of at most 13 bases (abutting
+/// exons included).
+pub const FRAMESHIFT_INTRON_MAX_GAP: u64 = 13;
+
 /// Exonic splice region: 1-3 bases from the exon/intron boundary.
 const SPLICE_REGION_EXON_MAX: u64 = 3;
 
@@ -74,8 +84,10 @@ pub enum SpliceSide {
 /// All offsets and distances are in transcript-order (5'->3') terms. Genomic
 /// coordinates are resolved to transcript-relative positions internally.
 ///
-/// This enum is `Copy` -- no heap allocations.
+/// This enum is `Copy` -- no heap allocations. It is `#[non_exhaustive]`:
+/// new transcript regions may be added in a minor release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VariantLocation {
     /// Variant is upstream of the transcript (5' of tx_start in transcript
     /// terms), within 5,000 bases.
@@ -112,8 +124,10 @@ pub enum VariantLocation {
         exon_index: u16,
         /// 0-based CDS segment index for O(1) phase lookup.
         cds_segment_index: u16,
-        /// 0-based offset within the CDS (cumulative coding bases before
-        /// this position). The first coding base is offset 0.
+        /// 0-based offset within the CDS in VEP's padded frame: the
+        /// cumulative coding bases before this position plus
+        /// [`LocateIndex::cds_start_pad`]. The first genomic coding base is
+        /// offset `cds_start_pad()`, which is 0 for every complete CDS.
         cds_offset: u32,
         /// 1-based codon number (`cds_offset / 3 + 1`).
         codon_number: u32,
@@ -180,6 +194,19 @@ pub enum VariantLocation {
         distance_to_nearest_exon: i64,
     },
 
+    /// Inside a frameshift intron: an exon gap of at most
+    /// [`FRAMESHIFT_INTRON_MAX_GAP`] bases. Such a gap corrects the genome
+    /// against the transcript sequence, so no splice or intron term applies.
+    FrameshiftIntron {
+        /// 0-based intron index.
+        intron_index: u16,
+        /// Signed distance to the nearest exon boundary, as for
+        /// [`VariantLocation::Intron`]: positive on the donor side, negative
+        /// on the acceptor side, donor on a tie. Maps to the HGVS intronic
+        /// offset (`c.228+1`).
+        distance_to_nearest_exon: i64,
+    },
+
     /// Exon of a non-coding transcript.
     NonCodingExon {
         /// 0-based exon index.
@@ -235,9 +262,22 @@ pub fn format_intron_number(intron_index: u16, exon_count: u16) -> String {
 /// ~15 MB total.
 #[derive(Debug, Clone)]
 pub struct LocateIndex {
-    /// `cumulative_cds[i]` = sum of CDS segment lengths for segments `0..i`.
-    /// Length = `cds_segments.len() + 1` (prefix-sum convention).
+    /// `cumulative_cds[i]` = [`Self::cds_start_pad`] plus the sum of CDS
+    /// segment lengths for segments `0..i`. Length =
+    /// `cds_segments.len() + 1` (prefix-sum convention).
     cumulative_cds: Vec<u32>,
+    /// Bases missing from the first codon of a 5'-incomplete CDS. See
+    /// [`Self::cds_start_pad`].
+    cds_start_pad: u32,
+    /// `true` when some exon gap is a frameshift intron, so the per-variant
+    /// frameshift-intron checks can be skipped for every other transcript
+    /// (all of MANE 1.5).
+    has_frameshift_intron: bool,
+    /// `frameshift_junction[i]` is `true` when CDS segment `i` follows segment
+    /// `i - 1` across a frameshift intron, a sequence correction where no
+    /// exon-junction complex sits. Empty when `has_frameshift_intron` is
+    /// false.
+    frameshift_junction: Vec<bool>,
     /// Maps `exon_index` -> CDS segment index, or `None` if the exon has no CDS.
     exon_to_cds_seg: Vec<Option<u16>>,
     /// 0-based exon index containing the first CDS base (transcript 5' end).
@@ -255,24 +295,45 @@ impl LocateIndex {
     ///
     /// # Errors
     ///
-    /// Returns [`VarEffectError::Malformed`] if a CDS boundary coordinate does
-    /// not fall within any exon.
+    /// Returns [`VarEffectError::Malformed`] if a CDS phase is above 2, if a
+    /// CDS boundary coordinate does
+    /// not fall within any exon, or if one exon holds more than one CDS
+    /// segment (a ribosomal-slippage CDS, which the codon walk cannot
+    /// represent).
     pub fn build(transcript: &TranscriptModel) -> Result<Self, VarEffectError> {
         let malformed =
             |msg: &str| VarEffectError::Malformed(format!("{}: {}", transcript.accession, msg));
 
+        // GFF3 phase on the first segment counts the bases to skip before
+        // the first complete codon; Ensembl pads the 5' end with `N` so the
+        // partial codon is codon 1 (`translateable_seq`, and BaseGXF.pm's
+        // `_convert_phase` maps GFF3 phase p to start phase (3 - p) % 3).
+        if transcript.cds_segments.iter().any(|seg| seg.phase > 2) {
+            return Err(malformed("CDS phase outside 0..=2"));
+        }
+        let cds_start_pad = transcript
+            .cds_segments
+            .first()
+            .map_or(0, |seg| (3 - u32::from(seg.phase)) % 3);
+
         let mut cumulative_cds = Vec::with_capacity(transcript.cds_segments.len() + 1);
-        cumulative_cds.push(0u32);
+        cumulative_cds.push(cds_start_pad);
         for seg in &transcript.cds_segments {
             let prev = *cumulative_cds
                 .last()
-                .expect("cumulative_cds initialized with 0");
+                .expect("cumulative_cds initialized with the pad");
             cumulative_cds.push(prev + (seg.genomic_end - seg.genomic_start) as u32);
         }
 
         let mut exon_to_cds_seg = vec![None; transcript.exons.len()];
         for (seg_idx, seg) in transcript.cds_segments.iter().enumerate() {
-            exon_to_cds_seg[seg.exon_index as usize] = Some(to_u16(seg_idx));
+            let slot = exon_to_cds_seg
+                .get_mut(seg.exon_index as usize)
+                .ok_or_else(|| malformed("CDS segment refers to a missing exon"))?;
+            if slot.is_some() {
+                return Err(malformed("more than one CDS segment in one exon"));
+            }
+            *slot = Some(to_u16(seg_idx));
         }
 
         let (cds_start_exon_idx, cds_end_exon_idx) = if transcript.cds_segments.is_empty() {
@@ -319,8 +380,35 @@ impl LocateIndex {
         // Precompute 5'UTR exonic length for O(1) cDNA position computation.
         let utr5_exonic_len = compute_utr5_exonic_length(transcript);
 
+        let has_frameshift_intron = transcript
+            .exons
+            .windows(2)
+            .any(|pair| helpers::frameshift_gap(&pair[0], &pair[1]).is_some());
+        let frameshift_junction = if has_frameshift_intron {
+            let segments = &transcript.cds_segments;
+            (0..segments.len())
+                .map(|i| {
+                    i > 0 && {
+                        let up = segments[i - 1].exon_index as usize;
+                        let down = segments[i].exon_index as usize;
+                        down == up + 1
+                            && helpers::frameshift_gap(
+                                &transcript.exons[up],
+                                &transcript.exons[down],
+                            )
+                            .is_some()
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             cumulative_cds,
+            cds_start_pad,
+            has_frameshift_intron,
+            frameshift_junction,
             exon_to_cds_seg,
             cds_start_exon_idx,
             cds_end_exon_idx,
@@ -336,11 +424,46 @@ impl LocateIndex {
         &self.cumulative_cds
     }
 
-    /// Total number of coding bases across all CDS segments.
+    /// Length of the CDS in VEP's padded frame: the coding bases plus
+    /// [`Self::cds_start_pad`]. Use it for frame arithmetic (codon and stop
+    /// positions); compare genomic lengths against [`Self::coding_length`].
     ///
     /// Returns 0 for non-coding transcripts.
     pub(crate) fn total_cds_length(&self) -> u32 {
         *self.cumulative_cds.last().unwrap_or(&0)
+    }
+
+    /// `true` when the transcript has a frameshift intron (an exon gap of at
+    /// most [`FRAMESHIFT_INTRON_MAX_GAP`] bases).
+    pub(crate) fn has_frameshift_intron(&self) -> bool {
+        self.has_frameshift_intron
+    }
+
+    /// `true` when CDS segment `seg_idx` follows the previous one across a
+    /// frameshift intron rather than a real exon-exon junction.
+    pub(crate) fn is_frameshift_junction(&self, seg_idx: usize) -> bool {
+        self.frameshift_junction
+            .get(seg_idx)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Number of coding bases present on the genome, without the pad.
+    ///
+    /// Returns 0 for non-coding transcripts.
+    pub(crate) fn coding_length(&self) -> u32 {
+        self.total_cds_length() - self.cds_start_pad
+    }
+
+    /// Bases missing from the first codon of a 5'-incomplete CDS: `(3 - p) %
+    /// 3` for GFF3 phase `p` on the first CDS segment, so 0, 1 or 2.
+    ///
+    /// CDS offsets, codon numbers and HGVS `c.` positions count these bases,
+    /// as VEP does: with a pad of 2 the first genomic coding base is `c.3`
+    /// and codon 1 is the partial codon. Offsets below the pad have no
+    /// genomic base. 0 for every complete CDS and for non-coding transcripts.
+    pub fn cds_start_pad(&self) -> u32 {
+        self.cds_start_pad
     }
 
     /// Maps exon index -> CDS segment index, or `None` if the exon has no CDS.

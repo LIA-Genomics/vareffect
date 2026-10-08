@@ -1,11 +1,11 @@
 //! Shared internal helpers for variant location classification.
 
 use super::{
-    SPLICE_CANONICAL_MAX, SPLICE_REGION_EXON_MAX, SPLICE_REGION_INTRON_MAX_ACCEPTOR,
-    SPLICE_REGION_INTRON_MAX_DONOR, SpliceSide, VariantLocation,
+    FRAMESHIFT_INTRON_MAX_GAP, SPLICE_CANONICAL_MAX, SPLICE_REGION_EXON_MAX,
+    SPLICE_REGION_INTRON_MAX_ACCEPTOR, SPLICE_REGION_INTRON_MAX_DONOR, SpliceSide, VariantLocation,
 };
 use crate::error::VarEffectError;
-use crate::types::{Strand, TranscriptModel};
+use crate::types::{Exon, Strand, TranscriptModel};
 
 /// Safe `usize` -> `u16` conversion for exon/intron indices. TTN (~363 exons)
 /// is the largest known human transcript, so `u16` is always sufficient.
@@ -273,6 +273,172 @@ pub(crate) fn compute_utr_offset_3prime(
     }
 }
 
+/// Number of genomic bases between two exons that are adjacent in
+/// transcript order, on either strand. 0 for abutting exons.
+pub(crate) fn intron_gap(a: &Exon, b: &Exon) -> u64 {
+    if a.genomic_end <= b.genomic_start {
+        b.genomic_start - a.genomic_end
+    } else {
+        a.genomic_start.saturating_sub(b.genomic_end)
+    }
+}
+
+/// Genomic span `[start, end)` of the intron between two exons adjacent in
+/// transcript order, when it is a frameshift intron (1 to
+/// [`FRAMESHIFT_INTRON_MAX_GAP`] bases).
+pub(crate) fn frameshift_gap(a: &Exon, b: &Exon) -> Option<(u64, u64)> {
+    let gap = intron_gap(a, b);
+    if gap == 0 || gap > FRAMESHIFT_INTRON_MAX_GAP {
+        return None;
+    }
+    Some(if a.genomic_end <= b.genomic_start {
+        (a.genomic_end, b.genomic_start)
+    } else {
+        (b.genomic_end, a.genomic_start)
+    })
+}
+
+/// 0-based index of the frameshift intron that holds an end of the footprint
+/// `[start, end)`, if any.
+///
+/// VEP treats only such a variant as `within_frameshift_intron`: its
+/// `frameshift` and inframe predicates need both ends on coding bases, so a
+/// deletion from an exon into the gap is `coding_sequence_variant`, while one
+/// spanning the gap from exon to exon is a normal frameshift (VEP 116,
+/// ENST00000400999.7 `c.228_228+1del` vs `c.226_229del`). An insertion
+/// (`start == end`, between `start - 1` and `start`) counts only when both
+/// flanking bases are intron bases (`BaseTranscriptVariationAllele.pm`
+/// `_intron_effects`, insertion `overlap` on `r_start == r_end + 1`).
+pub(crate) fn frameshift_intron_endpoint(
+    start: u64,
+    end: u64,
+    transcript: &TranscriptModel,
+    index: &super::LocateIndex,
+) -> Option<u16> {
+    if !index.has_frameshift_intron() {
+        return None;
+    }
+    let inside = |pos: u64, (gap_start, gap_end): (u64, u64)| gap_start <= pos && pos < gap_end;
+    transcript
+        .exons
+        .windows(2)
+        .position(|pair| {
+            frameshift_gap(&pair[0], &pair[1]).is_some_and(|gap| {
+                if start == end {
+                    start > 0 && inside(start - 1, gap) && inside(start, gap)
+                } else {
+                    inside(start, gap) || inside(end - 1, gap)
+                }
+            })
+        })
+        .map(to_u16)
+}
+
+/// Canonical splice terms that a frameshift intron's windows give a variant
+/// on the exon bases beside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SpliceSpill {
+    /// The two-base donor window (the first intron bases in transcript
+    /// order) holds the variant.
+    pub(crate) donor: bool,
+    /// The two-base acceptor window (the last intron bases) holds the
+    /// variant.
+    pub(crate) acceptor: bool,
+}
+
+/// Splice terms VEP gives a variant outside a frameshift intron whose
+/// two-base windows spill past a one-base gap into the flanking exons.
+///
+/// VEP computes the donor and acceptor windows from the intron bounds as for
+/// any intron, so on a one-base gap they cover the coding bases on either
+/// side, which then get `splice_acceptor_variant` (base before the gap) or
+/// `splice_donor_variant` (base after it) next to their coding terms (VEP
+/// 116, ENST00000400999.7 c.228C>A, c.229G>A, c.228del, c.229del). A
+/// deletion counts when it overlaps a window without touching the gap; an
+/// insertion (`start == end`) when both flanking bases lie in the window
+/// (`overlap` on `r_start == r_end + 1`). `None` when nothing spills, which is
+/// always the case for a transcript without frameshift introns.
+pub(crate) fn exonic_splice_spill(
+    start: u64,
+    end: u64,
+    transcript: &TranscriptModel,
+    index: &super::LocateIndex,
+) -> Option<SpliceSpill> {
+    if !index.has_frameshift_intron() {
+        return None;
+    }
+    let mut spill = SpliceSpill::default();
+    for pair in transcript.exons.windows(2) {
+        let Some((gap_start, gap_end)) = frameshift_gap(&pair[0], &pair[1]) else {
+            continue;
+        };
+        let (donor, acceptor) = match transcript.strand {
+            Strand::Plus => (
+                (gap_start, gap_start + SPLICE_CANONICAL_MAX),
+                (gap_end.saturating_sub(SPLICE_CANONICAL_MAX), gap_end),
+            ),
+            Strand::Minus => (
+                (gap_end.saturating_sub(SPLICE_CANONICAL_MAX), gap_end),
+                (gap_start, gap_start + SPLICE_CANONICAL_MAX),
+            ),
+        };
+        let hits = |(window_start, window_end): (u64, u64)| {
+            if start == end {
+                let inside_gap = gap_start < start && start < gap_end;
+                !inside_gap && start > 0 && window_start < start && start < window_end
+            } else {
+                let touches_gap = start < gap_end && gap_start < end;
+                !touches_gap && start < window_end && window_start < end
+            }
+        };
+        spill.donor |= hits(donor);
+        spill.acceptor |= hits(acceptor);
+    }
+    (spill.donor || spill.acceptor).then_some(spill)
+}
+
+/// `true` when an insertion at `pos` (between `pos - 1` and `pos`) has one
+/// flanking base in a frameshift intron and the other in an exon.
+pub(crate) fn is_frameshift_junction_insertion(
+    pos: u64,
+    transcript: &TranscriptModel,
+    index: &super::LocateIndex,
+) -> bool {
+    index.has_frameshift_intron()
+        && transcript.exons.windows(2).any(|pair| {
+            frameshift_gap(&pair[0], &pair[1])
+                .is_some_and(|(gap_start, gap_end)| pos == gap_start || pos == gap_end)
+        })
+}
+
+/// Insertion point to classify an insertion at `pos` (between `pos - 1` and
+/// `pos`) by.
+///
+/// An insertion at the 5' genomic edge of a frameshift intron, between the
+/// last exon base and the first gap base, sits in the mRNA between the two
+/// exons, exactly as one at the far edge of the gap does; it is classified at
+/// the far edge. VEP 116 gives both the same frameshift (ENST00000400999.7
+/// `c.228_228+1insA` and `c.228+1_229insA`: p.Glu77ArgfsTer16). Any other
+/// `pos` is returned unchanged.
+pub(crate) fn frameshift_junction_insertion_point(
+    pos: u64,
+    transcript: &TranscriptModel,
+    index: &super::LocateIndex,
+) -> u64 {
+    if !index.has_frameshift_intron() {
+        return pos;
+    }
+    transcript
+        .exons
+        .windows(2)
+        .find_map(|pair| {
+            frameshift_gap(&pair[0], &pair[1])
+                .filter(|&(gap_start, _)| gap_start == pos)
+                .map(|(_, gap_end)| gap_end)
+        })
+        .unwrap_or(pos)
+}
+
 /// Classify an intronic position as splice donor, acceptor, region, or deep
 /// intron.
 ///
@@ -301,6 +467,17 @@ pub(super) fn classify_intronic(
             (d, a)
         }
     };
+
+    if intron_gap(up_exon, down_exon) <= FRAMESHIFT_INTRON_MAX_GAP {
+        return VariantLocation::FrameshiftIntron {
+            intron_index,
+            distance_to_nearest_exon: if donor_dist <= acceptor_dist {
+                donor_dist as i64
+            } else {
+                -(acceptor_dist as i64)
+            },
+        };
+    }
 
     if donor_dist <= SPLICE_CANONICAL_MAX {
         return VariantLocation::SpliceDonor {

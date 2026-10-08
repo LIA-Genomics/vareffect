@@ -1,7 +1,8 @@
 //! Indel footprint location classification.
 
 use super::helpers::{
-    ExonOrIntron, compute_cds_offset, find_exon_or_intron, is_exonic_splice_region, to_u16,
+    ExonOrIntron, compute_cds_offset, find_exon_or_intron, frameshift_gap, is_exonic_splice_region,
+    to_u16,
 };
 use super::{
     LocateIndex, SPLICE_CANONICAL_MAX, SPLICE_REGION_INTRON_MAX_ACCEPTOR,
@@ -16,6 +17,7 @@ use crate::types::{Strand, TranscriptModel};
 /// full range of affected bases, including whether the footprint overlaps
 /// splice sites or crosses exon/intron boundaries.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IndelLocation {
     /// Primary region classification.
     pub region: IndelRegion,
@@ -61,6 +63,7 @@ pub struct SpliceOverlapDetail {
 ///
 /// `Cds` uses half-open convention: `[cds_offset_start, cds_offset_end)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IndelRegion {
     /// Entirely within a CDS exon. Offsets are 0-based, half-open.
     Cds {
@@ -89,10 +92,19 @@ pub enum IndelRegion {
 ///
 /// Identifies which specific splice sites (donor vs acceptor) are overlapped
 /// and records the intron indices involved.
+///
+/// A frameshift intron whose bases a deletion or delins footprint overlaps is
+/// skipped: VEP's `_intron_effects` drops that intron's splice windows for a
+/// footprint within it (`next`), and evaluates every other intron (VEP 116,
+/// ENST00000400999.7 `c.226_229del`: `frameshift_variant`, no splice term).
+/// An insertion keeps the windows, which on a one-base gap spill into the
+/// flanking exons (`c.228_228+1insA`: `splice_acceptor_variant`).
 fn check_splice_overlap_detailed(
     range_start: u64,
     range_end: u64,
+    is_insertion: bool,
     transcript: &TranscriptModel,
+    has_frameshift_intron: bool,
 ) -> SpliceOverlapDetail {
     let exons = &transcript.exons;
     let n = exons.len();
@@ -126,6 +138,14 @@ fn check_splice_overlap_detailed(
             break;
         }
         let intron_idx = to_u16(i);
+
+        if has_frameshift_intron
+            && !is_insertion
+            && frameshift_gap(upstream_exon, downstream_exon)
+                .is_some_and(|(gap_start, gap_end)| range_start < gap_end && gap_start < range_end)
+        {
+            continue;
+        }
 
         // Donor site: first 2 intronic bases adjacent to the 3' end of
         // the upstream exon (in transcript orientation).
@@ -273,7 +293,13 @@ pub fn locate_indel(
     } else {
         (start, end)
     };
-    let detail = check_splice_overlap_detailed(detail_start, detail_end, transcript);
+    let detail = check_splice_overlap_detailed(
+        detail_start,
+        detail_end,
+        is_insertion,
+        transcript,
+        index.has_frameshift_intron(),
+    );
     let splice_canonical = detail.overlaps_donor || detail.overlaps_acceptor;
     let splice_region = detail.overlaps_splice_region;
     let splice_detail = if splice_canonical { Some(detail) } else { None };
