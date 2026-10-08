@@ -160,6 +160,11 @@ pub enum Consequence {
     NonCodingTranscriptExonVariant,
     /// Variant in an intron.
     IntronVariant,
+    /// Variant in a non-coding transcript outside its exons, where no more
+    /// specific term applies (SO:0001619). VEP emits it for a variant inside
+    /// a frameshift intron (an exon gap of 13 bases or fewer) of a non-coding
+    /// transcript.
+    NonCodingTranscriptVariant,
     /// Variant upstream of the transcript (within 5 kb, 5' direction).
     UpstreamGeneVariant,
     /// Variant downstream of the transcript (within 5 kb, 3' direction).
@@ -199,6 +204,7 @@ impl Consequence {
             | Self::ThreePrimeUtrVariant
             | Self::NonCodingTranscriptExonVariant
             | Self::IntronVariant
+            | Self::NonCodingTranscriptVariant
             | Self::UpstreamGeneVariant
             | Self::DownstreamGeneVariant
             | Self::IntergenicVariant => Impact::Modifier,
@@ -235,11 +241,12 @@ impl Consequence {
             Self::ThreePrimeUtrVariant => 20,
             Self::NonCodingTranscriptExonVariant => 21,
             Self::IntronVariant => 22,
-            Self::UpstreamGeneVariant => 23,
-            Self::DownstreamGeneVariant => 24,
-            Self::FeatureTruncation => 25,
-            Self::FeatureElongation => 26,
-            Self::IntergenicVariant => 27,
+            Self::NonCodingTranscriptVariant => 23,
+            Self::UpstreamGeneVariant => 24,
+            Self::DownstreamGeneVariant => 25,
+            Self::FeatureTruncation => 26,
+            Self::FeatureElongation => 27,
+            Self::IntergenicVariant => 28,
         }
     }
 
@@ -270,6 +277,7 @@ impl Consequence {
             Self::ThreePrimeUtrVariant => "3_prime_UTR_variant",
             Self::NonCodingTranscriptExonVariant => "non_coding_transcript_exon_variant",
             Self::IntronVariant => "intron_variant",
+            Self::NonCodingTranscriptVariant => "non_coding_transcript_variant",
             Self::UpstreamGeneVariant => "upstream_gene_variant",
             Self::DownstreamGeneVariant => "downstream_gene_variant",
             Self::IntergenicVariant => "intergenic_variant",

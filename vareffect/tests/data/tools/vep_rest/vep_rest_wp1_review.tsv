@@ -1,0 +1,16 @@
+# Ensembl VEP REST release 116, GRCh38, fetched 2026-10-07, with numbers=1 (exon/intron columns valid). Same request shape and columns as vep_rest_wp1.tsv; insertions use region start = end + 1.
+num_fs_snv	1:151767224-151767224	T/A	ENST00000400999	coding_sequence_variant	MODIFIER	ENST00000400999.7:c.228+1T>A	None	None	None	None	None	None	None	2/5	-
+num_exon_snv	1:151767221-151767221	T/A	ENST00000400999	missense_variant,splice_region_variant	MODERATE	ENST00000400999.7:c.226T>A	ENSP00000383784.3:p.Ser76Thr	293	226	76	Tcc/Acc	S/T	2/6	None	-
+num_fs_del	1:151767223-151767224	CT/-	ENST00000400999	coding_sequence_variant	MODIFIER	ENST00000400999.7:c.228_228+1del	None	295	228	76	None	None	2/6	2/5	-
+num_fs_lnc	7:29001036-29001036	T/A	ENST00000609389	non_coding_transcript_variant	MODIFIER	ENST00000609389.5:n.281+6T>A	None	None	None	None	None	None	None	3/5	-
+num_fs_minus	3:44499300-44499300	T/A	ENST00000436261	coding_sequence_variant	MODIFIER	ENST00000436261.7:c.1476-1A>T	None	None	None	None	None	None	None	4/4	-
+ins_fs_junction_5p	1:151767224-151767223	-/A	ENST00000400999	splice_acceptor_variant,frameshift_variant	HIGH	ENST00000400999.7:c.228_228+1insA	ENSP00000383784.3:p.Glu77ArgfsTer16	295	228	76	-/A	-/X	None	None	-
+ins_fs_junction_3p	1:151767225-151767224	-/A	ENST00000400999	splice_donor_variant,frameshift_variant	HIGH	ENST00000400999.7:c.228+1_229insA	ENSP00000383784.3:p.Glu77ArgfsTer16	295	228	76	-/A	-/X	None	None	-
+ins_fs_inside_2bp	3:44499301-44499300	-/A	ENST00000436261	coding_sequence_variant	MODIFIER	ENST00000436261.7:c.1475+1_1476-1insT	None	None	None	None	None	None	None	4/4	-
+mnv_padded_codon1	1:939275-939276	AG/CT	ENST00000455979	coding_sequence_variant	MODIFIER	ENST00000455979.1:c.1_2inv	ENSP00000412228.1:p.Ter1=	1	2	1	nAG/nCT	X	1/7	None	cds_start_NF
+mnv_padded_codon1_minus	1:1228595-1228596	GC/AA	ENST00000403997	coding_sequence_variant	MODIFIER	ENST00000403997.2:c.1_2delinsTT	ENSP00000384207.2:p.TerLeu1=	1	3	1	nnGCtg/nnTTtg	XL	1/5	None	cds_start_NF,cds_end_NF
+tmem247_del_last2	2:46484424-46484425	TA/-	NM_001424184.1	protein_altering_variant,incomplete_terminal_codon_variant	MODERATE	NM_001424184.1:c.658_659del	NP_001411113.1:p.Ter220del	679	658	220	TA/-	X/-	3/3	None	-
+tmem247_del_into_utr	2:46484424-46484427	TACT/-	NM_001424184.1	incomplete_terminal_codon_variant,coding_sequence_variant,3_prime_UTR_variant	LOW	None	None	679	658	220	None	None	3/3	None	-
+tmem247_fs_upstream	2:46484400-46484400	T/-	NM_001424184.1	frameshift_variant	HIGH	NM_001424184.1:c.634del	NP_001411113.1:p.Cys212ValfsTer2	655	634	212	Tgt/gt	C/X	3/3	None	-
+mtnd4_del_last	MT:12137-12137	T/-	ENST00000361381	protein_altering_variant,incomplete_terminal_codon_variant	MODERATE	ENST00000361381.2:c.1378del	ENSP00000354961.2:p.Ter460del	1378	1378	460	T/-	X/-	1/1	None	-
+mtnd4_fs_upstream	MT:12100-12100	A/-	ENST00000361381	frameshift_variant	HIGH	ENST00000361381.2:c.1341del	ENSP00000354961.2:p.Ser448ProfsTer?	1341	1341	447	ctA/ct	L/X	1/1	None	-

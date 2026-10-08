@@ -1,8 +1,9 @@
 //! Indel (insertion and deletion) consequence annotation.
 
 use super::helpers::{
-    build_base_result, compute_cdna_position_exonic, compute_cdna_position_for_cds,
-    fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
+    add_splice_spill, build_base_result, compute_cdna_position_exonic,
+    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
+    has_complete_start_codon, is_incomplete_terminal_codon,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -12,6 +13,10 @@ use crate::codon::{
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_c;
+use crate::locate::helpers::{
+    exonic_splice_spill, frameshift_intron_endpoint, frameshift_junction_insertion_point,
+    is_frameshift_junction_insertion,
+};
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
 };
@@ -30,6 +35,33 @@ use crate::types::{Strand, TranscriptModel, TranscriptTier};
 /// 3. CDS: frameshift (`len%3 != 0`) or inframe_deletion (`len%3 == 0`)
 /// 4. Non-CDS: same mapping as SNVs
 pub fn annotate_deletion(
+    chrom: &str,
+    start: u64,
+    end: u64,
+    deleted_bases: &[u8],
+    transcript: &TranscriptModel,
+    locate_index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<ConsequenceResult, VarEffectError> {
+    let mut result = annotate_deletion_core(
+        chrom,
+        start,
+        end,
+        deleted_bases,
+        transcript,
+        locate_index,
+        fasta,
+    )?;
+    add_splice_spill(
+        &mut result,
+        exonic_splice_spill(start, end, transcript, locate_index),
+    );
+    Ok(result)
+}
+
+/// [`annotate_deletion`] without the splice terms a one-base frameshift intron spills
+/// onto exon bases.
+fn annotate_deletion_core(
     chrom: &str,
     start: u64,
     end: u64,
@@ -54,7 +86,22 @@ pub fn annotate_deletion(
     };
     let hgvs = hgvs_c::format_deletion_hgvs(chrom, hgvs_start, hgvs_end, transcript, locate_index)?;
 
-    if location.overlaps_splice_canonical {
+    if let Some(intron) = frameshift_intron_endpoint(start, end, transcript, locate_index) {
+        let mut result = super::complex::frameshift_intron_indel_result(
+            start,
+            end,
+            intron,
+            &location,
+            transcript,
+            locate_index,
+        );
+        result.hgvs_c = hgvs;
+        return Ok(result);
+    }
+
+    if location.overlaps_splice_canonical
+        && exonic_splice_spill(start, end, transcript, locate_index).is_none()
+    {
         let mut result = build_splice_indel_result(transcript, &location, start, end)?;
         result.hgvs_c = hgvs;
         return Ok(result);
@@ -97,7 +144,29 @@ pub fn annotate_deletion(
             let del_cds_len = cds_offset_end - cds_offset_start;
             let exon_index = location.exon_index.unwrap_or(0);
 
-            if !del_cds_len.is_multiple_of(3) {
+            if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
+                partial_terminal_codon_indel_result(
+                    chrom,
+                    *cds_offset_start,
+                    *cds_offset_end,
+                    &[],
+                    transcript,
+                    locate_index,
+                    fasta,
+                    exon_index,
+                )
+            } else if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
+                deletion_into_partial_codon_result(
+                    chrom,
+                    *cds_offset_start,
+                    *cds_offset_end,
+                    transcript,
+                    locate_index,
+                    fasta,
+                    exon_index,
+                    location.overlaps_splice_region,
+                )
+            } else if !del_cds_len.is_multiple_of(3) {
                 annotate_cds_frameshift(
                     chrom,
                     *cds_offset_start,
@@ -131,6 +200,358 @@ pub fn annotate_deletion(
     Ok(result)
 }
 
+/// Translate a coding sequence whose last codon may be incomplete: complete
+/// codons as usual, a trailing partial codon as `X` unless the complete
+/// codons are a lone stop (`TranscriptVariationAllele.pm::peptide`,
+/// ensembl-variation release/116: VEP 116 c.658_659insGA `X/*`, edge
+/// insGGGTGAG `-/G*X`).
+fn translate_with_partial_codon(seq: &[u8], is_mito: bool) -> Result<Vec<u8>, VarEffectError> {
+    let whole = seq.len() - seq.len() % 3;
+    let mut aas = translate_sequence(&seq[..whole], is_mito)?;
+    if whole < seq.len() && aas != b"*" {
+        aas.push(b'X');
+    }
+    Ok(aas)
+}
+
+/// Result for a deletion that starts in a complete codon and ends in the
+/// incomplete terminal codon of a CDS whose length is not a whole number of
+/// codons.
+///
+/// Ending inside the partial codon, it shifts or removes complete codons:
+/// `frameshift_variant` (or `inframe_deletion`), as VEP 116 gives for
+/// NM_001424184.1 `c.657_658del` (codons `tcATa/tca`, amino acids `SX/S`).
+/// Removing the CDS end itself leaves no reading frame to shift and no stop
+/// codon to lose: `incomplete_terminal_codon_variant` +
+/// `coding_sequence_variant`. VEP's `frameshift_variant` + `stop_lost` there
+/// (`c.656_659del`) names a stop the transcript does not have
+/// (VEP_DIVERGENCES.md), and has no HGVS p. Otherwise HGVS p. is `p.?` and
+/// the termination codon is undetermined: the new frame runs past the
+/// annotated sequence.
+#[allow(clippy::too_many_arguments)]
+fn deletion_into_partial_codon_result(
+    chrom: &str,
+    cds_offset_start: u32,
+    cds_offset_end: u32,
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    fasta: &FastaReader,
+    exon_index: u16,
+    is_splice_region: bool,
+) -> Result<ConsequenceResult, VarEffectError> {
+    let total = index.total_cds_length();
+    let codon_start = (cds_offset_start / 3) * 3;
+    let ref_seq = fetch_cds_sequence(codon_start, total, chrom, transcript, index, fasta)?;
+    let local_start = (cds_offset_start - codon_start) as usize;
+    let local_end = (cds_offset_end - codon_start) as usize;
+    let mut alt_seq = ref_seq[..local_start].to_vec();
+    alt_seq.extend_from_slice(&ref_seq[local_end..]);
+
+    let mut consequences = if cds_offset_end >= total {
+        vec![
+            Consequence::IncompleteTerminalCodonVariant,
+            Consequence::CodingSequenceVariant,
+        ]
+    } else if (cds_offset_end - cds_offset_start).is_multiple_of(3) {
+        vec![Consequence::InframeDeletion]
+    } else {
+        vec![Consequence::FrameshiftVariant]
+    };
+    if is_splice_region {
+        consequences.push(Consequence::SpliceRegionVariant);
+    }
+    let impact = finalize_consequences(&mut consequences);
+
+    let is_mito = transcript.chrom == "chrM";
+    let ref_aas = translate_with_partial_codon(&ref_seq, is_mito)?;
+    let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
+    let protein_start = codon_start / 3 + 1;
+
+    let mut result = build_base_result(transcript, consequences);
+    result.impact = impact;
+    result.protein_start = Some(protein_start);
+    result.protein_end = Some(total.div_ceil(3));
+    result.codons = Some(format_codons_indel(
+        &ref_seq,
+        &alt_seq,
+        local_start,
+        local_end,
+    ));
+    result.amino_acids = Some(format_amino_acids_indel(&ref_aas, &alt_aas));
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_offset_start + 1);
+    result.cds_position_end = Some(cds_offset_end);
+    result.cdna_position = Some(compute_cdna_position_for_cds(cds_offset_start, index));
+    result.cdna_position_end = Some(compute_cdna_position_for_cds(cds_offset_end - 1, index));
+    // A deletion removing the CDS end has no protein change to name (VEP 116
+    // NM_001424184.1 c.656_659del: no HGVS p.); one ending inside the partial
+    // codon has an unknown one.
+    result.hgvs_p = (cds_offset_end < total).then(|| "p.?".to_string());
+    if result
+        .consequences
+        .contains(&Consequence::FrameshiftVariant)
+    {
+        result.ptc = super::PtcStatus::Indeterminate;
+    }
+    Ok(result)
+}
+
+/// Result for a deletion or insertion that starts in the incomplete terminal
+/// codon of a CDS whose length is not a whole number of codons.
+///
+/// VEP's `frameshift` and inframe predicates do not apply to a partial codon
+/// (`VariationEffect.pm::partial_codon`). VEP 116: removing the whole partial
+/// codon is `protein_altering_variant` + `incomplete_terminal_codon_variant`
+/// (ENST00000379099.3 `c.923del`, NM_001424184.1 `c.658_659del`: codons
+/// `TA/-`, amino acids `X/-`); removing part of it, or inserting without
+/// completing a codon, is `incomplete_terminal_codon_variant` +
+/// `coding_sequence_variant` (`c.658del`: `Ta/a`, `X`); an insertion that
+/// completes a stop codon adds `stop_gained` (`c.658_659insG`: `ta/tGa`,
+/// `X/*`). HGVS p. is `p.?`: the residue is unknown.
+#[allow(clippy::too_many_arguments)]
+fn partial_terminal_codon_indel_result(
+    chrom: &str,
+    cds_offset_start: u32,
+    cds_offset_end: u32,
+    inserted_bases: &[u8],
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    fasta: &FastaReader,
+    exon_index: u16,
+) -> Result<ConsequenceResult, VarEffectError> {
+    let total = index.total_cds_length();
+    let codon_start = total - total % 3;
+    let ref_bases = fetch_cds_sequence(codon_start, total, chrom, transcript, index, fasta)?;
+    let is_insertion = cds_offset_end == cds_offset_start;
+    // An insertion is classified by the CDS offset of genomic base `pos`. On
+    // the minus strand that base precedes the insertion point in coding
+    // order, so the bases go in after it (VEP 116 ENST00000518351.2
+    // c.544_545insG).
+    let edit_start = if is_insertion && matches!(transcript.strand, Strand::Minus) {
+        cds_offset_start + 1
+    } else {
+        cds_offset_start
+    };
+    let edit_end = if is_insertion {
+        edit_start
+    } else {
+        cds_offset_end.min(total)
+    };
+    let local_start = (edit_start - codon_start) as usize;
+    let local_end = (edit_end - codon_start) as usize;
+    let coding_inserted = match transcript.strand {
+        Strand::Plus => inserted_bases.to_vec(),
+        Strand::Minus => reverse_complement(inserted_bases),
+    };
+    let mut alt_bases = Vec::with_capacity(ref_bases.len() + coding_inserted.len());
+    alt_bases.extend_from_slice(&ref_bases[..local_start]);
+    alt_bases.extend_from_slice(&coding_inserted);
+    alt_bases.extend_from_slice(&ref_bases[local_end..]);
+
+    let is_mito = transcript.chrom == "chrM";
+    // Every completed codon is translated, as VEP does: `X/*` with
+    // `stop_gained` (NM_001424184.1 c.658_659insG), `X/W*X` for
+    // c.658_659insGGTGA, `X/R` otherwise (ENST00000518351.2 c.544_545insG).
+    let translation = if alt_bases.len() >= 3 {
+        Some(translate_with_partial_codon(&alt_bases, is_mito)?)
+    } else {
+        None
+    };
+    let stop_index = translation
+        .as_ref()
+        .and_then(|aas| aas.iter().position(|&aa| aa == b'*'));
+    let (mut consequences, amino_acids) = match (alt_bases.is_empty(), &translation) {
+        (true, _) => (
+            vec![
+                Consequence::ProteinAlteringVariant,
+                Consequence::IncompleteTerminalCodonVariant,
+            ],
+            "X/-".to_string(),
+        ),
+        (false, Some(aas)) => {
+            let mut terms = vec![
+                Consequence::IncompleteTerminalCodonVariant,
+                Consequence::CodingSequenceVariant,
+            ];
+            if stop_index.is_some() {
+                terms.push(Consequence::StopGained);
+            }
+            let peptide: String = aas.iter().map(|&b| char::from(b)).collect();
+            (terms, format!("X/{peptide}"))
+        }
+        (false, None) => (
+            vec![
+                Consequence::IncompleteTerminalCodonVariant,
+                Consequence::CodingSequenceVariant,
+            ],
+            "X".to_string(),
+        ),
+    };
+    let impact = finalize_consequences(&mut consequences);
+    let mut result = build_base_result(transcript, consequences);
+    result.impact = impact;
+    let protein = codon_start / 3 + 1;
+    result.protein_start = Some(protein);
+    result.protein_end = Some(protein);
+    result.codons = Some(format_codons_indel(
+        &ref_bases,
+        &alt_bases,
+        local_start,
+        local_end,
+    ));
+    result.amino_acids = Some(amino_acids);
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    // An insertion reports the base before and the base after the insertion
+    // point, as the other insertion paths do (VEP 116 NM_001424184.1
+    // c.658_659insG: CDS 658); a deletion its first and last removed base.
+    let (first, last) = if is_insertion {
+        (edit_start.saturating_sub(1), edit_start.min(total - 1))
+    } else {
+        (edit_start, edit_end - 1)
+    };
+    result.cds_position = Some(first + 1);
+    result.cds_position_end = Some(last + 1);
+    result.cdna_position = Some(compute_cdna_position_for_cds(first, index));
+    result.cdna_position_end = Some(compute_cdna_position_for_cds(last, index));
+    result.hgvs_p = Some("p.?".to_string());
+    if let Some(stop) = stop_index {
+        // The new stop sits at or after the original terminus, in the last
+        // exon: resolve it like any other termination codon.
+        result.ptc = super::nmd::resolve_ptc(
+            crate::hgvs_p::PtcSite::Residue(protein + stop as u32),
+            &crate::hgvs_p::CdsEdit {
+                start: edit_start,
+                del_len: edit_end - edit_start,
+                ins_len: coding_inserted.len() as u32,
+            },
+            index,
+        );
+    }
+    Ok(result)
+}
+
+/// Where a CDS insertion sits relative to the incomplete terminal codon of a
+/// CDS whose length is not a whole number of codons.
+#[derive(Debug, PartialEq)]
+pub(super) enum PartialCodonInsertion {
+    /// Between two bases of the partial codon.
+    Inside,
+    /// Between the last complete codon and the partial codon, at this
+    /// padded CDS offset (the insertion goes before it).
+    FivePrimeEdge(u32),
+    /// After the last CDS base, which only the minus strand classifies as a
+    /// CDS insertion.
+    AfterCds,
+}
+
+/// Classify a CDS insertion against the incomplete terminal codon.
+///
+/// An insertion is classified by the CDS offset of genomic base `pos`; on
+/// the minus strand that base precedes the insertion point in coding order,
+/// so the coding insertion point is one later. `None` when the CDS has no
+/// partial codon or the insertion is elsewhere.
+pub(super) fn partial_codon_insertion_site(
+    classified_offset: u32,
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+) -> Option<PartialCodonInsertion> {
+    let total = index.total_cds_length();
+    if total.is_multiple_of(3) {
+        return None;
+    }
+    let partial_start = total - total % 3;
+    let insert_before = match transcript.strand {
+        Strand::Plus => classified_offset,
+        Strand::Minus => classified_offset + 1,
+    };
+    if insert_before >= total {
+        Some(PartialCodonInsertion::AfterCds)
+    } else if insert_before == partial_start && partial_start > 0 {
+        // With no complete codon before it (a CDS shorter than three bases)
+        // there is no edge; the insertion is inside the only codon.
+        Some(PartialCodonInsertion::FivePrimeEdge(insert_before))
+    } else if insert_before >= partial_start {
+        Some(PartialCodonInsertion::Inside)
+    } else {
+        None
+    }
+}
+
+/// Result for an insertion between the last complete codon and the
+/// incomplete terminal codon.
+///
+/// VEP 116 translates the inserted bases on their own
+/// ([`translate_with_partial_codon`]). Every such insertion is `inframe_insertion` +
+/// `incomplete_terminal_codon_variant`; `stop_gained` is added when the
+/// translation has a stop and `coding_sequence_variant` when it has an `X`
+/// (NM_001424184.1 c.657_658insG `-/X`, insGGG `-/G`, insTGA and insTGAG
+/// `-/*` and insGGGTGAG `-/G*X` with `stop_gained`; ENST00000518351.2 the
+/// same on the minus strand).
+/// Codons are `-/<inserted>` and the positions are the two flanking bases.
+/// A stop is a termination codon at the original terminus, in the last
+/// exon, and gets HGVS p. `p.?` as on the rest of the partial codon (VEP
+/// writes `p.Ter220=` or nothing); without a stop there is no HGVS p.
+fn partial_codon_edge_insertion_result(
+    insert_before: u32,
+    inserted_bases: &[u8],
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    exon_index: u16,
+) -> Result<ConsequenceResult, VarEffectError> {
+    let coding_inserted = match transcript.strand {
+        Strand::Plus => inserted_bases.to_vec(),
+        Strand::Minus => reverse_complement(inserted_bases),
+    };
+    let is_mito = transcript.chrom == "chrM";
+    let translation = translate_with_partial_codon(&coding_inserted, is_mito)?;
+    let stop_codon_index = translation
+        .iter()
+        .position(|&aa| aa == b'*')
+        .map(|i| i as u32);
+
+    let mut consequences = vec![
+        Consequence::InframeInsertion,
+        Consequence::IncompleteTerminalCodonVariant,
+    ];
+    if stop_codon_index.is_some() {
+        consequences.push(Consequence::StopGained);
+    }
+    // VEP's `coding_unknown`: the peptide has an `X`.
+    if translation.contains(&b'X') {
+        consequences.push(Consequence::CodingSequenceVariant);
+    }
+    let impact = finalize_consequences(&mut consequences);
+    let mut result = build_base_result(transcript, consequences);
+    result.impact = impact;
+    let inserted: String = coding_inserted.iter().map(|&b| char::from(b)).collect();
+    let peptide: String = translation.iter().map(|&b| char::from(b)).collect();
+    result.codons = Some(format!("-/{inserted}"));
+    result.amino_acids = Some(format!("-/{peptide}"));
+    result.protein_start = Some(insert_before / 3);
+    result.protein_end = Some(insert_before / 3 + 1);
+    result.cds_position = Some(insert_before);
+    result.cds_position_end = Some(insert_before + 1);
+    // `insert_before` is at least 3: the 5' edge exists only after a
+    // complete codon (`partial_codon_insertion_site`).
+    result.cdna_position = Some(compute_cdna_position_for_cds(insert_before - 1, index));
+    result.cdna_position_end = Some(compute_cdna_position_for_cds(insert_before, index));
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    if let Some(stop) = stop_codon_index {
+        let residue = insert_before / 3 + 1 + stop;
+        result.hgvs_p = Some("p.?".to_string());
+        result.ptc = super::nmd::resolve_ptc(
+            crate::hgvs_p::PtcSite::Residue(residue),
+            &crate::hgvs_p::CdsEdit {
+                start: insert_before,
+                del_len: 0,
+                ins_len: coding_inserted.len() as u32,
+            },
+            index,
+        );
+    }
+    Ok(result)
+}
+
 /// Annotate an insertion against one transcript.
 ///
 /// `pos` is the 0-based insertion point (post-trimming). The insertion
@@ -144,7 +565,41 @@ pub fn annotate_insertion(
     locate_index: &LocateIndex,
     fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
-    let location = locate_indel(chrom, pos, pos, transcript, locate_index)?;
+    let mut result =
+        annotate_insertion_core(chrom, pos, inserted_bases, transcript, locate_index, fasta)?;
+    add_splice_spill(
+        &mut result,
+        exonic_splice_spill(pos, pos, transcript, locate_index),
+    );
+    // An insertion at the edge of a frameshift intron whose canonical windows
+    // do not spill (gaps of 2 to 13 bases) also sits next to the gap's
+    // intronic bases: VEP 116 ENST00000436261.7 c.1475_1475+1insT is
+    // frameshift_variant + splice_region_variant + intron_variant.
+    if is_frameshift_junction_insertion(pos, transcript, locate_index)
+        && exonic_splice_spill(pos, pos, transcript, locate_index).is_none()
+    {
+        for term in [Consequence::SpliceRegionVariant, Consequence::IntronVariant] {
+            if !result.consequences.contains(&term) {
+                result.consequences.push(term);
+            }
+        }
+        result.impact = finalize_consequences(&mut result.consequences);
+    }
+    Ok(result)
+}
+
+/// [`annotate_insertion`] without the splice terms a one-base frameshift intron spills
+/// onto exon bases.
+fn annotate_insertion_core(
+    chrom: &str,
+    pos: u64,
+    inserted_bases: &[u8],
+    transcript: &TranscriptModel,
+    locate_index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<ConsequenceResult, VarEffectError> {
+    let location_pos = frameshift_junction_insertion_point(pos, transcript, locate_index);
+    let location = locate_indel(chrom, location_pos, location_pos, transcript, locate_index)?;
 
     // HGVS 3' normalization: shift insertion to the most 3' equivalent
     // position on the coding strand for HGVS notation. At the shifted
@@ -175,7 +630,22 @@ pub fn annotate_insertion(
         fasta,
     )?;
 
-    if location.overlaps_splice_canonical {
+    if let Some(intron) = frameshift_intron_endpoint(pos, pos, transcript, locate_index) {
+        let mut result = super::complex::frameshift_intron_indel_result(
+            pos,
+            pos,
+            intron,
+            &location,
+            transcript,
+            locate_index,
+        );
+        result.hgvs_c = hgvs;
+        return Ok(result);
+    }
+
+    if location.overlaps_splice_canonical
+        && exonic_splice_spill(pos, pos, transcript, locate_index).is_none()
+    {
         let mut result = build_splice_indel_result(transcript, &location, pos, pos)?;
         result.hgvs_c = hgvs;
         return Ok(result);
@@ -207,8 +677,47 @@ pub fn annotate_insertion(
             let ins_len = inserted_bases.len() as u32;
             let exon_index = location.exon_index.unwrap_or(0);
 
-            if !ins_len.is_multiple_of(3) {
-                annotate_cds_frameshift(
+            match partial_codon_insertion_site(*cds_offset_start, transcript, locate_index) {
+                Some(PartialCodonInsertion::Inside) => partial_terminal_codon_indel_result(
+                    chrom,
+                    *cds_offset_start,
+                    *cds_offset_start,
+                    inserted_bases,
+                    transcript,
+                    locate_index,
+                    fasta,
+                    exon_index,
+                ),
+                Some(PartialCodonInsertion::FivePrimeEdge(edit)) => {
+                    partial_codon_edge_insertion_result(
+                        edit,
+                        inserted_bases,
+                        transcript,
+                        locate_index,
+                        exon_index,
+                    )
+                }
+                Some(PartialCodonInsertion::AfterCds) => {
+                    // Only the minus strand gets here, where the 3'UTR lies
+                    // below the CDS. Without one the insertion is past the
+                    // transcript end, as on the plus strand (VEP 116
+                    // ENST00000518351.2: `downstream_gene_variant`; with a
+                    // 3'UTR, ENST00000654733.1 c.*1dup:
+                    // `3_prime_UTR_variant`).
+                    let has_utr3 = transcript
+                        .cds_genomic_start
+                        .is_some_and(|cds_start| transcript.tx_start < cds_start);
+                    if !has_utr3 {
+                        return Ok(build_base_result(
+                            transcript,
+                            vec![Consequence::DownstreamGeneVariant],
+                        ));
+                    }
+                    let mut utr_location = location.clone();
+                    utr_location.region = IndelRegion::ThreePrimeUtr;
+                    build_noncds_indel_result(transcript, &utr_location, pos, pos)
+                }
+                None if !ins_len.is_multiple_of(3) => annotate_cds_frameshift(
                     chrom,
                     *cds_offset_start,
                     transcript,
@@ -225,9 +734,8 @@ pub fn annotate_insertion(
                        // reading frame than VEP expects). Root cause: VEP's
                        // internal protein-level shift differs from the
                        // DNA-level shift. Needs per-variant investigation.
-                )
-            } else {
-                annotate_cds_inframe_insertion(
+                ),
+                None => annotate_cds_inframe_insertion(
                     chrom,
                     *cds_offset_start,
                     inserted_bases,
@@ -237,12 +745,17 @@ pub fn annotate_insertion(
                     exon_index,
                     location.overlaps_splice_region,
                     shift as u32,
-                )
+                ),
             }
         }
         _ => build_noncds_indel_result(transcript, &location, pos, pos),
     }?;
 
+    // An insertion between an exon and a frameshift intron has no exon
+    // number in VEP 116 (ENST00000400999.7 c.228_228+1insA).
+    if is_frameshift_junction_insertion(pos, transcript, locate_index) {
+        result.exon = None;
+    }
     result.hgvs_c = hgvs;
     Ok(result)
 }
@@ -284,7 +797,7 @@ pub(super) fn annotate_cds_frameshift(
 
     // VEP's start_lost() checks _overlaps_start_codon() AND
     // _ins_del_start_altered() (methionine actually changed).
-    let overlaps_start_codon = codon_number == 1;
+    let overlaps_start_codon = codon_number == 1 && has_complete_start_codon(index);
     let start_lost = if overlaps_start_codon {
         if cds_offset_start == 0 && cds_offset_end >= 3 {
             true
@@ -504,6 +1017,7 @@ fn annotate_cds_inframe_deletion(
     let mut consequences = Vec::new();
 
     if first_codon == 0
+        && has_complete_start_codon(index)
         && ((cds_offset_start == 0 && cds_offset_end >= 3) || alt_aas.first() != Some(&b'M'))
     {
         consequences.push(Consequence::StartLost);
@@ -681,7 +1195,7 @@ fn annotate_cds_inframe_insertion(
     let first_codon = codon_start / 3;
     let mut consequences = Vec::new();
 
-    if first_codon == 0 && alt_aas.first() != Some(&b'M') {
+    if first_codon == 0 && has_complete_start_codon(index) && alt_aas.first() != Some(&b'M') {
         consequences.push(Consequence::StartLost);
     }
 

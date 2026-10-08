@@ -384,12 +384,21 @@ pub(crate) fn validate_base(b: u8, input: &str) -> Result<(), VarEffectError> {
 ///
 /// Handles CDS, 5'UTR, 3'UTR, and intronic positions. Requires a
 /// protein-coding transcript (caller must validate `biotype`).
+///
+/// `substitution` selects the numbering of a CDS position on a 5'-incomplete
+/// CDS: VEP 116 counts the missing bases of the partial first codon only for
+/// the exonic position of a substitution (`c.4G>A` is the second genomic
+/// base after a two-base pad), and counts genomic bases for intronic anchors,
+/// deletions, insertions and delins (`c.191+6T>A`, `c.4del`). Identical on a
+/// complete CDS.
 fn resolve_position(
     pos: &HgvsCPosition,
     transcript: &TranscriptModel,
     index: &LocateIndex,
+    substitution: bool,
 ) -> Result<u64, VarEffectError> {
     let accession = &transcript.accession;
+    let padded = substitution && pos.intronic_offset.is_none();
 
     // Resolve the exonic anchor (ignoring intronic offset).
     let anchor = if pos.is_3utr {
@@ -397,7 +406,7 @@ fn resolve_position(
     } else if pos.base < 0 {
         resolve_5utr(pos.base, transcript, index)?
     } else {
-        resolve_cds(pos.base, transcript, index)?
+        resolve_cds(pos.base, transcript, index, padded)?
     };
 
     // Apply intronic offset if present.
@@ -451,14 +460,22 @@ fn resolve_position(
 /// Resolve a CDS position (c.N, where N >= 1) to 0-based genomic.
 ///
 /// Uses binary search on `cumulative_cds` — same pattern as
-/// `consequence/helpers.rs:fetch_cds_sequence`.
+/// `consequence/helpers.rs:fetch_cds_sequence`. `padded` reads `N` in the
+/// padded frame of a 5'-incomplete CDS (see [`resolve_position`]); otherwise
+/// `c.1` is the first genomic coding base.
 fn resolve_cds(
     base: i64,
     transcript: &TranscriptModel,
     index: &LocateIndex,
+    padded: bool,
 ) -> Result<u64, VarEffectError> {
     debug_assert!(base > 0);
-    let cds_offset = (base - 1) as u32;
+    let pad = index.cds_start_pad();
+    let cds_offset = if padded {
+        (base - 1) as u32
+    } else {
+        (base - 1) as u32 + pad
+    };
     let cumulative = index.cumulative_cds();
 
     if cds_offset >= index.total_cds_length() {
@@ -468,8 +485,19 @@ fn resolve_cds(
         });
     }
 
+    // In the padded frame, c.1..=pad of a 5'-incomplete CDS are the missing
+    // bases of the partial first codon: they have no genomic position.
+    if cds_offset < pad {
+        return Err(VarEffectError::PositionOutOfRange {
+            accession: transcript.accession.clone(),
+            detail: format!(
+                "c.{base} lies in the {pad} base(s) missing from the incomplete first codon"
+            ),
+        });
+    }
+
     // Binary search: find the CDS segment containing this offset.
-    // cumulative[i] = sum of lengths of segments 0..i.
+    // cumulative[i] = pad + sum of lengths of segments 0..i.
     // We want the largest i such that cumulative[i] <= cds_offset.
     let seg_idx = cumulative.partition_point(|&c| c <= cds_offset) - 1;
     let seg = &transcript.cds_segments[seg_idx];
@@ -674,7 +702,7 @@ fn build_substitution(
         unreachable!("build_substitution is only called for Substitution variants")
     };
 
-    let genomic_pos = resolve_position(&parsed.start, transcript, index)?;
+    let genomic_pos = resolve_position(&parsed.start, transcript, index, true)?;
     let chrom = &transcript.chrom;
 
     // Convert coding-strand bases to plus-strand for VCF output.
@@ -709,9 +737,9 @@ fn resolve_range(
     transcript: &TranscriptModel,
     index: &LocateIndex,
 ) -> Result<(u64, u64), VarEffectError> {
-    let g_start = resolve_position(start, transcript, index)?;
+    let g_start = resolve_position(start, transcript, index, false)?;
     let g_end = match end {
-        Some(e) => resolve_position(e, transcript, index)?,
+        Some(e) => resolve_position(e, transcript, index, false)?,
         None => g_start,
     };
     // Normalize: on minus strand, start may have higher genomic coord than end.
@@ -797,8 +825,8 @@ fn build_insertion(
         .end
         .as_ref()
         .expect("insertion must have end position");
-    let g_left = resolve_position(&parsed.start, transcript, index)?;
-    let g_right = resolve_position(end_pos, transcript, index)?;
+    let g_left = resolve_position(&parsed.start, transcript, index, false)?;
+    let g_right = resolve_position(end_pos, transcript, index, false)?;
 
     let chrom = &transcript.chrom;
     // VCF anchor = left flanking base (min genomic).
@@ -1211,7 +1239,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 1500);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 1500);
     }
 
     #[test]
@@ -1225,7 +1253,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 19499);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 19499);
     }
 
     #[test]
@@ -1239,7 +1267,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 3000);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 3000);
     }
 
     #[test]
@@ -1253,7 +1281,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 1999);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 1999);
     }
 
     #[test]
@@ -1267,7 +1295,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 1499);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 1499);
     }
 
     #[test]
@@ -1282,7 +1310,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 19500);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 19500);
     }
 
     #[test]
@@ -1296,7 +1324,7 @@ mod tests {
             is_3utr: true,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 4500);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 4500);
     }
 
     #[test]
@@ -1311,7 +1339,7 @@ mod tests {
             is_3utr: true,
             intronic_offset: None,
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 10999);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 10999);
     }
 
     #[test]
@@ -1325,7 +1353,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: Some(5),
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 2004);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 2004);
     }
 
     #[test]
@@ -1339,7 +1367,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: Some(-4),
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 2996);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 2996);
     }
 
     #[test]
@@ -1353,7 +1381,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: Some(1),
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 17999);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 17999);
     }
 
     #[test]
@@ -1367,7 +1395,7 @@ mod tests {
             is_3utr: false,
             intronic_offset: Some(-2),
         };
-        assert_eq!(resolve_position(&pos, tx, idx).unwrap(), 16001);
+        assert_eq!(resolve_position(&pos, tx, idx, true).unwrap(), 16001);
     }
 
     #[test]
@@ -1382,7 +1410,7 @@ mod tests {
             intronic_offset: None,
         };
         assert!(matches!(
-            resolve_position(&pos, tx, idx),
+            resolve_position(&pos, tx, idx, true),
             Err(VarEffectError::PositionOutOfRange { .. })
         ));
     }

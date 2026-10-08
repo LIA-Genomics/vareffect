@@ -102,7 +102,9 @@ impl TranscriptStore {
     ///   malformed or the wrong type.
     /// * [`VarEffectError::Malformed`] if bytes follow the payload, or any
     ///   record violates a coordinate invariant (`tx_end <= tx_start`,
-    ///   `tx_end > i32::MAX`, duplicate accession).
+    ///   `tx_end > i32::MAX`, duplicate accession) or cannot be indexed (see
+    ///   [`LocateIndex::build`]: a CDS phase above 2, two CDS segments in one
+    ///   exon, a CDS boundary outside the exons).
     /// * [`VarEffectError::EmptyStore`] if the store holds no transcripts.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, VarEffectError> {
         Self::try_from_transcripts(decode_transcript_store(bytes)?)

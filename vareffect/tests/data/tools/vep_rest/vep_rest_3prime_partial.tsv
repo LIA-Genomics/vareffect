@@ -1,0 +1,8 @@
+# Ensembl VEP REST, release 116 (/info/software), GRCh38, fetched 2026-10-07. Same request shape as vep_rest_padded_cds.tsv.
+# label	region	allele	tx	consequences	impact	hgvsc	hgvsp	cdna_start	cds_start	protein_start	codons	amino_acids	flags
+3prime_partial_plus	1:1290943	C/A	ENST00000379099	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000379099.3:c.925C>A	ENSP00000368393.3:p.Ter309=	923	925	309	C/A	X	cds_start_NF,cds_end_NF
+3prime_partial_plus	1:1290943	C/G	ENST00000379099	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000379099.3:c.925C>G	ENSP00000368393.3:p.Ter309=	923	925	309	C/G	X	cds_start_NF,cds_end_NF
+3prime_partial_plus	1:1290943	C/T	ENST00000379099	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000379099.3:c.925C>T	ENSP00000368393.3:p.Ter309=	923	925	309	C/T	X	cds_start_NF,cds_end_NF
+mt_polyA_stop	MT:12137	T/A	ENST00000361381	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000361381.2:c.1378T>A	ENSP00000354961.2:p.Ter460=	1378	1378	460	T/A	X	-
+mt_polyA_stop	MT:12137	T/C	ENST00000361381	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000361381.2:c.1378T>C	ENSP00000354961.2:p.Ter460=	1378	1378	460	T/C	X	-
+mt_polyA_stop	MT:12137	T/G	ENST00000361381	incomplete_terminal_codon_variant,coding_sequence_variant	LOW	ENST00000361381.2:c.1378T>G	ENSP00000354961.2:p.Ter460=	1378	1378	460	T/G	X	-

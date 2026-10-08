@@ -1,0 +1,23 @@
+# Ensembl VEP REST, release 116 (/info/software), GRCh38, fetched 2026-10-07.
+# Request per row: https://rest.ensembl.org/vep/human/region/<region>/<alt>?content-type=application/json&hgvs=1&transcript_id=<tx>  (tx is unversioned in the request; join on the versioned accession in hgvsc)
+# strand	phase	tx	region	allele	consequences	hgvsc	hgvsp	_	cdna_start	_	cds_start	_	protein_start	codons	amino_acids
++	2	ENST00000455979	1:939275	A/C	['coding_sequence_variant']	ENST00000455979.1:c.2A>C	ENSP00000412228.1:p.Ter1=	cdna	1	cds	2	prot	1	nAg/nCg	X
++	2	ENST00000455979	1:939276	G/A	['coding_sequence_variant']	ENST00000455979.1:c.3G>A	ENSP00000412228.1:p.Ter1=	cdna	2	cds	3	prot	1	naG/naA	X
++	2	ENST00000455979	1:939277	G/A	['missense_variant']	ENST00000455979.1:c.4G>A	ENSP00000412228.1:p.Ala2Thr	cdna	3	cds	4	prot	2	Gcg/Acg	A/T
++	2	ENST00000455979	1:939278	C/A	['missense_variant']	ENST00000455979.1:c.5C>A	ENSP00000412228.1:p.Ala2Glu	cdna	4	cds	5	prot	2	gCg/gAg	A/E
++	2	ENST00000455979	1:939279	G/A	['synonymous_variant']	ENST00000455979.1:c.6G>A	ENSP00000412228.1:p.Ala2=	cdna	5	cds	6	prot	2	gcG/gcA	A
+-	1	ENST00000403997	1:1228596	C/A	['coding_sequence_variant']	ENST00000403997.2:c.3G>T	ENSP00000384207.2:p.Ter1=	cdna	1	cds	3	prot	1	nnG/nnT	X
+-	1	ENST00000403997	1:1228595	G/A	['synonymous_variant']	ENST00000403997.2:c.4C>T	ENSP00000384207.2:p.Leu2=	cdna	2	cds	4	prot	2	Ctg/Ttg	L
+-	1	ENST00000403997	1:1228594	A/C	['missense_variant']	ENST00000403997.2:c.5T>G	ENSP00000384207.2:p.Leu2Arg	cdna	3	cds	5	prot	2	cTg/cGg	L/R
+-	1	ENST00000403997	1:1228593	C/A	['synonymous_variant']	ENST00000403997.2:c.6G>T	ENSP00000384207.2:p.Leu2=	cdna	4	cds	6	prot	2	ctG/ctT	L
+-	1	ENST00000403997	1:1228592	C/A	['stop_gained']	ENST00000403997.2:c.7G>T	ENSP00000384207.2:p.Glu3Ter	cdna	5	cds	7	prot	3	Gag/Tag	E/*
+-	2	ENST00000420515	1:2194748	A/C	['coding_sequence_variant']	ENST00000420515.1:c.2T>G	ENSP00000409721.1:p.Ter1=	cdna	1	cds	2	prot	1	nTg/nGg	X
+-	2	ENST00000420515	1:2194747	C/A	['coding_sequence_variant']	ENST00000420515.1:c.3G>T	ENSP00000409721.1:p.Ter1=	cdna	2	cds	3	prot	1	ntG/ntT	X
+-	2	ENST00000420515	1:2194746	C/A	['stop_gained']	ENST00000420515.1:c.4G>T	ENSP00000409721.1:p.Glu2Ter	cdna	3	cds	4	prot	2	Gag/Tag	E/*
+-	2	ENST00000420515	1:2194745	T/A	['missense_variant']	ENST00000420515.1:c.5A>T	ENSP00000409721.1:p.Glu2Val	cdna	4	cds	5	prot	2	gAg/gTg	E/V
+-	2	ENST00000420515	1:2194744	C/A	['missense_variant']	ENST00000420515.1:c.6G>T	ENSP00000409721.1:p.Glu2Asp	cdna	5	cds	6	prot	2	gaG/gaT	E/D
++	1	ENST00000379099	1:1287109	T/A	['coding_sequence_variant']	ENST00000379099.3:c.3T>A	ENSP00000368393.3:p.Ter1=	cdna	1	cds	3	prot	1	nnT/nnA	X
++	1	ENST00000379099	1:1287110	G/A	['missense_variant']	ENST00000379099.3:c.4G>A	ENSP00000368393.3:p.Ala2Thr	cdna	2	cds	4	prot	2	Gca/Aca	A/T
++	1	ENST00000379099	1:1287111	C/A	['missense_variant']	ENST00000379099.3:c.5C>A	ENSP00000368393.3:p.Ala2Glu	cdna	3	cds	5	prot	2	gCa/gAa	A/E
++	1	ENST00000379099	1:1287112	A/C	['synonymous_variant']	ENST00000379099.3:c.6A>C	ENSP00000368393.3:p.Ala2=	cdna	4	cds	6	prot	2	gcA/gcC	A
++	1	ENST00000379099	1:1287113	A/C	['missense_variant']	ENST00000379099.3:c.7A>C	ENSP00000368393.3:p.Thr3Pro	cdna	5	cds	7	prot	3	Aca/Cca	T/P

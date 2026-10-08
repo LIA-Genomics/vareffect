@@ -1,329 +1,312 @@
 # VEP divergences
 
-This document catalogues every known point where `vareffect`'s output
-differs from Ensembl VEP, every VEP feature that is not yet implemented,
-and every feature that is intentionally out of scope for the core crate.
+Where `vareffect`'s output differs from Ensembl VEP, and which VEP features
+it does not cover.
 
-## Overview
+- **Target:** VEP releases 115 and 116, GRCh38. GRCh37 and CHM13 are not
+  validated (the transcript and genome binaries would need rebuilding).
+- **Transcripts:** MANE Select, MANE Plus Clinical and RefSeq Select. A
+  variant overlapping only transcripts outside the loaded store is
+  `intergenic_variant`.
 
-- **Target VEP version:** releases 115 and 116.
-- **Genome build:** GRCh38 (GRCh37 and CHM13 are not validated; the
-  transcript and genome binaries would need to be rebuilt from
-  build-specific sources).
-- **Transcript source:** MANE Select, MANE Plus Clinical, and RefSeq
-  Select. Variants on accessions outside the loaded store are reported as
-  `intergenic_variant` even if they would overlap a non-loaded transcript.
-- **Validation date:** last full concordance run 2026-04-11 — 6 / 6 test
-  files pass (see [Validation methodology](#validation-methodology) for the
-  per-file variant counts).
+Contents:
 
-## Intentional divergences
+1. [Summary](#1-summary)
+2. [Consequence terms](#2-consequence-terms)
+3. [Incomplete transcripts](#3-incomplete-transcripts)
+4. [NMD](#4-nmd)
+5. [Structural variants](#5-structural-variants)
+6. [Coverage and scope](#6-coverage-and-scope)
+7. [Validation](#7-validation)
+8. [Known edge cases](#8-known-edge-cases)
 
-These are cases where `vareffect` deliberately produces different output
-from VEP. Each is documented as an intentional choice rather than a bug.
+## 1. Summary
 
-### Splice region sub-terms not emitted
+| Area | VEP | `vareffect` | Section |
+|---|---|---|---|
+| Splice sub-terms | `splice_polypyrimidine_tract_variant`, `splice_donor_region_variant`, `splice_donor_5th_base_variant` | `splice_region_variant` | [2.1](#21-splice-region-sub-terms) |
+| Intronic variant, non-coding transcript | `non_coding_transcript_variant` | `intron_variant` | [2.2](#22-intronic-variants-of-non-coding-transcripts) |
+| Deletion across a CDS/UTR boundary | `p.Met1_?5`-style HGVS p., no `protein_start` | no HGVS p., `protein_start` 1 | [2.3](#23-deletions-across-a-cdsutr-boundary) |
+| Partial codon, HGVS p. | `p.Ter…` | `p.?` | [3.1](#31-partial-first-and-last-codons) |
+| Deletion removing a CDS end with no stop | `stop_lost` / `stop_retained_variant` | no stop term | [3.1](#31-partial-first-and-last-codons) |
+| Splice-region windows near a frameshift intron | spill up to 7 exon bases (SNVs), stop at 8 (indels) | 3 exon bases (SNVs), up to 16 (indel acceptor side) | [3.2](#32-frameshift-introns) |
+| NMD | `NMD.pm` rules, biotype term `NMD_transcript_variant` | last-junction rule only; `ptc` field for PVS1 | [4](#4-nmd) |
+| Structural variants | codon and splice terms at breakpoints | region-level terms only | [5](#5-structural-variants) |
+| HGVS 3' shift | `--shift_hgvs` toggle | always on | [6.2](#62-not-yet-implemented) |
 
-VEP optionally emits three fine-grained splice region sub-terms via plugin
-extensions or newer SO vocabularies:
+## 2. Consequence terms
 
-- `splice_polypyrimidine_tract_variant` (acceptor intronic positions −3 to
-  −17)
-- `splice_donor_region_variant` (donor intronic positions +3, +4, +6)
-- `splice_donor_5th_base_variant` (donor intronic position +5)
+### 2.1 Splice region sub-terms
 
-`vareffect` classifies all of these as the generic `splice_region_variant`
-plus the surrounding context term (`intron_variant` for deep intronic
-positions). These sub-terms are not part of VEP's default core SO output —
-they are produced by plugin extensions or newer releases that have not
-been adopted widely in clinical pipelines.
+VEP 116 emits three finer splice-region terms:
+`splice_polypyrimidine_tract_variant` (acceptor intron −3 to −17),
+`splice_donor_region_variant` (donor intron +3, +4, +6) and
+`splice_donor_5th_base_variant` (donor intron +5). `vareffect` reports all
+three as `splice_region_variant` (plus `intron_variant` where applicable).
+To recover the finer term, reclassify from the splice offsets that
+`locate_indel` exposes.
 
-If you need sub-term granularity, post-process the `ConsequenceResult` and
-the `IndelLocation` splice offsets from `locate_indel` to reclassify.
+### 2.2 Intronic variants of non-coding transcripts
 
-### Non-coding transcript classification
+VEP may give `non_coding_transcript_variant`; `vareffect` gives
+`intron_variant`, and the non-coding context is in
+`TranscriptModel::biotype`. Inside a frameshift intron `vareffect` gives
+`non_coding_transcript_variant` as VEP does.
 
-For an intronic variant on a non-coding transcript (`NR_*` accession),
-VEP may emit `non_coding_transcript_variant`. `vareffect` emits the more
-specific `intron_variant` and leaves the non-coding context implicit in
-the transcript accession prefix.
+### 2.3 Deletions across a CDS/UTR boundary
 
-This is a lossless divergence — the caller can recover the non-coding
-distinction from `TranscriptModel::biotype`, but if your downstream
-pipeline keys on the SO term string it will need a one-line adapter.
+VEP's `frameshift` predicate needs both `cds_start` and `cds_end`, so a
+deletion starting in the 5'UTR or running into the 3'UTR never draws
+`frameshift_variant`. `vareffect` matches: `{5_prime_UTR_variant,
+start_lost}` and `{stop_lost, 3_prime_UTR_variant}`, with no NMD prediction
+or termination codon. A deletion starting at CDS offset 1 or 2 does draw
+`frameshift_variant` with `start_lost`.
 
-### NMD prediction via 50-nucleotide rule only
+**Difference:** VEP writes `p.Met1_?5`-style HGVS p. and no
+`protein_start`; `vareffect` writes no HGVS p. and `protein_start` 1.
 
-`vareffect` applies the 50-nucleotide NMD rule to `stop_gained` and
-`frameshift_variant` consequences and exposes the result as
-`ConsequenceResult::predicts_nmd`. VEP emits a separate
-`NMD_transcript_variant` SO term when the *transcript itself* is biotyped
-as NMD. `vareffect` does not emit this biotype-level term; if your store
-contains explicitly NMD-flagged transcripts, filter them in the caller.
+## 3. Incomplete transcripts
 
-`predicts_nmd` measures the distance from the **variant's own CDS
-position** to the last exon-exon junction, not from the termination codon.
-The two coincide for `stop_gained`, but for `frameshift_variant` the
-termination codon lies downstream of the variant and may sit in a later
-exon — so `predicts_nmd` can report NMD for a frameshift whose actual
-termination codon escapes it.
+These cases do not occur in MANE except TMEM247 NM_001424184.1; they matter
+for GENCODE and full RefSeq transcripts.
 
-Measuring at the variant site follows `NMD.pm`, but the agreement is
-partial. Matching: the variant site as the anchor, the last-junction
-distance rule, and the intronless case. Diverging:
+### 3.1 Partial first and last codons
 
-- `NMD.pm` rule 3 escapes a variant in the **first ~100 coding bases**
-  (`$variant_coding_region <= 101`). This crate does not implement it, so a
-  5'-proximal truncating variant is reported NMD-predicted where the plugin
-  reports escape.
-- `NMD.pm` walks **all transcript exons**; this crate uses CDS segments only.
-- `NMD.pm`'s penultimate-exon window is the 3'-most **52 genomic bases**
-  (`variant_exon_check`: `$diff_end = $coding_region_end - 51`, tested
-  inclusively at both ends), against the 50 coding bases used here. The 50
-  matches the ClinGen SVI wording ("within the 3'-most 50 nucleotides"), so
-  `ptc` is deliberately ClinGen-aligned rather than `NMD.pm`-aligned.
+A CDS can start mid-codon (GENCODE `cds_start_NF`, GFF3 phase 1 or 2 on the
+first CDS row) or end mid-codon (`cds_end_NF`, or a stop completed only by
+polyadenylation, as in MT-ND4 and TMEM247). `vareffect` follows VEP 116:
 
-`ConsequenceResult::ptc` carries that codon's own residue position and an
-NMD verdict computed there. Consumers applying the ClinGen SVI PVS1
-decision tree (Abou Tayoun et al. 2018, PMID 30192042,
-doi:10.1002/humu.23626) must read `ptc`, not `predicts_nmd`.
+| Aspect | Behavior (as VEP 116) |
+|---|---|
+| HGVS `c.` | The missing bases of a partial first codon are counted only for the exonic position of a substitution (`c.3` is the first genomic base after a phase-1 start); everywhere else genomic bases are counted (`c.191+6T>A`, `c.4del` for the base whose substitution is `c.5`). `resolve_hgvs_c` reads both. |
+| cDNA | Transcript bases only. |
+| Codons, amino acids | `nnT/nnA` for a padded first codon, `Ta/Aa` for a partial last codon; amino acid `X`. A left-over partial codon translates to `X`, unless the complete codons are a lone stop. |
+| Padded first codon | `coding_sequence_variant` (an MNV too, never `synonymous_variant`). No `start_lost` or `start_retained_variant` without a complete first codon. |
+| Partial last codon | `incomplete_terminal_codon_variant` + `coding_sequence_variant`; `protein_altering_variant` when a deletion removes exactly the partial codon; `stop_gained` when an insertion creates a stop (`X/*`, `X/W*X`). |
+| Insertion before the partial codon | `inframe_insertion` + `incomplete_terminal_codon_variant`, inserted bases translated on their own: `GGG` `-/G`; `G`, `GG` `-/X` + `coding_sequence_variant`; `TGA`, `TGAG` `-/*`, `TGAGGG` `-/*G`, `GGGTGAG` `-/G*X`, each with `stop_gained`. |
+| Minus-strand insertion after the last CDS base | `3_prime_UTR_variant` with a 3'UTR (ENST00000654733.1 `c.*1dup`), `downstream_gene_variant` without one (ENST00000518351.2). |
+| Deletion ending inside the partial codon | Frameshift or in-frame deletion (`c.658_659del` after 3' shifting). |
+| Stop-codon terms | None on a CDS that does not end in a stop codon on the genome. |
 
-**Which escape rules `ptc` applies.** Only the last-junction rule, because
-that is the only rule the SVI decision tree uses; `AutoPVS1`, the published
-reference implementation of that flowchart (Xiang et al. 2020, PMID
-32442321, doi:10.1002/humu.24051), also implements no other. Two further
-rules that are well established in the NMD literature — start-proximal
-escape within 150 nt of the coding start site, and escape from a
-termination codon inside an exon longer than 407 bp, both after Lindeboom
-et al. (PMID 27618451, doi:10.1038/ng.3664; PMID 31659324,
-doi:10.1038/s41588-019-0517-5) and both implemented by `aenmd` — are
-deliberately **not** applied. Either would withdraw PVS1's full strength
-from a large class of established loss-of-function alleles, which is a
-guideline decision rather than an annotation one. Neither `predicts_nmd`
-nor `ptc` models translation re-initiation; `ptc.protein_position` is
-everything a consumer needs to layer these rules itself.
+**Differences:**
 
-**Which base of the termination codon `ptc` measures from.** The 3'-most
-one. The SVI rule is written as "the premature termination codon occurs in
-the 3' most exon or within the 3'-most 50 nucleotides of the penultimate
-exon"; a codon spans three bases, so "occurs within" is read as *overlaps*,
-and the codon's last base is what decides it. Anchoring on the first base
-instead would shrink the escape window to 48 nucleotides and predict NMD
-for two codon positions the guideline places outside it — an overcall,
-since predicting NMD is what earns PVS1 its full strength. Across the
-GRCh38 ClinVar release this moves 202 of 4,666,135 annotation rows, every
-one of them from NMD-predicted to NMD-escaping.
+- **HGVS p. is `p.?`.** VEP prints `p.Ter1=`, `p.Ter309del`, `p.TerLeu1=`,
+  naming a stop codon that is not there; for a stop an insertion creates at
+  the partial codon it writes `p.Ter220=`, `p.Ter220delinsTer` or nothing.
+  The residue is unknown, so `vareffect` writes `p.?`.
+- **No stop term on a deletion that removes the CDS end** (maintainer
+  decision, 2026-10-07). For a deletion starting before the partial codon
+  VEP reports `frameshift_variant,stop_lost` (`c.656_659del`) or
+  `stop_retained_variant,3_prime_UTR_variant` (`c.656_*2del`). There is no
+  stop to lose or retain: `vareffect` reports
+  `incomplete_terminal_codon_variant` + `coding_sequence_variant` (+
+  `3_prime_UTR_variant` when the deletion reaches the 3'UTR), with no HGVS
+  p.
+- **HGVS on deletions at the CDS end.** VEP omits or clips it for some
+  (`c.656_*2del` written as `c.656_659del`; nothing for a deletion of the
+  partial codon into the 3'UTR, or of ENST00000518351.2's whole partial
+  codon). `vareffect` writes the deletion it annotates, with `p.?` when only
+  the partial codon is removed and no HGVS p. when the deletion reaches the
+  3'UTR.
+- **No `FLAGS` field.** VEP lists `cds_start_NF` / `cds_end_NF` there.
 
-Variants in single-exon genes (`PRNP`, the mitochondrial genome) are
-correctly reported as `predicts_nmd = false`, and `ptc` is NMD-negative,
-because there is no junction.
+### 3.2 Frameshift introns
 
-### HGVS 3' normalization is always on
+An exon gap of 13 bases or fewer is a frameshift intron, a correction of the
+genome against the transcript (VEP: `abs(intron_end - intron_start) <= 12`
+on 1-based bounds). `vareffect` follows VEP 116:
 
-VEP has both `--shift_hgvs` (3' shift, default since release 109) and an
-undocumented legacy mode. `vareffect` always applies 3' normalization on
-the coding strand, matching VEP's current default. There is no toggle to
-disable it.
+| Variant | Result (as VEP 116) |
+|---|---|
+| An end inside the gap, or an insertion between two gap bases | `coding_sequence_variant` (`non_coding_transcript_variant` on a non-coding transcript), intron number, no splice term from the gap. A real intron's canonical site in the same footprint keeps its term. |
+| Deletion spanning the gap | Normal frameshift or in-frame deletion of its coding bases, no splice term from the gap. |
+| Coding base next to a one-base gap | VEP's two-base canonical windows spill onto it: `splice_acceptor_variant` before the gap, `splice_donor_variant` after it (HIGH), for SNVs and indels (ENST00000400999.7 `c.228C>A`, `c.229del`). |
+| Insertion at a gap edge | Frameshift plus that splice term. |
 
-### Structural variants are annotated at the region level
+**Differences:**
 
-`annotate_interval` (DEL / DUP / INV), `annotate_breakend` (`<BND>`), and
-`annotate_sv_insertion` (`<INS>`) emit the per-transcript SO term **set** VEP
-assigns to a structural variant: the overlapped sub-regions
-(`coding_sequence_variant`, `5_prime_UTR_variant`, `3_prime_UTR_variant`,
-`intron_variant`, `non_coding_transcript_exon_variant`) plus a copy-number
-headline where applicable — `transcript_ablation` / `transcript_amplification`
-for a whole-transcript deletion / duplication, `feature_truncation` for a
-partial deletion overlapping an exon or any breakend breakpoint, and
-`feature_elongation` for an intragenic, exonic duplication or insertion.
-Inversions are copy-number-neutral and carry no headline term (matching
-[ensembl-vep#79](https://github.com/Ensembl/ensembl-vep/issues/79)). The term
-sets are validated against the VEP REST API in `tests/vep_concordance_sv.rs`.
+- **Splice-region windows** (maintainer decision, 2026-10-07). VEP
+  computes its splice-region windows from the gap bounds, so they spill
+  onto exon bases. `vareffect` does the same for indels on the donor side
+  (`c.233_235del`: `splice_donor_region_variant`), but:
+  - for an SNV it gives exonic `splice_region_variant` only to the three
+    bases next to the gap, so VEP's `c.232T>A`
+    `splice_donor_5th_base_variant` is not reproduced;
+  - for an indel its 17-base acceptor window reaches up to 16 bases into
+    the upstream exon where VEP stops at 8 (`c.218_220del`,
+    `c.212_214del`, ENST00000436261.7 `c.1465_1467del`: VEP
+    `inframe_deletion` only, `vareffect` adds `splice_region_variant`).
 
-Two deliberate divergences, both because the SV path is pure interval geometry
-(no FASTA, no codon translation):
+  Accepted because `splice_region_variant` is LOW and not a loss-of-function
+  term, and MANE 1.5 has no frameshift intron.
+- **Codon case.** For a gap-spanning deletion VEP uppercases as many codon
+  bases as the genomic footprint is long (`tCCGAg/tag`); `vareffect`
+  uppercases the coding bases removed (`tCCGag/tag`).
 
-- **No precise codon consequences at breakpoints.** Where an SV breakpoint
-  removes a stop/start codon or hits a splice site, VEP may add `stop_lost`,
-  `start_lost`, `stop_gained`, `frameshift_variant`, or a splice term;
-  `vareffect` reports only the region-level set.
-- **Symbolic insertions are annotated at the insertion point**, not an
-  `SVLEN`-projected reference footprint, so the touched sub-regions (and
-  `feature_elongation`) can differ when the point and footprint straddle a
-  region boundary.
+## 4. NMD
 
-Breakend mate pairing (`MATEID` / `EVENT`) is not performed — each breakpoint is
-annotated independently, matching VEP. `Breakend::parse` decodes the VCF breakend
-ALT grammar so callers can extract and annotate the mate locus.
+`vareffect` reports NMD in two fields:
 
-## Not yet implemented
+| Field | Measured at | Use |
+|---|---|---|
+| `predicts_nmd` | the variant's own CDS position, as VEP's `NMD.pm` | VEP parity |
+| `ptc` | the termination codon (residue and NMD verdict) | ClinGen SVI PVS1 (Abou Tayoun et al. 2018, PMID 30192042) |
 
-These are features `vareffect` intends to cover but has not yet. Pull
-requests welcome.
+For a frameshift the termination codon lies downstream and may sit in a
+later exon, so `predicts_nmd` can report NMD where the real termination
+codon escapes it (BRCA1 NM_007294.4 c.5266dup terminates at c.5485, in the
+last coding exon). Single-exon genes (`PRNP`, the mitochondrial genome)
+have no junction: `predicts_nmd` is false and `ptc` is NMD-negative.
 
-- **`mature_miRNA_variant`** — variant overlaps a miRNA hairpin. Requires
-  a miRNA locus track that is not currently loaded into `TranscriptStore`.
-- **`TFBS_ablation`, `TF_binding_site_variant`, `regulatory_region_variant`** —
-  the entire regulatory / motif annotation layer. Requires a
-  RegulatoryFeatureStore with transcription factor binding sites,
-  enhancers, and promoters. See the [Out of scope](#out-of-scope-by-design)
-  section below for why this is not on the core roadmap.
-- **`--shift_3prime` equivalent** — a toggle to switch off 3' normalization
-  for callers who need VEP's pre-release-109 behaviour.
-- **Alternate genome builds** — GRCh37, CHM13, and non-human assemblies.
-  The crate is build-agnostic at runtime; the work is all upstream, in the
-  transcript-model and genome-binary build pipelines.
-- **Multi-allele VCF splitting** — VCF `ALT` columns can carry multiple
-  comma-separated alternate alleles. `vareffect` expects one ref / one alt
-  per `annotate` call; callers must split beforehand. A convenience
-  wrapper that fans out multi-allele rows would be a welcome contribution.
-- **Canonical transcript *selection*** — every `ConsequenceResult` carries
-  MANE Select / MANE Plus Clinical / RefSeq Select metadata, but the
-  caller is responsible for filtering to the chosen tier. A small helper
-  method on `VarEffect` to return only the canonical result would be
-  backward-compatible.
+**Differences from `NMD.pm`:**
 
-## Out of scope (by design)
+- No escape for a variant in the first ~100 coding bases (`NMD.pm`:
+  `$variant_coding_region <= 101`).
+- Junctions come from CDS segments, not all exons. When a 3'UTR spans
+  further exons the junction used sits upstream of the true last one: NMD
+  can be missed, never overcalled.
+- A frameshift intron is an exon boundary for `predicts_nmd` (as in
+  `NMD.pm`) but not for `ptc`: no exon-junction complex sits at a genome
+  correction.
+- `ptc`'s penultimate-exon window is 50 coding bases (ClinGen SVI: "within
+  the 3'-most 50 nucleotides of the penultimate exon"); `NMD.pm` uses 52
+  genomic bases.
+- No `NMD_transcript_variant`: it is a transcript biotype term. Filter
+  NMD-biotype transcripts in the caller.
 
-These are features `vareffect` will not implement as part of the core
-crate, because they belong to a different layer of the pipeline.
+**How `ptc` decides:**
 
-- **Plugin system.** VEP has a Perl plugin architecture with ~60 plugins
-  in the wild (CADD, REVEL, SpliceAI, LoFtool, …). `vareffect` is a
-  library, not an extension platform — downstream code can wrap results
-  and apply plugins as a separate step.
-- **Co-located variant lookup.** No gnomAD, dbSNP, ClinVar integration,
-  no allele-frequency annotation, no known-variant matching. These are
-  enrichment steps that happen after consequence prediction, and coupling
-  them into the predictor would force every consumer to carry network
-  dependencies.
-- **Custom annotation files.** No BED / GFF / VCF overlay interface. Use a
-  dedicated tool (bcftools, bedtools) and merge on the output side.
-- **VCF I/O.** `vareffect` takes variants as four arguments (chrom, pos,
-  ref, alt). There is no built-in VCF parser — use `rust-bio`, `noodles`,
-  or `bcftools pipe`.
+- **Only the last-junction rule**, the only one the SVI tree uses (as does
+  `AutoPVS1`, Xiang et al. 2020, PMID 32442321). Start-proximal escape
+  (150 nt) and the long-exon rule (> 407 bp) of Lindeboom et al. (PMIDs
+  27618451, 31659324) are deliberately not applied: they would withdraw
+  PVS1 from many established loss-of-function alleles, a guideline decision
+  rather than an annotation one. Re-initiation is not modeled;
+  `ptc.protein_position` lets a consumer add these rules.
+- **The codon's 3'-most base decides.** "Occurs within the 3'-most 50
+  nucleotides" is read as "overlaps". Using the first base would shrink the
+  window to 48 nucleotides and overcall NMD; across GRCh38 ClinVar this
+  moves 202 of 4,666,135 rows, all from NMD to escape.
 
-## SO term coverage matrix
+## 5. Structural variants
 
-VEP produces roughly 35 distinct SO consequence terms. This table shows
-which are covered, which are not, and the reasoning.
+`annotate_interval` (DEL, DUP, INV), `annotate_breakend` (`<BND>`) and
+`annotate_sv_insertion` (`<INS>`) give VEP's per-transcript term set: the
+overlapped regions plus a copy-number term (`transcript_ablation`,
+`transcript_amplification`, `feature_truncation`, `feature_elongation`).
+Inversions carry no copy-number term
+([ensembl-vep#79](https://github.com/Ensembl/ensembl-vep/issues/79)).
+Breakend mates are annotated independently, as in VEP; `Breakend::parse`
+decodes the ALT grammar to find the mate locus. Validated against VEP REST
+in `tests/vep_concordance_sv.rs`.
 
-| SO term                                   | Status | Note |
-|-------------------------------------------|--------|------|
-| `missense_variant`                        | yes    | Covered by the SNV annotator. |
-| `synonymous_variant`                      | yes    | |
-| `stop_gained`                             | yes    | Drives NMD prediction. |
-| `stop_lost`                               | yes    | Extension distance computed via 3'UTR stop-scan. |
-| `start_lost`                              | yes    | Covers SNV and partial-deletion start codon loss. |
-| `start_retained_variant`                  | yes    | Synonymous change at the start codon. |
-| `stop_retained_variant`                   | yes    | |
-| `frameshift_variant`                      | yes    | Drives NMD prediction. |
-| `inframe_insertion`                       | yes    | |
-| `inframe_deletion`                        | yes    | |
-| `protein_altering_variant`                | yes    | Catch-all for length-preserving complex changes. |
-| `coding_sequence_variant`                 | yes    | Ambiguous-codon fallback. |
-| `incomplete_terminal_codon_variant`       | yes    | CDS length not divisible by 3. |
-| `splice_donor_variant`                    | yes    | Intronic ±1, ±2 on the donor side. |
-| `splice_acceptor_variant`                 | yes    | Intronic ±1, ±2 on the acceptor side. |
-| `splice_region_variant`                   | yes    | Intronic ±3..±8 and exonic 1..3. |
-| `splice_polypyrimidine_tract_variant`     | no     | Intentional divergence — emitted as `splice_region_variant`. |
-| `splice_donor_region_variant`             | no     | Intentional divergence — plugin-extension term. |
-| `splice_donor_5th_base_variant`           | no     | Intentional divergence — plugin-extension term. |
-| `5_prime_UTR_variant`                     | yes    | |
-| `3_prime_UTR_variant`                     | yes    | |
-| `intron_variant`                          | yes    | |
-| `non_coding_transcript_exon_variant`      | yes    | |
-| `non_coding_transcript_variant`           | no     | Intentional divergence — non-coding context is preserved via `TranscriptModel::biotype`. |
-| `upstream_gene_variant`                   | yes    | |
-| `downstream_gene_variant`                 | yes    | |
-| `intergenic_variant`                      | yes    | No overlapping transcript in the loaded store. |
-| `transcript_ablation`                     | yes    | Deletion spanning a whole transcript (`annotate_interval`, DEL + full span). |
-| `transcript_amplification`                | yes    | Duplication spanning a whole transcript (`annotate_interval`, DUP + full span). |
-| `feature_elongation`                      | yes    | Intragenic, exonic duplication or insertion (`annotate_interval` DUP / `annotate_sv_insertion`). |
-| `feature_truncation`                      | yes    | Partial deletion overlapping an exon, or a breakend breakpoint (`annotate_interval` DEL / `annotate_breakend`). |
-| `NMD_transcript_variant`                  | no     | Intentional divergence — biotype-based, exposed via `predicts_nmd` instead. |
-| `mature_miRNA_variant`                    | no     | Not yet implemented — requires a miRNA locus track. |
-| `TF_binding_site_variant`                 | no     | Out of scope — regulatory layer. |
-| `TFBS_ablation`                           | no     | Out of scope — regulatory layer. |
-| `regulatory_region_variant`               | no     | Out of scope — regulatory layer. |
+**Differences** (the SV path is pure interval geometry, with no FASTA and
+no translation):
 
-## Validation methodology
+- No codon or splice consequences at breakpoints (VEP may add `stop_lost`,
+  `start_lost`, `frameshift_variant` or a splice term).
+- A symbolic insertion is annotated at its insertion point, not an
+  `SVLEN`-projected footprint.
 
-The `tests/vep_concordance_*.rs` suite holds hand-curated variants whose
-expected outputs were recorded from the Ensembl VEP REST API on real
-clinical transcripts (TP53, BRCA1, BRCA2, APC, BRAF, EGFR, CFTR, ERBB2,
-PRNP, and others). Each test file opens the transcript store and FASTA
-reader once, iterates its `VARIANTS` fixture, and asserts per-variant
-equality on `hgvs_c`, `hgvs_p`, the consequence subset, and (where
-relevant) the `predicts_nmd` flag.
+## 6. Coverage and scope
 
-| Test file                              | Variants | Focus |
-|----------------------------------------|---------:|-------|
-| `vep_concordance_snv.rs`               |       20 | SNV consequences across missense, synonymous, stop gain / loss, start loss / retained, splice donor / acceptor, splice region |
-| `vep_concordance_indel.rs`             |       28 | Frameshift, inframe insertions / deletions, boundary-spanning indels, splice-overlap indels |
-| `vep_concordance_hgvs.rs`              |       20 | HGVS c. forward formatting (substitution, del, ins, dup, delins, intronic offsets, UTR offsets) |
-| `vep_concordance_hgvs_p.rs`            |       30 | HGVS p. forward formatting for every consequence type |
-| `vep_concordance_hgvs_reverse.rs`      |       20 | HGVS c. → genomic coordinate round-trip for every position type |
-| `vep_concordance_normalization.rs`     |       18 | HGVS 3' normalization, intergenic classification, NMD 50-nt rule |
-| **Total**                              |  **136** | |
+### 6.1 SO terms
 
-As of 2026-04-11 all six test files pass (6 / 6 test functions, 136 / 136
-variants). The suite is `#[ignore]`-gated because it requires the
-transcript store and genome binary on disk; run with:
+| SO term | Status | Note |
+|---|---|---|
+| `missense_variant` | yes | |
+| `synonymous_variant` | yes | |
+| `stop_gained` | yes | Drives NMD prediction. |
+| `stop_lost` | yes | Extension found by a 3'UTR stop scan. |
+| `start_lost` | yes | SNVs and partial start-codon deletions. |
+| `start_retained_variant` | yes | |
+| `stop_retained_variant` | yes | |
+| `frameshift_variant` | yes | Drives NMD prediction. |
+| `inframe_insertion` | yes | |
+| `inframe_deletion` | yes | |
+| `protein_altering_variant` | yes | Length-preserving complex changes. |
+| `coding_sequence_variant` | yes | Ambiguous codons, partial codons, frameshift introns of coding transcripts. |
+| `incomplete_terminal_codon_variant` | yes | CDS length not divisible by 3. |
+| `splice_donor_variant` | yes | Intron +1, +2; the exon base after a one-base frameshift intron. |
+| `splice_acceptor_variant` | yes | Intron −1, −2; the exon base before a one-base frameshift intron. |
+| `splice_region_variant` | yes | Intron ±3..±8 (acceptor to −17), exon 1..3. |
+| `splice_polypyrimidine_tract_variant` | no | Reported as `splice_region_variant` (2.1). |
+| `splice_donor_region_variant` | no | Reported as `splice_region_variant` (2.1). |
+| `splice_donor_5th_base_variant` | no | Reported as `splice_region_variant` (2.1). |
+| `5_prime_UTR_variant` | yes | |
+| `3_prime_UTR_variant` | yes | |
+| `intron_variant` | yes | |
+| `non_coding_transcript_exon_variant` | yes | |
+| `non_coding_transcript_variant` | partial | Frameshift introns of non-coding transcripts only (2.2). |
+| `upstream_gene_variant` | yes | |
+| `downstream_gene_variant` | yes | |
+| `intergenic_variant` | yes | No overlapping transcript in the store. |
+| `transcript_ablation` | yes | DEL spanning a whole transcript. |
+| `transcript_amplification` | yes | DUP spanning a whole transcript. |
+| `feature_elongation` | yes | Intragenic exonic DUP or `<INS>`. |
+| `feature_truncation` | yes | Partial DEL over an exon, or a breakend. |
+| `NMD_transcript_variant` | no | Biotype term; see `predicts_nmd` and `ptc` (4). |
+| `mature_miRNA_variant` | no | Not yet implemented. |
+| `TF_binding_site_variant` | no | Out of scope. |
+| `TFBS_ablation` | no | Out of scope. |
+| `regulatory_region_variant` | no | Out of scope. |
+
+### 6.2 Not yet implemented
+
+- **`mature_miRNA_variant`**: needs a miRNA locus track.
+- **A toggle to switch off HGVS 3' normalization.** `vareffect` always
+  shifts 3' on the coding strand, as VEP's default `--shift_hgvs` (since
+  release 109).
+- **Other genome builds** (GRCh37, CHM13, non-human): the work is in the
+  build pipelines; the runtime is build-agnostic.
+- **Multi-allelic VCF rows**: `annotate` takes one ALT; split beforehand.
+- **Canonical transcript selection**: results carry the MANE / RefSeq
+  Select flags; filtering is the caller's job.
+
+### 6.3 Out of scope
+
+- **Regulatory annotation** (`TFBS_ablation`, `TF_binding_site_variant`,
+  `regulatory_region_variant`): a separate layer with its own feature data.
+- **Plugins** (CADD, REVEL, SpliceAI, ...): wrap results downstream.
+- **Co-located variant lookup** (gnomAD, dbSNP, ClinVar, allele
+  frequencies): an enrichment step after consequence prediction.
+- **Custom annotation overlays** (BED, GFF, VCF): use bcftools or bedtools.
+- **VCF parsing in the library**: `vareffect` takes chrom, pos, ref, alt
+  (the CLI reads VCF).
+
+## 7. Validation
+
+Expected values come from the Ensembl VEP REST API on real transcripts. The
+suites are `#[ignore]`-gated because they need the store and genome:
 
 ```bash
 FASTA_PATH=/absolute/path/to/GRCh38.bin \
-    cargo test -p vareffect --release -- --ignored vep_concordance
+    cargo test -p vareffect --release -- --ignored
 ```
 
-When adding a new variant to a fixture, record its expected output by
-querying the Ensembl VEP REST API with `refseq=1&hgvs=1` (or `&numbers=1`
-for exon number assertions) and paste the response into the fixture
-comment so future reviewers can cross-check against the recorded ground
-truth.
+| Test file | Variants | Focus |
+|---|---:|---|
+| `vep_concordance_snv.rs` | 20 | SNV consequences, splice sites and regions |
+| `vep_concordance_indel.rs` | 28 | Frameshift, in-frame, boundary and splice indels |
+| `vep_concordance_hgvs.rs` | 20 | HGVS c. formatting |
+| `vep_concordance_hgvs_p.rs` | 30 | HGVS p. formatting |
+| `vep_concordance_hgvs_reverse.rs` | 20 | HGVS c. to genomic coordinates |
+| `vep_concordance_normalization.rs` | 18 | 3' normalization, intergenic, NMD rule |
+| `incomplete_cds_concordance.rs` | 224 | Sections 3.1 and 3.2, on GENCODE, RefSeq and MANE models in `tests/data/` |
 
-## Known edge cases
+The first six (TP53, BRCA1, BRCA2, APC, BRAF, EGFR, CFTR, ERBB2, PRNP and
+others) all passed on 2026-04-11, 136 / 136 variants. The incomplete-CDS
+suite passed on 2026-10-07 with the normalizations listed in its header.
+When adding a variant, record VEP's output (`refseq=1&hgvs=1`, `&numbers=1`
+for exon numbers) next to it.
 
-- **A deletion spanning a CDS/UTR boundary is not a frameshift.** VEP's
-  `frameshift` predicate opens with `return 0 unless defined $bvfo->cds_start
-  && defined $bvfo->cds_end`, so a deletion that begins in the 5'UTR or runs
-  into the 3'UTR never draws `frameshift_variant` — however many CDS bases it
-  removes. This crate replicates that on both ends: `{5_prime_UTR_variant,
-  start_lost}` at the 5' boundary and `{stop_lost, 3_prime_UTR_variant}` at the
-  3'. Neither result carries an NMD prediction or a termination codon, since
-  the reading frame is undefined. A deletion beginning at CDS offset 1 or 2
-  leaves `cds_start` defined and does draw `frameshift_variant` alongside
-  `start_lost`. Still divergent on these variants: `hgvs_p` (VEP emits
-  `p.Met1_?5`-style range notation, this crate emits nothing) and
-  `protein_start` (VEP `None`, this crate `Some(1)`).
-- **NMD is measured at the variant site, not the termination codon.**
-  `predicts_nmd` applies the 50-nucleotide rule to the variant's own CDS
-  position, for VEP `NMD.pm` parity. For a frameshift the termination
-  codon is downstream and can fall in a later exon, so `predicts_nmd` may
-  report NMD where the real termination codon escapes it.
-  `ConsequenceResult::ptc` reports that codon's position and an NMD
-  verdict computed there; it is the field to use for PVS1. Worked
-  example: BRCA1 `NM_007294.4` c.5266dup (`p.Gln1756ProfsTer74`,
-  `predicts_nmd = true`) terminates at residue 1829 (c.5485), inside the
-  last coding exon c.5468-5592 — an NMD escape.
-- **NMD with final-exon 3'UTR tails.** The junction set is built from CDS
-  segments only, so when a transcript's 3'UTR spans exons beyond the
-  CDS-end exon, the junction used here sits **upstream** of the mRNA's true
-  last junction. Distances are therefore understated and real NMD can be
-  missed — the residual is under-reporting NMD, not over-reporting it. A
-  variant at or past the last coding exon always escapes
-  (`nmd.rs`, `cds_position >= last_junction_cds_pos`), so the opposite
-  failure cannot occur.
-- **Patch-contig lookups.** The reference genome binary can be built with
-  or without NCBI patch contigs. When you need patch lookups, use
-  `VarEffect::open_with_patch_aliases` and supply a `refseq,ucsc` alias
-  CSV — otherwise variants on patch contigs return `ChromNotFound`.
-- **IUPAC ambiguity codes.** The NCBI GRCh38.p14 assembly contains
-  ambiguity bases (`M`, `R`, `Y`, etc.) in a few patch regions. The
-  genome reader preserves them, but codon translation treats any
-  non-ACGTN base as an unknown amino acid (`Xaa`). Consensus-based
-  patch contigs should not contain these bases.
-- **Mitochondrial variants.** `chrM` uses NCBI translation table 2. The
-  `codon` module switches tables automatically based on the chromosome
-  name; variants on `chrMT` or `MT` aliases rely on the reader's
-  chromosome-name alias table to resolve to `chrM` first.
+## 8. Known edge cases
+
+- **Patch contigs.** Lookups on patch contigs need
+  `VarEffect::open_with_patch_aliases` with a `refseq,ucsc` alias CSV;
+  otherwise they return `ChromNotFound`.
+- **IUPAC codes.** A few GRCh38.p14 patch regions contain ambiguity bases
+  (`M`, `R`, `Y`); they are kept, and a codon containing one translates to
+  `Xaa`.
+- **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
+  resolve to `chrM` through the reader's alias table.

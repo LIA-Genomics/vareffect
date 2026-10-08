@@ -41,11 +41,14 @@ pub(super) fn build_alt_codon(ref_codon: &[u8; 3], codon_position: u8, coding_al
 /// for a CDS variant at the given CDS offset.
 ///
 /// Uses the precomputed [`LocateIndex::utr5_exonic_len`] for O(1) lookup.
+/// cDNA counts transcript bases only, so the CDS pad of a 5'-incomplete CDS
+/// is removed (VEP 116: ENST00000379099.3 c.4 is cDNA 2). An offset inside
+/// the pad has no transcript base and maps to the first coding base.
 pub(super) fn compute_cdna_position_for_cds(
     cds_offset: u32,
     index: &crate::locate::LocateIndex,
 ) -> u32 {
-    index.utr5_exonic_len() + cds_offset + 1
+    index.utr5_exonic_len() + cds_offset.saturating_sub(index.cds_start_pad()) + 1
 }
 
 /// Compute the cDNA position (1-based from transcript 5' end) for any exonic
@@ -163,8 +166,28 @@ pub(crate) fn fetch_cds_sequence(
     fasta: &FastaReader,
 ) -> Result<Vec<u8>, VarEffectError> {
     let cumulative = index.cumulative_cds();
+    if end_offset > index.total_cds_length() || start_offset > end_offset {
+        return Err(VarEffectError::Malformed(format!(
+            "{}: CDS offsets [{start_offset}, {end_offset}) outside the CDS of length {}",
+            transcript.accession,
+            index.total_cds_length(),
+        )));
+    }
     let len = (end_offset - start_offset) as usize;
     let mut seq = Vec::with_capacity(len);
+
+    // Offsets inside the pad of a 5'-incomplete CDS have no genomic base;
+    // VEP writes them as `N` (codons `nnT`), so the partial codon translates
+    // to `X`.
+    let pad = index.cds_start_pad();
+    if start_offset < pad {
+        let pad_end = end_offset.min(pad);
+        seq.resize((pad_end - start_offset) as usize, b'N');
+        if end_offset <= pad {
+            return Ok(seq);
+        }
+    }
+    let start_offset = start_offset.max(pad);
 
     // Find first and last CDS segments spanned by [start_offset, end_offset).
     let first_seg = cumulative.partition_point(|&c| c <= start_offset) - 1;
@@ -199,6 +222,69 @@ pub(crate) fn fetch_cds_sequence(
         }
     }
     Ok(seq)
+}
+
+/// Add the canonical splice terms that spill out of a one-base frameshift
+/// intron (see [`crate::locate::helpers::exonic_splice_spill`]) and
+/// recompute the impact.
+pub(super) fn add_splice_spill(
+    result: &mut ConsequenceResult,
+    spill: Option<crate::locate::helpers::SpliceSpill>,
+) {
+    let Some(spill) = spill else {
+        return;
+    };
+    for (hit, term) in [
+        (spill.donor, Consequence::SpliceDonorVariant),
+        (spill.acceptor, Consequence::SpliceAcceptorVariant),
+    ] {
+        if hit && !result.consequences.contains(&term) {
+            result.consequences.push(term);
+        }
+    }
+    // A base in a canonical window is not also a splice-region base (VEP 116
+    // c.228C>A: `splice_acceptor_variant,synonymous_variant`).
+    result
+        .consequences
+        .retain(|c| *c != Consequence::SpliceRegionVariant);
+    result.impact = finalize_consequences(&mut result.consequences);
+}
+
+/// `true` when codon 1 is a complete start codon, the only case in which
+/// VEP's start-codon predicates (`start_lost`, `start_retained_variant`)
+/// apply. A 5'-incomplete CDS (`cds_start_NF`) has no start codon:
+/// `VariationEffect.pm::_overlaps_start_codon` returns 0 for it
+/// (ensembl-variation release/115).
+pub(super) fn has_complete_start_codon(index: &LocateIndex) -> bool {
+    index.cds_start_pad() == 0
+}
+
+/// `true` when the CDS ends in a stop codon on the genome: its length is a
+/// whole number of codons and the last one translates to `*`.
+///
+/// False for a 3'-incomplete CDS and for a stop that only polyadenylation
+/// completes (NM_001424184.1, MT-ND4). VEP 116 gives a deletion from such a
+/// partial codon into the 3'UTR no stop-codon term (NM_001424184.1
+/// c.658_*2del: `incomplete_terminal_codon_variant`,
+/// `coding_sequence_variant`, `3_prime_UTR_variant`), and
+/// `VariationEffect.pm::_overlaps_stop_codon` returns 0 for `cds_end_NF`.
+///
+/// # Errors
+///
+/// Returns an error if the last codon cannot be read from the reference.
+pub(super) fn ends_in_stop_codon(
+    chrom: &str,
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<bool, VarEffectError> {
+    let total = index.total_cds_length();
+    if total < 3 || !total.is_multiple_of(3) || total - 3 < index.cds_start_pad() {
+        return Ok(false);
+    }
+    let codon = fetch_ref_codon(total - 3, chrom, transcript, index, fasta)?;
+    let is_mito = transcript.chrom == "chrM";
+    Ok(crate::codon::translate_codon_for_transcript(&codon, is_mito) == b'*')
 }
 
 /// Check whether a CDS offset falls in the incomplete terminal codon of a

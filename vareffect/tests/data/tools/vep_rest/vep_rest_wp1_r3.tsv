@@ -1,0 +1,5 @@
+# Ensembl VEP REST release 116, GRCh38, fetched 2026-10-07, with numbers=1. Columns as vep_rest_wp1.tsv; insertions use region start = end + 1. Tool: tests/data/tools/vep_rows.py
+partial3_ins_5p_edge	2:46484424-46484423	-/G	NM_001424184.1	inframe_insertion,incomplete_terminal_codon_variant,coding_sequence_variant	MODERATE	NM_001424184.1:c.657_658insG	None	678	657	219	-/G	-/X	3/3	None	-
+minus_partial3_ins_5p_edge	1:233198969-233198968	-/C	ENST00000518351	inframe_insertion,incomplete_terminal_codon_variant,coding_sequence_variant	MODERATE	ENST00000518351.2:c.543dup	None	543	543	181	-/G	-/X	5/5	None	cds_start_NF,cds_end_NF
+tmem247_ins_after_cds	2:46484426-46484425	-/G	NM_001424184.1	downstream_gene_variant	MODIFIER	None	None	None	None	None	None	None	None	None	-
+region_spill_c232	1:151767228-151767228	T/A	ENST00000400999	missense_variant,splice_donor_5th_base_variant	MODERATE	ENST00000400999.7:c.232T>A	ENSP00000383784.3:p.Ser78Thr	299	232	78	Tcc/Acc	S/T	3/6	None	-

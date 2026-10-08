@@ -29,6 +29,33 @@ For releases before `0.5.0`, see the git history.
 - `vareffect check` loads the transcript store the way `annotate` does and
   reports its format version and record count, so an unversioned,
   other-version, truncated or empty store fails the check.
+- Incomplete CDS support in the engine, following VEP 116. GFF3 phase on
+  the first CDS row is read: `LocateIndex::cds_start_pad` gives the bases
+  missing from a 5'-incomplete first codon. CDS positions, codon numbers and
+  protein positions count them; cDNA positions do not; HGVS `c.` counts them
+  only for the exonic position of a substitution, as VEP does. Variants in a
+  partial first or last codon (SNVs, MNVs, deletions, insertions) get VEP's
+  terms, codons and amino acid `X`, with HGVS p. `p.?`. A deletion that
+  removes the end of a CDS without a stop codon gets no stop term. It has no
+  HGVS p. when it starts before the partial codon (`c.656_659del`) or runs
+  from the partial codon into the 3'UTR (`c.658_*2del`); deleting exactly
+  the partial codon is `protein_altering_variant` with `p.?`. An insertion
+  inside the partial codon translates every codon it completes
+  (`stop_gained` for `X/W*X`). An
+  insertion between the last complete codon and the partial codon is VEP's
+  `inframe_insertion` + `incomplete_terminal_codon_variant` with the
+  inserted bases translated (`stop_gained` when they contain a stop,
+  `coding_sequence_variant` when the translation has an `X`). A
+  minus-strand insertion after the last CDS base is `3_prime_UTR_variant`,
+  or `downstream_gene_variant` when the transcript has no 3'UTR (see
+  `VEP_DIVERGENCES.md`).
+- Frameshift introns (exon gaps of `locate::FRAMESHIFT_INTRON_MAX_GAP` = 13
+  bases or fewer), following VEP 116: a variant inside one is
+  `coding_sequence_variant` or `non_coding_transcript_variant`, a deletion
+  across one is a normal coding change, and on a one-base gap the splice
+  windows spill onto the flanking coding bases.
+- `Consequence::NonCodingTranscriptVariant`,
+  `VariantLocation::FrameshiftIntron` and `locate::FRAMESHIFT_INTRON_MAX_GAP`.
 
 ### Changed
 
@@ -40,6 +67,41 @@ For releases before `0.5.0`, see the git history.
 - **Breaking.** The new `VarEffectError` variants break exhaustive matches on
   the error type. The enum stays exhaustive on purpose, so downstream code is
   told about every new failure mode at compile time.
+- **Breaking.** `VariantLocation::CdsExon::cds_offset` (and `codon_number`,
+  `codon_position`, `IndelRegion::Cds` offsets) count in VEP's padded frame:
+  on a 5'-incomplete CDS the first genomic coding base is offset
+  `cds_start_pad()`, not 0. `resolve_hgvs_c` maps `c.N` on such a transcript
+  as VEP numbers it, which differs by the pad between substitutions and
+  other variant types, and refuses a substitution inside the pad. Unchanged
+  for every complete CDS, which includes all of MANE 1.5.
+- **Breaking.** `locate_variant` returns `VariantLocation::FrameshiftIntron`
+  instead of a splice or intron location inside an exon gap of 13 bases or
+  fewer, and indels touching such a gap change terms as described under
+  Added. MANE 1.5 has no such gap.
+- **Breaking.** `VariantLocation`, `IndelLocation` and `IndelRegion` are now
+  `#[non_exhaustive]`. The new `Consequence` variant breaks exhaustive
+  matches on `Consequence`, and `Consequence::severity_rank` values from
+  `UpstreamGeneVariant` on move up by one.
+- **Breaking.** `start_lost`, `start_retained_variant` and `p.Met1?` are no
+  longer emitted on a CDS without a complete first codon, and the
+  stop-codon deletion pattern (`stop_lost` + `3_prime_UTR_variant`) needs a
+  CDS that ends in a stop codon on the genome. A variant in a 3' partial
+  codon now reports VEP's terms, codons, amino acid `X`, protein position
+  and `p.?`; before, SNVs, MNVs and delins got only
+  `incomplete_terminal_codon_variant`, and deletions and insertions a
+  frameshift call. In MANE 1.5 this changes only NM_001424184.1 (TMEM247),
+  whose stop is completed by polyadenylation; no ClinVar GRCh38 record
+  moves.
+- `ConsequenceResult::ptc` skips frameshift introns when it locates the last
+  exon-exon junction: no exon-junction complex sits at a sequence
+  correction. `predicts_nmd` keeps VEP's NMD plugin behavior and counts
+  them. Unchanged on MANE 1.5, which has none.
+- **Breaking.** `LocateIndex::build` returns `Malformed` for a transcript
+  with more than one CDS segment in one exon (a ribosomal-slippage CDS), a
+  CDS phase above 2 or a CDS segment pointing at a missing exon, and
+  `TranscriptStore` construction fails with it, instead of keeping only the
+  last segment, computing with the bad phase or panicking. MANE 1.5 has
+  none of these.
 - **Breaking.** A store with no transcripts, or with bytes after the payload,
   is an error at load time. The builder refuses a GFF3 that admits no
   transcripts instead of writing an empty store, which would annotate every

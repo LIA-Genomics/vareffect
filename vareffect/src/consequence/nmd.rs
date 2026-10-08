@@ -72,7 +72,9 @@ pub(super) fn predicts_nmd(cds_position: u32, index: &LocateIndex) -> bool {
     // Both `Absent` and `Unknown` yield `false` here, preserving this
     // function's exact pre-existing behavior. Only `nmd_at_residue`
     // distinguishes them, because only it can report "no answer".
-    let LastJunction::At(last_junction_cds_pos) = last_junction_cds_pos(index) else {
+    // `predicts_nmd` follows VEP's NMD plugin, which takes the last exon from
+    // `get_all_Exons` and so counts a frameshift intron as an exon boundary.
+    let LastJunction::At(last_junction_cds_pos) = last_junction_cds_pos(index, false) else {
         return false;
     };
 
@@ -103,7 +105,12 @@ enum LastJunction {
 }
 
 /// Locate the last CDS exon-exon junction.
-fn last_junction_cds_pos(index: &LocateIndex) -> LastJunction {
+///
+/// `skip_frameshift_introns` passes over frameshift introns (exon gaps of 13
+/// bases or fewer), which correct the genome against the transcript: no
+/// exon-junction complex sits there, so the `ptc` verdict uses the last real
+/// junction. `predicts_nmd` keeps VEP's NMD plugin behavior and counts them.
+fn last_junction_cds_pos(index: &LocateIndex, skip_frameshift_introns: bool) -> LastJunction {
     let Some(cds_end_exon) = index.cds_end_exon_idx() else {
         return LastJunction::Absent; // non-coding transcript
     };
@@ -114,6 +121,16 @@ fn last_junction_cds_pos(index: &LocateIndex) -> LastJunction {
         // index disagrees with itself. Missing data, not "no junction".
         _ => return LastJunction::Unknown,
     };
+
+    // A frameshift intron (an exon gap of 13 bases or fewer) corrects the
+    // genome against the transcript; no exon-junction complex is deposited
+    // there, so for the `ptc` verdict the last real junction is the one
+    // before it.
+    let mut last_seg_idx = last_seg_idx;
+    while skip_frameshift_introns && last_seg_idx > 0 && index.is_frameshift_junction(last_seg_idx)
+    {
+        last_seg_idx -= 1;
+    }
 
     // Single CDS segment -> no exon-exon junction within CDS.
     if last_seg_idx == 0 {
@@ -259,7 +276,7 @@ pub(super) fn ptc_from_alt_window(
 /// position in the alternate transcript is undefined. Never guess in those
 /// cases: an invented verdict here becomes a PVS1 strength downstream.
 fn nmd_at_residue(residue: u32, edit: &CdsEdit, index: &LocateIndex) -> Option<bool> {
-    let junction_ref = match last_junction_cds_pos(index) {
+    let junction_ref = match last_junction_cds_pos(index, true) {
         LastJunction::At(pos) => pos,
         // No junction at all -> nothing to measure against, and NMD genuinely
         // cannot be triggered. That is an answer.
@@ -276,11 +293,12 @@ fn nmd_at_residue(residue: u32, edit: &CdsEdit, index: &LocateIndex) -> Option<b
         i64::from(junction_ref) + edit.delta()
     } else if junction_ref > edit.start {
         // Inside the replaced span: the bases carrying this junction are gone,
-        // so it has no well-defined alternate-transcript position. Currently
-        // unreachable -- a contiguous deletion spanning two CDS segments must
-        // cover the canonical splice dinucleotides and is diverted to the
-        // splice path first (`complex.rs`, `overlaps_splice_canonical`) -- but
-        // withhold rather than silently treat it as unmoved.
+        // so it has no well-defined alternate-transcript position. A deletion
+        // spanning two CDS segments across a real intron covers the canonical
+        // splice dinucleotides and is diverted to the splice path first
+        // (`complex.rs`, `overlaps_splice_canonical`); one spanning a
+        // frameshift intron is not, but that gap is never the last junction.
+        // Withhold rather than silently treat it as unmoved.
         return None;
     } else {
         // At or before the edit: unmoved. The termination codon is at or after

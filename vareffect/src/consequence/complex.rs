@@ -1,8 +1,9 @@
 //! Boundary-spanning deletions, complex delins, and MNV annotation.
 
 use super::helpers::{
-    build_base_result, compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon,
-    finalize_consequences, is_incomplete_terminal_codon,
+    add_splice_spill, build_base_result, compute_cdna_position_for_cds, ends_in_stop_codon,
+    fetch_cds_sequence, fetch_ref_codon, finalize_consequences, has_complete_start_codon,
+    is_incomplete_terminal_codon,
 };
 use super::indel::{annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result};
 use super::{Consequence, ConsequenceResult, Impact, PtcStatus};
@@ -13,6 +14,7 @@ use crate::codon::{
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_c;
+use crate::locate::helpers::{exonic_splice_spill, frameshift_intron_endpoint};
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
 };
@@ -70,6 +72,145 @@ fn compute_cds_overlap_offsets(
     offsets
 }
 
+/// Result for an indel or MNV with an end inside frameshift intron
+/// `intron_index` (see [`frameshift_intron_endpoint`]).
+///
+/// VEP 116 gives such a variant only `coding_sequence_variant` (or
+/// `non_coding_transcript_variant`), no splice term, the intron number, the
+/// exon number when coding bases are removed, and the CDS positions of those
+/// bases (ENST00000400999.7 `c.228_228+1del`: exon 2/6, intron 2/5, cDNA
+/// 295, CDS 228, protein 76).
+pub(super) fn frameshift_intron_indel_result(
+    start: u64,
+    end: u64,
+    intron_index: u16,
+    location: &IndelLocation,
+    transcript: &TranscriptModel,
+    locate_index: &LocateIndex,
+) -> ConsequenceResult {
+    let consequence = if transcript.cds_segments.is_empty() {
+        Consequence::NonCodingTranscriptVariant
+    } else {
+        Consequence::CodingSequenceVariant
+    };
+    let mut consequences = vec![consequence];
+    // Another intron's canonical site in the same footprint keeps its term:
+    // VEP skips only the frameshift intron's windows, and the splice detail
+    // already leaves them out for a deletion (an insertion's detail still
+    // holds the gap's own windows, so it adds nothing).
+    if start < end
+        && let Some(detail) = location.splice_detail.as_ref()
+    {
+        if detail.overlaps_donor {
+            consequences.push(Consequence::SpliceDonorVariant);
+        }
+        if detail.overlaps_acceptor {
+            consequences.push(Consequence::SpliceAcceptorVariant);
+        }
+    }
+    let impact = finalize_consequences(&mut consequences);
+    let mut result = build_base_result(transcript, consequences);
+    result.impact = impact;
+    if start < end {
+        let (exon, intron) = footprint_exon_intron_numbers(start, end, transcript);
+        result.exon = exon;
+        result.intron = intron;
+    } else {
+        result.intron = Some(format_intron_number(intron_index, transcript.exon_count));
+    }
+    // VEP 116 reports CDS positions only when the footprint's 5' end (in
+    // transcript order) is a coding base: c.228_228+1del has CDS 228,
+    // c.228+1_229del none.
+    let five_prime_base = match transcript.strand {
+        Strand::Plus => start,
+        Strand::Minus => end.saturating_sub(1),
+    };
+    let five_prime_exonic = start < end
+        && transcript
+            .exons
+            .iter()
+            .any(|e| e.genomic_start <= five_prime_base && five_prime_base < e.genomic_end);
+    let offsets = if five_prime_exonic {
+        compute_cds_overlap_offsets(start, end, transcript, locate_index)
+    } else {
+        Vec::new()
+    };
+    if let (Some(first), Some(last)) = (offsets.first(), offsets.last()) {
+        let (cds_start, cds_end) = (first.0, last.1 - 1);
+        result.cds_position = Some(cds_start + 1);
+        result.cds_position_end = Some(cds_end + 1);
+        result.cdna_position = Some(compute_cdna_position_for_cds(cds_start, locate_index));
+        result.cdna_position_end = Some(compute_cdna_position_for_cds(cds_end, locate_index));
+        result.protein_start = Some(cds_start / 3 + 1);
+        result.protein_end = Some(cds_end / 3 + 1);
+    }
+    result
+}
+
+/// `true` when `[start, end)` crosses at least one intron and every intron it
+/// overlaps is a frameshift intron.
+fn spans_only_frameshift_introns(start: u64, end: u64, transcript: &TranscriptModel) -> bool {
+    let mut crossed = false;
+    for pair in transcript.exons.windows(2) {
+        let (lo, hi) = if pair[0].genomic_end <= pair[1].genomic_start {
+            (pair[0].genomic_end, pair[1].genomic_start)
+        } else {
+            (pair[1].genomic_end, pair[0].genomic_start)
+        };
+        if start < hi && lo < end {
+            if crate::locate::helpers::frameshift_gap(&pair[0], &pair[1]).is_none() {
+                return false;
+            }
+            crossed = true;
+        }
+    }
+    crossed
+}
+
+/// VEP's EXON and INTRON fields for a deletion footprint `[start, end)`:
+/// the exons and introns it overlaps, as `N/total` or `first-last/total`
+/// (VEP 116, ENST00000400999.7 `c.226_229del` across a one-base gap: exon
+/// `2-3/6`, intron `2/5`).
+fn footprint_exon_intron_numbers(
+    start: u64,
+    end: u64,
+    transcript: &TranscriptModel,
+) -> (Option<String>, Option<String>) {
+    let span = |indices: &mut dyn Iterator<Item = usize>, total: usize| {
+        let indices: Vec<usize> = indices.collect();
+        match (indices.first(), indices.last()) {
+            (Some(&first), Some(&last)) if first == last => Some(format!("{}/{total}", first + 1)),
+            (Some(&first), Some(&last)) => Some(format!("{}-{}/{total}", first + 1, last + 1)),
+            _ => None,
+        }
+    };
+    let exons = &transcript.exons;
+    let exon = span(
+        &mut exons
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| start < e.genomic_end && e.genomic_start < end)
+            .map(|(i, _)| i),
+        exons.len(),
+    );
+    let intron = span(
+        &mut exons
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                let (lo, hi) = if pair[0].genomic_end <= pair[1].genomic_start {
+                    (pair[0].genomic_end, pair[1].genomic_start)
+                } else {
+                    (pair[1].genomic_end, pair[0].genomic_start)
+                };
+                start < hi && lo < end
+            })
+            .map(|(i, _)| i),
+        exons.len().saturating_sub(1),
+    );
+    (exon, intron)
+}
+
 /// Annotate a deletion that crosses an exon/intron boundary or spans
 /// multiple exons.
 ///
@@ -96,6 +237,36 @@ pub(super) fn annotate_boundary_spanning_deletion(
     let cds_del_len = compute_cds_projected_length(start, end, transcript);
     let total_cds = locate_index.total_cds_length();
 
+    // A non-coding transcript's deletion that crosses only frameshift introns
+    // removes exon bases and no real intron: VEP 116 ENST00000609389.5
+    // n.281_282del across a 12-base gap is
+    // non_coding_transcript_exon_variant, exon 3-4/6, intron 3/5.
+    if transcript.cds_segments.is_empty() && spans_only_frameshift_introns(start, end, transcript) {
+        let mut consequences = vec![Consequence::NonCodingTranscriptExonVariant];
+        if location.overlaps_splice_region {
+            consequences.push(Consequence::SpliceRegionVariant);
+        }
+        let impact = finalize_consequences(&mut consequences);
+        let mut result = build_base_result(transcript, consequences);
+        result.impact = impact;
+        let first_exonic = (start..end).find_map(|pos| {
+            crate::consequence::helpers::compute_cdna_position_exonic(pos, transcript)
+        });
+        let last_exonic = (start..end).rev().find_map(|pos| {
+            crate::consequence::helpers::compute_cdna_position_exonic(pos, transcript)
+        });
+        let (cdna_start, cdna_end) = match transcript.strand {
+            Strand::Plus => (first_exonic, last_exonic),
+            Strand::Minus => (last_exonic, first_exonic),
+        };
+        result.cdna_position = cdna_start;
+        result.cdna_position_end = cdna_end;
+        let (exon, intron) = footprint_exon_intron_numbers(start, end, transcript);
+        result.exon = exon;
+        result.intron = intron;
+        return Ok(result);
+    }
+
     // No CDS bases deleted -> purely intronic/UTR deletion
     if cds_del_len == 0 {
         let mut consequences = vec![Consequence::IntronVariant];
@@ -114,8 +285,9 @@ pub(super) fn annotate_boundary_spanning_deletion(
         return Ok(result);
     }
 
-    // Entire CDS deleted -> transcript ablation
-    if cds_del_len >= total_cds {
+    // Entire CDS deleted -> transcript ablation. `cds_del_len` counts genomic
+    // bases, so it is compared with the unpadded coding length.
+    if cds_del_len >= locate_index.coding_length() {
         let consequences = vec![Consequence::TranscriptAblation];
         let mut result = build_base_result(transcript, consequences);
         result.impact = Impact::High;
@@ -175,7 +347,29 @@ pub(super) fn annotate_boundary_spanning_deletion(
         Strand::Plus => start < cds_genomic_start,
         Strand::Minus => end > cds_genomic_end,
     };
-    if global_cds_start == 0 {
+    let start_codon_complete = has_complete_start_codon(locate_index);
+    // A 5'-incomplete CDS has no start codon to lose, and VEP's frame
+    // predicates short-circuit on the undefined `cds_start` the same way, so
+    // a deletion running in from the 5'UTR is only a coding change.
+    if extends_into_5utr && !start_codon_complete {
+        let mut consequences = vec![
+            Consequence::CodingSequenceVariant,
+            Consequence::FivePrimeUtrVariant,
+        ];
+        if location.overlaps_splice_region {
+            consequences.push(Consequence::SpliceRegionVariant);
+        }
+        let impact = finalize_consequences(&mut consequences);
+        let mut result = build_base_result(transcript, consequences);
+        result.impact = impact;
+        result.cds_position = Some(global_cds_start + 1);
+        result.cds_position_end = Some(global_cds_end);
+        if let Some(exon_idx) = location.exon_index {
+            result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
+        }
+        return Ok(result);
+    }
+    if start_codon_complete && global_cds_start == 0 {
         let mut consequences = vec![Consequence::StartLost];
         if extends_into_5utr {
             consequences.push(Consequence::FivePrimeUtrVariant);
@@ -213,7 +407,10 @@ pub(super) fn annotate_boundary_spanning_deletion(
         Strand::Plus => end > cds_genomic_end,
         Strand::Minus => start < cds_genomic_start,
     };
-    if touches_stop && extends_into_3utr {
+    if touches_stop
+        && extends_into_3utr
+        && ends_in_stop_codon(chrom, transcript, locate_index, fasta)?
+    {
         let mut consequences = vec![Consequence::StopLost, Consequence::ThreePrimeUtrVariant];
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
@@ -233,6 +430,44 @@ pub(super) fn annotate_boundary_spanning_deletion(
         return Ok(result);
     }
 
+    // A deletion from the CDS into the 3'UTR of a CDS that does not end in a
+    // stop codon: there is no stop to lose and no reading frame left to
+    // shift, so it is only a coding and UTR change (VEP 116, NM_001424184.1
+    // c.658_*2del: incomplete_terminal_codon_variant, coding_sequence_variant,
+    // 3_prime_UTR_variant). VEP's `stop_retained_variant` for the same
+    // deletion starting one codon earlier (c.656_*2del) names a stop the
+    // transcript does not have (VEP_DIVERGENCES.md).
+    if extends_into_3utr && !ends_in_stop_codon(chrom, transcript, locate_index, fasta)? {
+        let mut consequences = vec![
+            Consequence::CodingSequenceVariant,
+            Consequence::ThreePrimeUtrVariant,
+        ];
+        if !total_cds.is_multiple_of(3) {
+            consequences.push(Consequence::IncompleteTerminalCodonVariant);
+        }
+        if location.overlaps_splice_region {
+            consequences.push(Consequence::SpliceRegionVariant);
+        }
+        let impact = finalize_consequences(&mut consequences);
+        let mut result = build_base_result(transcript, consequences);
+        result.impact = impact;
+        let protein = global_cds_start / 3 + 1;
+        result.protein_start = Some(protein);
+        result.protein_end = Some(protein);
+        result.cds_position = Some(global_cds_start + 1);
+        result.cds_position_end = Some(global_cds_end);
+        result.cdna_position = Some(compute_cdna_position_for_cds(
+            global_cds_start,
+            locate_index,
+        ));
+        // VEP 116 gives this deletion no HGVS at all (NM_001424184.1).
+        result.hgvs_p = None;
+        if let Some(exon_idx) = location.exon_index {
+            result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
+        }
+        return Ok(result);
+    }
+
     if !cds_del_len.is_multiple_of(3) {
         // Frameshift
         let first_codon = global_cds_start / 3;
@@ -246,7 +481,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         // offset 0, or an exon boundary, which covers the canonical splice
         // dinucleotides and is diverted above. Handle it rather than assume a
         // surviving reading frame.
-        let start_lost = global_cds_start < 3;
+        let start_lost = start_codon_complete && global_cds_start < 3;
         let mut consequences = vec![Consequence::FrameshiftVariant];
         if start_lost {
             consequences.push(Consequence::StartLost);
@@ -285,20 +520,57 @@ pub(super) fn annotate_boundary_spanning_deletion(
             (frameshift.notation, ptc)
         };
 
+        // Codons and amino acids over the whole codon window, as for an
+        // exonic frameshift (VEP 116, ENST00000400999.7 c.226_229del across a
+        // one-base gap: `TCCGAg/ag`, `SE/X`).
+        let window_end = (((global_cds_end - 1) / 3 + 1) * 3).min(total_cds);
+        let ref_window = fetch_cds_sequence(
+            codon_start_offset,
+            window_end,
+            chrom,
+            transcript,
+            locate_index,
+            fasta,
+        )?;
+        let local_del_start = (global_cds_start - codon_start_offset) as usize;
+        let local_del_end = (global_cds_end - codon_start_offset) as usize;
+        let mut alt_window = ref_window[..local_del_start].to_vec();
+        alt_window.extend_from_slice(&ref_window[local_del_end..]);
+        let ref_window_aas = if ref_window.len().is_multiple_of(3) {
+            translate_sequence(&ref_window, is_mito)?
+        } else {
+            vec![ref_aa]
+        };
+        let ref_aa_str: String = ref_window_aas.iter().map(|&aa| char::from(aa)).collect();
+
         let mut result = build_base_result(transcript, consequences);
         result.impact = impact;
         result.protein_start = Some(first_codon + 1);
         result.protein_end = Some(first_codon + 1);
-        result.amino_acids = Some(format!("{}/X", char::from(ref_aa)));
+        result.codons = Some(format_codons_indel(
+            &ref_window,
+            &alt_window,
+            local_del_start,
+            local_del_end,
+        ));
+        result.amino_acids = Some(format!("{ref_aa_str}/X"));
         result.cds_position = Some(global_cds_start + 1);
         result.cds_position_end = Some(global_cds_end);
+        result.cdna_position = Some(compute_cdna_position_for_cds(
+            global_cds_start,
+            locate_index,
+        ));
+        result.cdna_position_end = Some(compute_cdna_position_for_cds(
+            global_cds_end.saturating_sub(1),
+            locate_index,
+        ));
         result.hgvs_p = hgvs_p;
         result.predicts_nmd =
             !start_lost && super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
         result.ptc = ptc;
-        if let Some(exon_idx) = location.exon_index {
-            result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
-        }
+        let (exon, intron) = footprint_exon_intron_numbers(start, end, transcript);
+        result.exon = exon;
+        result.intron = intron;
         return Ok(result);
     }
 
@@ -334,7 +606,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
     let first_codon = codon_start / 3;
     let mut consequences = Vec::new();
 
-    if first_codon == 0 && alt_aas.first() != Some(&b'M') {
+    if first_codon == 0 && start_codon_complete && alt_aas.first() != Some(&b'M') {
         consequences.push(Consequence::StartLost);
     }
     if alt_aas.contains(&b'*') && !ref_aas.contains(&b'*') {
@@ -417,6 +689,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         },
         locate_index,
     );
+    let footprint_numbers = footprint_exon_intron_numbers(start, end, transcript);
 
     Ok(ConsequenceResult {
         transcript: transcript.accession.clone(),
@@ -433,12 +706,8 @@ pub(super) fn annotate_boundary_spanning_deletion(
             local_del_end,
         )),
         amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
-        exon: location
-            .exon_index
-            .map(|idx| format_exon_number(idx, transcript.exon_count)),
-        intron: location
-            .intron_index
-            .map(|idx| format_intron_number(idx, transcript.exon_count)),
+        exon: footprint_numbers.0,
+        intron: footprint_numbers.1,
         cds_position: Some(global_cds_start + 1),
         cds_position_end: Some(global_cds_end),
         cdna_position: Some(cdna_start),
@@ -473,6 +742,39 @@ pub(super) fn annotate_complex_delins(
     locate_index: &LocateIndex,
     fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let mut result = annotate_complex_delins_core(
+        chrom,
+        start,
+        trimmed_ref,
+        trimmed_alt,
+        transcript,
+        locate_index,
+        fasta,
+    )?;
+    add_splice_spill(
+        &mut result,
+        exonic_splice_spill(
+            start,
+            start + trimmed_ref.len() as u64,
+            transcript,
+            locate_index,
+        ),
+    );
+    Ok(result)
+}
+
+/// [`annotate_complex_delins`] without the splice terms a one-base frameshift intron spills
+/// onto exon bases.
+#[allow(clippy::too_many_arguments)]
+fn annotate_complex_delins_core(
+    chrom: &str,
+    start: u64,
+    trimmed_ref: &[u8],
+    trimmed_alt: &[u8],
+    transcript: &TranscriptModel,
+    locate_index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<ConsequenceResult, VarEffectError> {
     let ref_len = trimmed_ref.len() as u64;
     let del_end = start + ref_len;
     let is_mito = transcript.chrom == "chrM";
@@ -481,7 +783,22 @@ pub(super) fn annotate_complex_delins(
     let hgvs =
         hgvs_c::format_delins_hgvs(chrom, start, del_end, trimmed_alt, transcript, locate_index)?;
 
-    if location.overlaps_splice_canonical {
+    if let Some(intron) = frameshift_intron_endpoint(start, del_end, transcript, locate_index) {
+        let mut result = frameshift_intron_indel_result(
+            start,
+            del_end,
+            intron,
+            &location,
+            transcript,
+            locate_index,
+        );
+        result.hgvs_c = hgvs;
+        return Ok(result);
+    }
+
+    if location.overlaps_splice_canonical
+        && exonic_splice_spill(start, del_end, transcript, locate_index).is_none()
+    {
         let mut result = build_splice_indel_result(transcript, &location, start, del_end)?;
         result.hgvs_c = hgvs;
         return Ok(result);
@@ -512,11 +829,17 @@ pub(super) fn annotate_complex_delins(
             let exon_index = location.exon_index.unwrap_or(0);
 
             if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
-                let consequences = vec![Consequence::IncompleteTerminalCodonVariant];
+                // Same terms VEP 116 gives an SNV in a 3' partial codon; the
+                // residue is unknown, so the protein effect is `p.?`.
+                let consequences = vec![
+                    Consequence::IncompleteTerminalCodonVariant,
+                    Consequence::CodingSequenceVariant,
+                ];
                 let mut result = build_base_result(transcript, consequences);
                 result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
                 result.cds_position = Some(cds_offset_start + 1);
                 result.hgvs_c = hgvs;
+                result.hgvs_p = Some("p.?".to_string());
                 return Ok(result);
             }
 
@@ -575,7 +898,10 @@ pub(super) fn annotate_complex_delins(
                 let first_codon = codon_start / 3;
                 let mut consequences = Vec::new();
 
-                if first_codon == 0 && alt_aas.first() != Some(&b'M') {
+                if first_codon == 0
+                    && has_complete_start_codon(locate_index)
+                    && alt_aas.first() != Some(&b'M')
+                {
                     consequences.push(Consequence::StartLost);
                 }
                 if alt_aas.contains(&b'*') && !ref_aas.contains(&b'*') {
@@ -685,6 +1011,39 @@ pub(super) fn annotate_mnv(
     locate_index: &LocateIndex,
     fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let mut result = annotate_mnv_core(
+        chrom,
+        start,
+        ref_bases,
+        alt_bases,
+        transcript,
+        locate_index,
+        fasta,
+    )?;
+    add_splice_spill(
+        &mut result,
+        exonic_splice_spill(
+            start,
+            start + ref_bases.len() as u64,
+            transcript,
+            locate_index,
+        ),
+    );
+    Ok(result)
+}
+
+/// [`annotate_mnv`] without the splice terms a one-base frameshift intron spills
+/// onto exon bases.
+#[allow(clippy::too_many_arguments)]
+fn annotate_mnv_core(
+    chrom: &str,
+    start: u64,
+    ref_bases: &[u8],
+    alt_bases: &[u8],
+    transcript: &TranscriptModel,
+    locate_index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<ConsequenceResult, VarEffectError> {
     let n = ref_bases.len() as u64;
     let end = start + n;
     let is_mito = transcript.chrom == "chrM";
@@ -692,7 +1051,16 @@ pub(super) fn annotate_mnv(
     let location = locate_indel(chrom, start, end, transcript, locate_index)?;
     let hgvs = hgvs_c::format_delins_hgvs(chrom, start, end, alt_bases, transcript, locate_index)?;
 
-    if location.overlaps_splice_canonical {
+    if let Some(intron) = frameshift_intron_endpoint(start, end, transcript, locate_index) {
+        let mut result =
+            frameshift_intron_indel_result(start, end, intron, &location, transcript, locate_index);
+        result.hgvs_c = hgvs;
+        return Ok(result);
+    }
+
+    if location.overlaps_splice_canonical
+        && exonic_splice_spill(start, end, transcript, locate_index).is_none()
+    {
         let mut result = build_splice_indel_result(transcript, &location, start, end)?;
         result.hgvs_c = hgvs;
         return Ok(result);
@@ -726,11 +1094,17 @@ pub(super) fn annotate_mnv(
             let exon_index = location.exon_index.unwrap_or(0);
 
             if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
-                let consequences = vec![Consequence::IncompleteTerminalCodonVariant];
+                // Same terms VEP 116 gives an SNV in a 3' partial codon; the
+                // residue is unknown, so the protein effect is `p.?`.
+                let consequences = vec![
+                    Consequence::IncompleteTerminalCodonVariant,
+                    Consequence::CodingSequenceVariant,
+                ];
                 let mut result = build_base_result(transcript, consequences);
                 result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
                 result.cds_position = Some(cds_offset_start + 1);
                 result.hgvs_c = hgvs;
+                result.hgvs_p = Some("p.?".to_string());
                 return Ok(result);
             }
 
@@ -774,15 +1148,29 @@ pub(super) fn annotate_mnv(
 
             let all_same = ref_aas.iter().zip(alt_aas.iter()).all(|(r, a)| r == a);
 
-            if all_same {
-                if first_codon == 0 && ref_aas.first() == Some(&b'M') {
+            // The padded first codon of a 5'-incomplete CDS translates to X.
+            // VEP calls a change there `coding_sequence_variant`
+            // (`coding_unknown`) and never synonymous; a change to another,
+            // known residue keeps its term and adds `coding_sequence_variant`
+            // (VEP 116, ENST00000455979.1 c.1_2inv vs c.2_3delinsAA). An `N`
+            // in the alleles elsewhere keeps today's behavior.
+            let has_unknown = first_codon == 0 && locate_index.cds_start_pad() > 0;
+            let known_change = ref_aas
+                .iter()
+                .zip(alt_aas.iter())
+                .any(|(r, a)| r != a && *r != b'X' && *a != b'X');
+            let is_start_codon = first_codon == 0 && has_complete_start_codon(locate_index);
+            if has_unknown && !known_change {
+                consequences.push(Consequence::CodingSequenceVariant);
+            } else if all_same {
+                if is_start_codon && ref_aas.first() == Some(&b'M') {
                     consequences.push(Consequence::StartRetainedVariant);
                 } else if ref_aas.last() == Some(&b'*') {
                     consequences.push(Consequence::StopRetainedVariant);
                 } else {
                     consequences.push(Consequence::SynonymousVariant);
                 }
-            } else if first_codon == 0
+            } else if is_start_codon
                 && ref_aas.first() == Some(&b'M')
                 && alt_aas.first() != Some(&b'M')
             {
@@ -793,6 +1181,9 @@ pub(super) fn annotate_mnv(
                 consequences.push(Consequence::StopLost);
             } else {
                 consequences.push(Consequence::MissenseVariant);
+            }
+            if has_unknown && known_change {
+                consequences.push(Consequence::CodingSequenceVariant);
             }
 
             if location.overlaps_splice_region {
@@ -806,13 +1197,17 @@ pub(super) fn annotate_mnv(
             let cdna_end =
                 compute_cdna_position_for_cds(cds_offset_end.saturating_sub(1), locate_index);
 
-            let hgvs_p = crate::hgvs_p::format_hgvs_p_delins(
-                &ref_aas,
-                &alt_aas,
-                protein_start,
-                protein_end,
-                &consequences,
-            );
+            let hgvs_p = if has_unknown && !known_change {
+                Some("p.?".to_string())
+            } else {
+                crate::hgvs_p::format_hgvs_p_delins(
+                    &ref_aas,
+                    &alt_aas,
+                    protein_start,
+                    protein_end,
+                    &consequences,
+                )
+            };
 
             let predicts_nmd = consequences.contains(&Consequence::StopGained)
                 && super::nmd::predicts_nmd(cds_offset_start + 1, locate_index);
