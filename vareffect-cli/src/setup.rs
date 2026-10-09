@@ -5,12 +5,16 @@
 //!
 //! 1. Download + decompress + convert the GRCh38 reference FASTA to flat binary.
 //! 2. Download + parse the NCBI assembly report into patch-chrom aliases.
-//! 3. Download + parse + validate the MANE GFF3 -> `transcript_models.bin`.
+//! 3. Download + parse + validate the GFF3 of the configured transcript
+//!    source (`[vareffect.transcripts] source`): MANE ->
+//!    `transcript_models.bin`, RefSeq -> `transcript_models_refseq.bin`,
+//!    GENCODE -> `transcript_models_gencode.bin`. RefSeq and GENCODE files
+//!    are verified against their pinned SHA-256, release and genome build.
 //!
 //! Outputs live under the `output_dir` configured in `vareffect_build.toml`
-//! (default `data/vareffect/`). Source archives (`.gz` FASTA, MANE GFF3,
-//! MANE summary TSV) land in `raw_dir` (default `data/raw/`) as a cache so
-//! reruns skip the download step.
+//! (default `data/vareffect/`). Source archives (`.gz` FASTA, the source
+//! GFF3, the MANE summary TSV) land in `raw_dir` (default `data/raw/`) as a
+//! cache so reruns skip the download step.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,10 +22,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use console::style;
 
+use vareffect::TranscriptSource;
+
 use crate::builders;
 use crate::builders::reference_genome::{self, GenomeOutcome};
-use crate::common::format_size;
-use crate::config;
+use crate::common::{self, format_size};
+use crate::config::{self, SourceName};
+use crate::source_file;
 
 /// Run the `vareffect-cli setup` subcommand.
 ///
@@ -92,6 +99,13 @@ pub fn run(
     eprintln!("  output_dir  = {}", output_dir.display());
     eprintln!("  raw_dir     = {}", raw_dir.display());
     eprintln!("  fasta_build = {}", config.vareffect.fasta_build);
+    if !fasta_only {
+        eprintln!(
+            "  transcripts = {} {}",
+            TranscriptSource::from(config.source()),
+            config.source_release()?,
+        );
+    }
     eprintln!();
 
     // 3. Build a single HTTP client for all downloads. 1800 s body timeout
@@ -191,54 +205,81 @@ pub fn run(
     if !fasta_only {
         eprintln!("{}", style("[3/3] Transcript models").bold());
 
-        // GFF3 cache filename from the optional `[mane]` section, so a
-        // downstream pipeline can pre-stage the ~80 MB MANE GFF3 and have
-        // the `setup` command reuse it instead of re-downloading.
-        let gff_filename = config.gff_filename();
-
-        // Download both source files to raw_dir (not output_dir) so only
-        // the canonical .bin/.sha256/.manifest.json end up under
-        // data/vareffect/.
-        let gff_path = raw_dir.join(gff_filename);
-        ensure_cached(
-            &http_client,
-            &config.vareffect.gff_url,
-            &gff_path,
-            "MANE GFF3",
-        )?;
-
-        let summary_path = raw_dir.join(&config.vareffect.summary_input);
-        ensure_cached(
-            &http_client,
-            &config.vareffect.summary_url,
-            &summary_path,
-            "MANE summary TSV",
-        )?;
+        let source = config.source();
+        let release = config.source_release()?;
+        let (gff_path, summary_path) = match source {
+            SourceName::Mane => {
+                // GFF3 cache filename from the optional `[mane]` section, so
+                // a downstream pipeline can pre-stage the ~80 MB MANE GFF3
+                // and have the `setup` command reuse it instead of
+                // re-downloading.
+                let gff_path = raw_dir.join(config.gff_filename());
+                ensure_cached(
+                    &http_client,
+                    &config.vareffect.gff_url,
+                    &gff_path,
+                    "MANE GFF3",
+                )?;
+                let summary_path = raw_dir.join(&config.vareffect.summary_input);
+                ensure_cached(
+                    &http_client,
+                    &config.vareffect.summary_url,
+                    &summary_path,
+                    "MANE summary TSV",
+                )?;
+                (gff_path, Some(summary_path))
+            }
+            SourceName::Refseq | SourceName::Gencode => {
+                let pinned = config.pinned_source()?;
+                let fasta_build = &config.vareffect.fasta_build;
+                let gff_path = raw_dir.join(source_file::cache_filename(
+                    source,
+                    fasta_build,
+                    &pinned.release,
+                )?);
+                let display_name = format!("{} GFF3", TranscriptSource::from(source));
+                ensure_cached(&http_client, &pinned.url, &gff_path, &display_name)?;
+                // Cached files are verified too: a stale or swapped cache
+                // must not build a store labelled with the pinned release.
+                let header = source_file::verify(&gff_path, source, pinned, fasta_build)?;
+                eprintln!(
+                    "  {}  verified {} (SHA-256, release {}, {})",
+                    style("OK").green(),
+                    display_name,
+                    header.release,
+                    header.genome_build,
+                );
+                (gff_path, None)
+            }
+        };
 
         // Always rebuild the transcript model store: the parse is cheap
-        // (~10 s) and the cross-validation is cheap too, so an always-fresh
-        // build is simpler than trying to decide "is this .bin up to date?".
+        // (seconds) and the cross-validation is cheap too, so an
+        // always-fresh build is simpler than trying to decide "is this .bin
+        // up to date?".
         let build_start = Instant::now();
         // `aliases_path` is `Some` here by construction -- Step 2/3 only
         // returns `None` under `fasta_only`, which short-circuits this block.
         let aliases_ref = aliases_path
             .as_deref()
             .expect("patch aliases must be built before transcript models in vareffect-cli setup");
+        let transcript_source = TranscriptSource::from(source);
         let (out, size_bytes) =
             builders::transcript_models::build(&builders::transcript_models::BuildRequest {
-                source: vareffect::TranscriptSource::Mane,
+                source: transcript_source,
                 input: &gff_path,
-                summary_input: Some(&summary_path),
+                summary_input: summary_path.as_deref(),
                 patch_aliases_input: Some(aliases_ref),
                 output_dir: &output_dir,
-                release: &config.vareffect.transcript_models_version,
+                release,
             })
-            .context("building transcript_models store")?;
+            .with_context(|| format!("building the {transcript_source} transcript store"))?;
+        let store_name = format!("{}.bin", common::store_stem(transcript_source)?);
 
         eprintln!(
             "  {}  wrote {} ({} records, {} in {}s)",
             style("OK").green(),
-            style("transcript_models.bin").cyan(),
+            style(store_name).cyan(),
             out.record_count,
             format_size(size_bytes as u64),
             build_start.elapsed().as_secs(),

@@ -161,7 +161,7 @@ pub fn format_size(bytes: u64) -> String {
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened or read.
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     use std::io::Read;
 
     let mut file = std::fs::File::open(path)
@@ -260,6 +260,24 @@ pub(crate) fn write_transcript_store(store: &StoreWrite<'_>) -> Result<(BuildOut
     Ok((output, data.len()))
 }
 
+/// `<source> <release>` of a loaded transcript store, each `unknown` when
+/// the store does not record it (a store encoded without provenance).
+///
+/// # Arguments
+///
+/// * `store` -- The loaded store.
+///
+/// # Returns
+///
+/// E.g. `"gencode 50"`, `"refseq RS_2025_08"`, `"unknown unknown"`.
+pub(crate) fn store_provenance(store: &vareffect::TranscriptStore) -> String {
+    format!(
+        "{} {}",
+        store.source().map_or("unknown", TranscriptSource::as_str),
+        store.source_release().unwrap_or("unknown"),
+    )
+}
+
 /// File stem of the transcript store built from `source`.
 ///
 /// # Errors
@@ -309,6 +327,34 @@ pub fn print_build_summary(name: &str, output: &BuildOutput, data_size: usize, e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_provenance_names_source_and_release() {
+        let exon = vareffect::Exon {
+            exon_number: 1,
+            genomic_start: 1_000,
+            genomic_end: 2_000,
+        };
+        let transcript = TranscriptModel::new(
+            "ENST00000000001.1",
+            "FAKE1",
+            "chr1",
+            vareffect::Strand::Plus,
+            vec![exon],
+        )
+        .with_biotype(vareffect::Biotype::NonCodingRna);
+        let transcripts = [transcript];
+        let load = |source, release| {
+            let bytes =
+                vareffect::encode_transcript_store(source, release, &transcripts).expect("encode");
+            vareffect::TranscriptStore::from_bytes(&bytes).expect("load")
+        };
+        assert_eq!(
+            store_provenance(&load(Some(TranscriptSource::Gencode), Some("50"))),
+            "gencode 50"
+        );
+        assert_eq!(store_provenance(&load(None, None)), "unknown unknown");
+    }
 
     #[test]
     fn store_stems_are_distinct_per_source() {

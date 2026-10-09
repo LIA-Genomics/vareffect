@@ -51,3 +51,28 @@ assembly_report_input     = "GCF_000001405.40_GRCh38.p14_assembly_report.txt"
 # Output directory for the final runtime files (GRCh38.bin, GRCh38.bin.idx,
 # transcript_models.bin, .sha256, manifest.json).
 output_dir = "data/vareffect"
+
+# Transcript source that `vareffect setup` builds and `vareffect check`
+# validates: "mane" (MANE Select + Plus Clinical, the default when this table
+# is absent), "refseq" (curated NM_/NR_ on the primary assembly) or "gencode"
+# (GENCODE comprehensive). Each source has its own store:
+# transcript_models.bin, transcript_models_refseq.bin or
+# transcript_models_gencode.bin. Pass the chosen one to `vareffect annotate
+# --transcripts`; the output VCF names it in a `##vareffect_transcripts`
+# header line.
+[vareffect.transcripts]
+source = "mane"
+
+# Pinned RefSeq and GENCODE GFF3s. `setup` refuses a download whose SHA-256,
+# header release or header genome build differs from the pin, so a moved or
+# replaced upstream file cannot silently change the store. The cached copy
+# in raw_dir is named after the source, build and release.
+[vareffect.refseq]
+url     = "https://ftp.ncbi.nlm.nih.gov/genomes/all/annotation_releases/9606/GCF_000001405.40-RS_2025_08/GCF_000001405.40_GRCh38.p14_genomic.gff.gz"
+release = "RS_2025_08"
+sha256  = "4920f0eae7e2197c50b67a201e06d657387137b49dd60f474b4f1d5b29334051"
+
+[vareffect.gencode]
+url     = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/gencode.v50.annotation.gff3.gz"
+release = "50"
+sha256  = "2aaf245c91ed00e80920953add6cfaffcccc876dc0aceeb6ca0c86d15875899a"
