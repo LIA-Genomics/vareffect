@@ -179,6 +179,14 @@ For releases before `0.5.0`, see the git history.
 
 ### Fixed
 
+- An alternate allele with an `N` (or another base outside A, C, G, T) is
+  annotated as VEP 116 does: the terms read from the peptide (`missense`,
+  `stop_gained`, `protein_altering`, ...) become `coding_sequence_variant`,
+  `frameshift_variant` stays, and there is no HGVS c., HGVS p. or amino acid
+  change. Codons and positions are kept, for SNVs too. Before, such alleles could
+  be called `stop_gained`, `missense_variant` or `protein_altering_variant`
+  (6 of 668 ClinVar N alleles) and got an HGVS c. A frameshift's
+  termination codon is `PtcStatus::Indeterminate`.
 - Insertions are annotated at their insertion point (VEP 116). Before, an
   insertion was classified by a single genomic base, which on the minus
   strand lies on the wrong side of it: minus-strand coding insertions were one

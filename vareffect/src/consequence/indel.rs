@@ -1,10 +1,10 @@
 //! Indel (insertion and deletion) consequence annotation.
 
 use super::helpers::{
-    add_splice_spill, build_base_result, compute_cdna_position_exonic,
+    AltSite, add_splice_spill, build_base_result, compute_cdna_position_exonic,
     compute_cdna_position_for_cds, ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon,
     finalize_consequences, has_complete_start_codon, is_incomplete_terminal_codon,
-    without_gapped_numbering,
+    without_gapped_numbering, without_unknown_alt_effects,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -601,7 +601,17 @@ pub fn annotate_insertion(
             locate_index,
         );
         result.hgvs_c = hgvs;
-        return Ok(without_gapped_numbering(transcript, result));
+        return without_unknown_alt_effects(
+            &AltSite {
+                alt: inserted_bases,
+                is_indel: true,
+                chrom,
+                transcript,
+                index: locate_index,
+                fasta,
+            },
+            without_gapped_numbering(transcript, result),
+        );
     }
 
     let mut result = match &location.region {
@@ -715,7 +725,17 @@ pub fn annotate_insertion(
         result.exon = None;
     }
     result.hgvs_c = hgvs;
-    Ok(without_gapped_numbering(transcript, result))
+    without_unknown_alt_effects(
+        &AltSite {
+            alt: inserted_bases,
+            is_indel: true,
+            chrom,
+            transcript,
+            index: locate_index,
+            fasta,
+        },
+        without_gapped_numbering(transcript, result),
+    )
 }
 
 /// Build the result for a CDS frameshift (shared by deletion, insertion,

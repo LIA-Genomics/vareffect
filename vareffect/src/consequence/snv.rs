@@ -76,7 +76,17 @@ pub fn annotate_snv(
         locate_index,
         fasta,
     )?;
-    Ok(super::helpers::without_gapped_numbering(transcript, result))
+    super::helpers::without_unknown_alt_effects(
+        &super::helpers::AltSite {
+            alt: &[alt_base],
+            is_indel: false,
+            chrom,
+            transcript,
+            index: locate_index,
+            fasta,
+        },
+        super::helpers::without_gapped_numbering(transcript, result),
+    )
 }
 
 /// Internal SNV annotator that skips REF verification. Called by the
@@ -341,12 +351,18 @@ fn annotate_cds_snv(
         // The partial first codon of a 5'-incomplete CDS: VEP 116 reports
         // its `N`-padded codons (`nnT/nnA`), amino acid X and protein
         // position 1 (ENST00000379099.3 c.3T>A). A reference `N` elsewhere
-        // keeps the bare result.
+        // keeps the bare result. An unknown alternate base in a known codon
+        // keeps the codons and protein position, without amino acids
+        // (VEP 116 NM_003051.4 `Tct/Nct`, protein 33).
         if codon_number == 1 && index.cds_start_pad() > 0 {
             result.protein_start = Some(1);
             result.protein_end = Some(1);
             result.codons = Some(format_codons(&ref_codon, &alt_codon, codon_position));
             result.amino_acids = Some("X".to_string());
+        } else if ref_aa != b'X' {
+            result.protein_start = Some(codon_number);
+            result.protein_end = Some(codon_number);
+            result.codons = Some(format_codons(&ref_codon, &alt_codon, codon_position));
         }
         return Ok(result);
     }
