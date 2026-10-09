@@ -8,8 +8,7 @@ use super::helpers::{
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
-    format_amino_acids_indel, format_codons_indel, reverse_complement,
-    translate_codon_for_transcript, translate_sequence,
+    format_amino_acids_indel, format_codons_indel, reverse_complement, translate_sequence,
 };
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
@@ -205,7 +204,10 @@ fn annotate_deletion_core(
 /// codons are a lone stop (`TranscriptVariationAllele.pm::peptide`,
 /// ensembl-variation release/116: VEP 116 c.658_659insGA `X/*`, edge
 /// insGGGTGAG `-/G*X`).
-fn translate_with_partial_codon(seq: &[u8], is_mito: bool) -> Result<Vec<u8>, VarEffectError> {
+pub(super) fn translate_with_partial_codon(
+    seq: &[u8],
+    is_mito: bool,
+) -> Result<Vec<u8>, VarEffectError> {
     let whole = seq.len() - seq.len() % 3;
     let mut aas = translate_sequence(&seq[..whole], is_mito)?;
     if whole < seq.len() && aas != b"*" {
@@ -742,9 +744,8 @@ pub fn annotate_insertion(
 /// and complex delins).
 ///
 /// Reports `protein_start = protein_end = first_affected_codon` (1-based).
-/// If the frameshift fully removes the start codon (codon 1), reports
-/// `start_lost` instead. If it partially overlaps codon 1, reports
-/// `frameshift_variant` only (VEP behavior).
+/// A frameshift touching a complete start codon follows VEP 116's
+/// `start_lost` / `start_retained_variant` (see [`frameshift_start_terms`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn annotate_cds_frameshift(
     chrom: &str,
@@ -773,47 +774,7 @@ pub(super) fn annotate_cds_frameshift(
         cds_offset_start / 3 + 1
     };
 
-    // VEP's start_lost() checks _overlaps_start_codon() AND
-    // _ins_del_start_altered() (methionine actually changed).
-    let overlaps_start_codon = codon_number == 1 && has_complete_start_codon(transcript, index);
-    let start_lost = if overlaps_start_codon {
-        if cds_offset_start == 0 && cds_offset_end >= 3 {
-            true
-        } else if is_insertion && cds_offset_start < 3 {
-            // Insertion within codon 1 shifts reading frame, destroying start
-            true
-        } else if !is_insertion && cds_offset_start < 3 {
-            // Partial deletion within codon 1 -- check if Met is destroyed
-            let ref_codon = fetch_ref_codon(0, chrom, transcript, index, fasta)?;
-            let del_start = cds_offset_start as usize;
-            let del_end = (cds_offset_end.min(3)) as usize;
-            let mut remaining: Vec<u8> = Vec::with_capacity(3);
-            remaining.extend_from_slice(&ref_codon[..del_start]);
-            remaining.extend_from_slice(&ref_codon[del_end..]);
-            remaining.len() < 3
-                || translate_codon_for_transcript(
-                    remaining[..3]
-                        .try_into()
-                        .expect("length >= 3 guaranteed by short-circuit above"),
-                    is_mito,
-                ) != b'M'
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    let predicts_nmd = !start_lost && super::nmd::predicts_nmd(cds_offset_start + 1, index);
-    // VEP's `frameshift` and `start_lost` predicates fire independently —
-    // there is no suppression of frameshift when the start codon is also
-    // destroyed. Emit both. `finalize_consequences` (consequence/helpers.rs)
-    // sorts by severity_rank so the insertion order here doesn't matter.
     let mut consequences = vec![Consequence::FrameshiftVariant];
-    if start_lost {
-        consequences.push(Consequence::StartLost);
-    }
-
     if is_splice_region {
         consequences.push(Consequence::SpliceRegionVariant);
     }
@@ -835,21 +796,28 @@ pub(super) fn annotate_cds_frameshift(
         Vec::new() // pure deletion
     };
 
-    // Insertions: single-codon context with "-/BASE" format.
-    // Deletions: full codon-aligned range matching VEP's multi-codon display.
-    let (codons, amino_acids, protein_end) = if is_insertion {
-        let ref_codon = fetch_ref_codon(codon_start, chrom, transcript, index, fasta)?;
-        let ref_aa = translate_codon_for_transcript(&ref_codon, is_mito);
-        let codons = inserted_bases.map(|bases| {
-            let coding_bases = match transcript.strand {
-                Strand::Plus => bases.to_vec(),
-                Strand::Minus => reverse_complement(bases),
-            };
-            let ins_str: String = coding_bases.iter().map(|&b| b as char).collect();
-            format!("-/{ins_str}")
-        });
-        let aa_char = if ref_aa == b'X' { 'X' } else { ref_aa as char };
-        (codons, format!("{aa_char}/X"), codon_number)
+    // The codons and peptides of VEP's codon window
+    // (`TranscriptVariationAllele::codon` / `peptide`, release/116): the
+    // reference codons the variant touches and the same window with the
+    // allele applied. An insertion between two codons touches none, so its
+    // reference side is empty (`-/T`, `-/X`); one inside a codon shows that
+    // codon (`gat/gaTt`, `D/DX`).
+    let (codons, ref_aas, alt_aas, protein_end) = if is_insertion {
+        let (ref_seq, alt_seq, local_start) = if cds_offset_start.is_multiple_of(3) {
+            (Vec::new(), coding_inserted_for_hgvs.clone(), 0)
+        } else {
+            let ref_codon = fetch_ref_codon(codon_start, chrom, transcript, index, fasta)?;
+            let local_start = (cds_offset_start - codon_start) as usize;
+            let mut alt_seq = Vec::with_capacity(3 + coding_inserted_for_hgvs.len());
+            alt_seq.extend_from_slice(&ref_codon[..local_start]);
+            alt_seq.extend_from_slice(&coding_inserted_for_hgvs);
+            alt_seq.extend_from_slice(&ref_codon[local_start..]);
+            (ref_codon.to_vec(), alt_seq, local_start)
+        };
+        let codons = format_codons_indel(&ref_seq, &alt_seq, local_start, local_start);
+        let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+        let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
+        (Some(codons), ref_aas, alt_aas, codon_number)
     } else {
         // Expand to codon boundaries
         let codon_end = ((cds_offset_end - 1) / 3 + 1) * 3;
@@ -872,17 +840,58 @@ pub(super) fn annotate_cds_frameshift(
         }
         alt_seq.extend_from_slice(&ref_seq[local_del_end..]);
 
-        // Translate both. Truncate alt to complete codons -- the trailing
-        // 1-2 bases are the start of the shifted reading frame.
         let ref_aas = translate_sequence(&ref_seq, is_mito)?;
-        let translate_len = alt_seq.len() - (alt_seq.len() % 3);
-        let mut alt_aas = translate_sequence(&alt_seq[..translate_len], is_mito)?;
-        alt_aas.push(b'X'); // frameshift indicator
-
+        let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
         let codons_str = format_codons_indel(&ref_seq, &alt_seq, local_del_start, local_del_end);
-        let aa_str = format_amino_acids_indel(&ref_aas, &alt_aas);
-        (Some(codons_str), aa_str, codon_end / 3)
+        (Some(codons_str), ref_aas, alt_aas, codon_end / 3)
     };
+    let amino_acids = format_amino_acids_indel(&ref_aas, &alt_aas);
+
+    // VEP's `frameshift` and the start predicates fire independently: a
+    // frameshift touching the start codon also gets `start_lost` and / or
+    // `start_retained_variant`.
+    // `_overlaps_start_codon` compares unshifted cDNA bounds; an insertion's
+    // bounds are reversed (start = end + 1), so it overlaps only from inside
+    // the codon (offsets 1 and 2), a deletion when it starts in codon 1.
+    let overlaps_start_codon = has_complete_start_codon(transcript, index)
+        && if is_insertion {
+            (1..3).contains(&cds_offset_start)
+        } else {
+            cds_offset_start < 3
+        };
+    let (start_lost, start_retained) = if overlaps_start_codon {
+        let start = check_start_codon(
+            chrom,
+            transcript,
+            index,
+            fasta,
+            (cds_offset_start, cds_offset_end),
+            &coding_inserted_for_hgvs,
+        )?;
+        frameshift_start_terms(start, &ref_aas, &alt_aas)
+    } else {
+        (false, false)
+    };
+    if start_lost {
+        consequences.push(Consequence::StartLost);
+    }
+    if start_retained {
+        consequences.push(Consequence::StartRetainedVariant);
+    }
+    let predicts_nmd = !start_lost && super::nmd::predicts_nmd(cds_offset_start + 1, index);
+    // VEP's `stop_gained` holds for a frameshift too: the window's alternate
+    // peptide reads a stop the reference peptide lacks (VEP 116
+    // NM_013322.3 c.ins `frameshift_variant,stop_gained`). Not when an
+    // insertion just before the stop codon opens with a stop, which then
+    // sits where the reference stop was (VEP 116 NM_000546.6
+    // c.1179_1180insTAAG: `inframe_insertion,stop_retained_variant`,
+    // VEP_DIVERGENCES.md).
+    let stop_in_place = is_insertion
+        && cds_offset_start + 3 == index.total_cds_length()
+        && alt_aas.first() == Some(&b'*');
+    if alt_aas.contains(&b'*') && !ref_aas.contains(&b'*') && !stop_in_place {
+        consequences.push(Consequence::StopGained);
+    }
 
     let impact = finalize_consequences(&mut consequences);
 
@@ -957,6 +966,163 @@ pub(super) fn annotate_cds_frameshift(
         predicts_nmd,
         ptc,
     })
+}
+
+/// What an indel does to the start codon (`VariationEffect.pm`,
+/// release/116).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartCheck {
+    /// `_ins_del_start_altered` is false: the transcript has a 5'UTR and
+    /// `ATG` still opens the CDS, or the edited 5'UTR + CDS still ends with
+    /// the whole CDS (the indel only shifts bases across the CDS start,
+    /// NM_000546.6 c.1dup).
+    keeps_start: bool,
+    /// `_inv_start_altered` is true: the transcript has a 5'UTR and the
+    /// edited CDS no longer opens with `ATG`.
+    start_moved: bool,
+}
+
+/// Check an indel at CDS offsets `start..end` (`start == end` for an
+/// insertion), with `alt` (coding strand) in place of the removed bases,
+/// against the start codon as VEP edits the 5'UTR plus CDS.
+///
+/// # Errors
+///
+/// Returns an error if the reference CDS or 5'UTR cannot be read.
+fn check_start_codon(
+    chrom: &str,
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    fasta: &FastaReader,
+    (start, end): (u32, u32),
+    alt: &[u8],
+) -> Result<StartCheck, VarEffectError> {
+    let (start, end) = (start as usize, end as usize);
+    let window_end = (end as u32 + 3).min(index.total_cds_length());
+    let cds = fetch_cds_sequence(0, window_end, chrom, transcript, index, fasta)?;
+    let utr5_len = index.utr5_exonic_len() as usize;
+    let mut edited = Vec::with_capacity(cds.len() + alt.len());
+    edited.extend_from_slice(&cds[..start]);
+    edited.extend_from_slice(alt);
+    edited.extend_from_slice(&cds[end..]);
+    let starts_atg = edited.len() >= 3 && edited[..3].eq_ignore_ascii_case(b"ATG");
+    let start_moved = utr5_len > 0 && !starts_atg;
+    if utr5_len > 0 && starts_atg {
+        return Ok(StartCheck {
+            keeps_start: true,
+            start_moved,
+        });
+    }
+    // The edited 5'UTR + CDS is shorter than the CDS alone.
+    if utr5_len + alt.len() < end - start {
+        return Ok(StartCheck {
+            keeps_start: false,
+            start_moved,
+        });
+    }
+    // It ends with the CDS when the bases before `cds[end..]` (5'UTR tail,
+    // kept CDS prefix, inserted bases) end with `cds[..end]`.
+    let mut head = utr5_tail(end, transcript, index, fasta)?;
+    head.extend_from_slice(&cds[..start]);
+    head.extend_from_slice(alt);
+    Ok(StartCheck {
+        keeps_start: head.ends_with(&cds[..end]),
+        start_moved,
+    })
+}
+
+/// The last `n` exonic 5'UTR bases on the coding strand (fewer when the
+/// 5'UTR is shorter).
+///
+/// # Errors
+///
+/// Returns an error if the reference cannot be read.
+pub(super) fn utr5_tail(
+    n: usize,
+    transcript: &TranscriptModel,
+    index: &LocateIndex,
+    fasta: &FastaReader,
+) -> Result<Vec<u8>, VarEffectError> {
+    let Some(first_cds) = transcript.cds_segments.first() else {
+        return Ok(Vec::new());
+    };
+    if n == 0 || index.utr5_exonic_len() == 0 {
+        return Ok(Vec::new());
+    }
+    let plus = matches!(transcript.strand, Strand::Plus);
+    // 5'UTR exon pieces in transcript order.
+    let pieces: Vec<(u64, u64)> = transcript
+        .exons
+        .iter()
+        .filter_map(|exon| {
+            let (piece_start, piece_end) = if plus {
+                (
+                    exon.genomic_start,
+                    exon.genomic_end.min(first_cds.genomic_start),
+                )
+            } else {
+                (
+                    exon.genomic_start.max(first_cds.genomic_end),
+                    exon.genomic_end,
+                )
+            };
+            (piece_start < piece_end).then_some((piece_start, piece_end))
+        })
+        .collect();
+    let mut tail: Vec<u8> = Vec::with_capacity(n);
+    for &(piece_start, piece_end) in pieces.iter().rev() {
+        let missing = (n - tail.len()) as u64;
+        let (fetch_start, fetch_end) = if plus {
+            (
+                piece_end.saturating_sub(missing).max(piece_start),
+                piece_end,
+            )
+        } else {
+            (piece_start, (piece_start + missing).min(piece_end))
+        };
+        let chunk = fasta.fetch_sequence(&transcript.chrom, fetch_start, fetch_end)?;
+        let chunk = if plus {
+            chunk
+        } else {
+            reverse_complement(&chunk)
+        };
+        let mut joined = chunk;
+        joined.extend_from_slice(&tail);
+        tail = joined;
+        if tail.len() >= n {
+            break;
+        }
+    }
+    Ok(tail)
+}
+
+/// VEP 116's start terms for a frameshift touching a complete start codon,
+/// as `(start_lost, start_retained_variant)` (`VariationEffect.pm`,
+/// release/116):
+///
+/// - `start_retained_variant` when the indel keeps the start codon
+///   ([`StartCheck::keeps_start`]; NM_021922.3 c.3_12del rebuilds `ATG`);
+/// - `start_lost` when it does not, when `ATG` no longer opens the CDS of a
+///   transcript with a 5'UTR ([`StartCheck::start_moved`]), or when the
+///   alternate peptide of the window (which begins at codon 1) neither
+///   starts nor ends with the reference peptide and is not just `X`. Both
+///   can hold: NM_000546.6 c.1dup and KRAS NM_004985.5 c.1del, which only
+///   shift the start codon, are `start_lost,start_retained_variant`.
+///
+/// # Arguments
+///
+/// * `start` - The indel's effect on the start codon
+/// * `ref_aas`, `alt_aas` - The window's peptides
+fn frameshift_start_terms(start: StartCheck, ref_aas: &[u8], alt_aas: &[u8]) -> (bool, bool) {
+    let peptide_lost = !ref_aas.is_empty()
+        && !alt_aas.is_empty()
+        && alt_aas != b"X"
+        && !alt_aas.starts_with(ref_aas)
+        && !alt_aas.ends_with(ref_aas);
+    (
+        !start.keeps_start || start.start_moved || peptide_lost,
+        start.keeps_start,
+    )
 }
 
 /// Build the result for an inframe CDS deletion.

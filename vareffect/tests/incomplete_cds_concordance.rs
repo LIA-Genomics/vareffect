@@ -48,10 +48,8 @@
 //!    no genomic stop (NM_001424184.1 `c.658_*2del`, `c.656_659del`,
 //!    `c.656_*2del` written as `c.656_659del`; ENST00000518351.2's whole
 //!    partial codon). HGVS is not compared on those rows (`HGVS_NOT_COMPARED`).
-//! 7. Codons and amino acids of a frameshift *insertion* are not compared:
-//!    vareffect prints `-/A` and `A/X` where VEP prints the codon context
-//!    (`gcg/gcAg`, `A/AX`) or `-/X`. This predates incomplete-CDS support and
-//!    applies to every transcript.
+//! 7. (Retired: codons and amino acids of frameshift insertions now follow
+//!    VEP's codon window, `gcg/gcAg`, `A/AX`, `-/X`, and are compared.)
 //! 8. For a deletion spanning a frameshift intron VEP uppercases as many
 //!    codon bases as the genomic footprint is long, intron base included
 //!    (`tCCGAg/tag` for three coding bases); codons are compared ignoring
@@ -451,30 +449,26 @@ fn check_row(engine: &VarEffect, fasta: &FastaReader, row: &VepRow, failures: &m
         format!("{:?}", got.protein_start),
         format!("{:?}", row.protein_start),
     );
-    let frameshift_insertion =
-        row.ref_allele == "-" && row.consequences.iter().any(|t| t == "frameshift_variant");
-    if !frameshift_insertion {
-        let spans_gap = row.label.starts_with("fs_del_spanning");
-        let display = |codons: Option<&str>| {
-            codons.map(|c| {
-                if spans_gap {
-                    c.to_ascii_lowercase()
-                } else {
-                    c.to_string()
-                }
-            })
-        };
-        check(
-            "codons",
-            format!("{:?}", display(got.codons.as_deref())),
-            format!("{:?}", display(row.codons.as_deref())),
-        );
-        check(
-            "amino_acids",
-            format!("{:?}", got.amino_acids),
-            format!("{:?}", row.amino_acids),
-        );
-    }
+    let spans_gap = row.label.starts_with("fs_del_spanning");
+    let display = |codons: Option<&str>| {
+        codons.map(|c| {
+            if spans_gap {
+                c.to_ascii_lowercase()
+            } else {
+                c.to_string()
+            }
+        })
+    };
+    check(
+        "codons",
+        format!("{:?}", display(got.codons.as_deref())),
+        format!("{:?}", display(row.codons.as_deref())),
+    );
+    check(
+        "amino_acids",
+        format!("{:?}", got.amino_acids),
+        format!("{:?}", row.amino_acids),
+    );
     if let Some(exon) = &row.exon {
         check("exon", format!("{:?}", got.exon), format!("{exon:?}"));
     }

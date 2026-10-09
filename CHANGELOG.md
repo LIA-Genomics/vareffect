@@ -179,6 +179,17 @@ For releases before `0.5.0`, see the git history.
 
 ### Fixed
 
+- Frameshifts follow VEP 116's codon window (`TranscriptVariationAllele`
+  `codon` / `peptide`): an insertion inside a codon shows that codon and its
+  peptide (`gat/gaTt`, `D/DX`), one between codons shows no reference codon
+  (`-/T`, `-/X`), and a peptide that is a lone stop gets no `X` (`CE/*`).
+  A frameshift whose window reads a new stop is also `stop_gained` (2,713
+  ClinVar x MANE 1.5 entries), except a stop inserted right before the
+  stop codon. At the start codon the frameshift path now
+  applies VEP's `_ins_del_start_altered` and `_inv_start_altered`: an indel
+  that keeps or rebuilds `ATG`, or only shifts it into the 5'UTR, is
+  `start_retained_variant` (with `start_lost` when `ATG` no longer opens the
+  CDS), and only an insertion inside codon 1 touches it (84 entries).
 - An alternate allele with an `N` (or another base outside A, C, G, T) is
   annotated as VEP 116 does: the terms read from the peptide (`missense`,
   `stop_gained`, `protein_altering`, ...) become `coding_sequence_variant`,

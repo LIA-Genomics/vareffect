@@ -361,6 +361,13 @@ for exon numbers) next to it.
   `p.Met1?`. The same offset gives VEP text such as `p.Asp0_Asp1ins...` for
   a `start_retained_variant` insertion that clips before residue 1 on a
   transcript without a 5'UTR; `vareffect` writes no HGVS p. there.
+- **A stop inserted just before the stop codon.** An insertion between the
+  last sense codon and the stop codon whose bases open with a stop puts a
+  stop where the reference one was. VEP 116 extends the insertion by its
+  length before its stop-codon overlap test (`_overlaps_stop_codon_cil`)
+  and calls even a frameshifting one `inframe_insertion,stop_retained_variant`
+  (NM_000546.6 c.1179_1180insTAAG, `-/*`, `p.Ter394delinsTer`). `vareffect`
+  keeps `frameshift_variant` without `stop_gained`.
 - **Unknown bases in the alternate allele.** An `N` (or any base other than
   A, C, G, T) gives VEP 116 no peptide, so every term read from the peptide
   becomes `coding_sequence_variant` (`coding_unknown`), and VEP writes no
