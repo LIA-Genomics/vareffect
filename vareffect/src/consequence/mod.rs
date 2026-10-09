@@ -616,15 +616,18 @@ pub(crate) fn annotate(
             for (tx, idx) in overlaps {
                 // REF already verified above; use the unchecked path to
                 // avoid a redundant FASTA seek per transcript.
-                results.push(snv::annotate_snv_verified(
-                    chrom,
-                    trimmed_pos,
-                    trimmed_ref[0],
-                    trimmed_alt[0],
+                results.push(helpers::without_gapped_hgvs(
                     tx,
-                    idx,
-                    fasta,
-                )?);
+                    snv::annotate_snv_verified(
+                        chrom,
+                        trimmed_pos,
+                        trimmed_ref[0],
+                        trimmed_alt[0],
+                        tx,
+                        idx,
+                        fasta,
+                    )?,
+                ));
             }
             results
         }
@@ -673,15 +676,18 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(complex::annotate_mnv(
-                    chrom,
-                    trimmed_pos,
-                    trimmed_ref,
-                    trimmed_alt,
+                results.push(helpers::without_gapped_hgvs(
                     tx,
-                    idx,
-                    fasta,
-                )?);
+                    complex::annotate_mnv(
+                        chrom,
+                        trimmed_pos,
+                        trimmed_ref,
+                        trimmed_alt,
+                        tx,
+                        idx,
+                        fasta,
+                    )?,
+                ));
             }
             results
         }
@@ -692,15 +698,18 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(complex::annotate_complex_delins(
-                    chrom,
-                    trimmed_pos,
-                    trimmed_ref,
-                    trimmed_alt,
+                results.push(helpers::without_gapped_hgvs(
                     tx,
-                    idx,
-                    fasta,
-                )?);
+                    complex::annotate_complex_delins(
+                        chrom,
+                        trimmed_pos,
+                        trimmed_ref,
+                        trimmed_alt,
+                        tx,
+                        idx,
+                        fasta,
+                    )?,
+                ));
             }
             results
         }

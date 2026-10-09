@@ -11,21 +11,27 @@ GFF3 phase kept). Sources:
 
 | File | SHA-256 | Transcripts |
 |---|---|---|
-| GENCODE v50 `gencode.v50.annotation.gff3.gz` (https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/) | `2aaf245c91ed00e80920953add6cfaffcccc876dc0aceeb6ca0c86d15875899a` | ENST00000518351.2, ENST00000361381.2, ENST00000379099.3, ENST00000400999.7, ENST00000403997.2, ENST00000420515.1, ENST00000436261.7, ENST00000455979.1, ENST00000511286.1, ENST00000609389.5, ENST00000654733.1, ENST00000428369.7 |
+| GENCODE v50 `gencode.v50.annotation.gff3.gz` (https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/) | `2aaf245c91ed00e80920953add6cfaffcccc876dc0aceeb6ca0c86d15875899a` | ENST00000518351.2, ENST00000616125.5, ENST00000361381.2, ENST00000379099.3, ENST00000400999.7, ENST00000403997.2, ENST00000420515.1, ENST00000436261.7, ENST00000455979.1, ENST00000511286.1, ENST00000609389.5, ENST00000654733.1, ENST00000428369.7 |
 | NCBI RefSeq RS_2025_08 `GCF_000001405.40_GRCh38.p14_genomic.gff.gz`, NC_ rows only | `4920f0eae7e2197c50b67a201e06d657387137b49dd60f474b4f1d5b29334051` | NM_001304717.5 (ID `rna-NM_001304717.5`) |
 | MANE 1.5 `MANE.GRCh38.v1.5.refseq_genomic.gff.gz` | `040f0d4056de2e9a416cd52bc20ff07ef403baadf5f5968faf188907893f6002` | NM_001424184.1 (ID `rna-NM_001424184.1`) |
 
 ```bash
 python3 -I extract_fixture.py out_gencode.jsonl gencode.v50.annotation.gff3.gz ENST00000361381.2 ...
 python3 -I extract_fixture.py out_gencode_r4.jsonl gencode.v50.annotation.gff3.gz ENST00000654733.1 ENST00000428369.7
+python3 -I extract_fixture.py out_gencode_wp2.jsonl gencode.v50.annotation.gff3.gz ENST00000616125.5
 python3 -I extract_fixture.py out_refseq.jsonl refseq_nc_only.gff rna-NM_001304717.5
 python3 -I extract_fixture.py out_mane.jsonl MANE.GRCh38.v1.5.refseq_genomic.gff.gz rna-NM_001424184.1
-cat out_gencode.jsonl out_refseq.jsonl out_mane.jsonl out_gencode_r4.jsonl > ../incomplete_cds_transcripts.jsonl
+cat out_gencode.jsonl out_refseq.jsonl out_mane.jsonl out_gencode_r4.jsonl out_gencode_wp2.jsonl \
+  > ../incomplete_cds_transcripts.jsonl
 ```
 
-Every model carries `"tier": "ManeSelect"` because the current store format
-requires a tier; none of the asserted fields depends on it. The GENCODE and
-RefSeq models are not MANE transcripts.
+The models carry the store format 2 fields (see the extractor's docstring):
+`tier` from the MANE tag (`null` otherwise), CDS completeness from the GENCODE
+`cds_start_NF` / `cds_end_NF` tags or the RefSeq ranges, and the genome-mismatch
+flags. NM_001304717.5 has a `D` gap (a 1-base frameshift intron), so
+`genome_mismatch` is set and `cds_alignment_gap` is not. Lines keep the order of
+the earlier fixture; ENST00000616125.5 (`cds_start_NF` with a whole ATG codon 1)
+is appended.
 
 ## VEP rows
 
@@ -37,7 +43,7 @@ request). `merge_vep_rows.py` folds them into the fixture:
 ```bash
 python3 -I merge_vep_rows.py vep_rest/vep_rest_padded_cds.tsv vep_rest/vep_rest_3prime_partial.tsv \
   vep_rest/vep_rest_wp1.tsv vep_rest/vep_rest_wp1_review.tsv vep_rest/vep_rest_wp1_r1.tsv vep_rest/vep_rest_wp1_r2.tsv vep_rest/vep_rest_wp1_r3.tsv vep_rest/vep_rest_wp1_r4.tsv vep_rest/vep_rest_wp1_r5.tsv \
-  > ../incomplete_cds_vep116.tsv
+  vep_rest/vep_rest_wp2.tsv > ../incomplete_cds_vep116.tsv
 ```
 
 ## Insertion-point fixture

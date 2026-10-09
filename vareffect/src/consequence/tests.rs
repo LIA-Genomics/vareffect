@@ -264,9 +264,14 @@ fn mito_coding() -> TranscriptModel {
             genomic_end: 400,
             phase: 0,
         }],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -296,9 +301,14 @@ fn single_exon_coding() -> TranscriptModel {
             genomic_end: 1400,
             phase: 0,
         }],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -377,9 +387,14 @@ fn stop_gained_transcript() -> TranscriptModel {
             genomic_end: 112,
             phase: 0,
         }],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -1855,12 +1870,13 @@ mod incomplete_cds {
     use super::*;
     use crate::locate::helpers::{exonic_splice_spill, frameshift_intron_endpoint, intron_gap};
 
-    /// [`plus_strand_coding`] with a 5'-incomplete CDS: GFF3 phase `phase`
-    /// on the first segment. On `write_test_fasta`'s chr1 the first genomic
-    /// coding bases are `ATG`.
+    /// [`plus_strand_coding`] with GFF3 phase `phase` on the first segment,
+    /// marked 5'-incomplete when the phase pads codon 1. On
+    /// `write_test_fasta`'s chr1 the first genomic coding bases are `ATG`.
     fn padded_plus(phase: u8) -> (TranscriptModel, LocateIndex) {
         let mut tx = plus_strand_coding();
         tx.cds_segments[0].phase = phase;
+        tx.cds_start_complete = phase == 0;
         let index = LocateIndex::build(&tx).unwrap();
         (tx, index)
     }
@@ -1987,6 +2003,63 @@ mod incomplete_cds {
             !super::super::helpers::ends_in_stop_codon("chr1", &short, &short_index, &fasta)
                 .unwrap()
         );
+
+        // `cds_end_NF`: no stop codon, whatever the last codon reads.
+        let mut end_nf = plus_strand_coding();
+        end_nf.cds_end_complete = false;
+        let end_nf_index = LocateIndex::build(&end_nf).unwrap();
+        assert!(
+            !super::super::helpers::ends_in_stop_codon("chr1", &end_nf, &end_nf_index, &fasta)
+                .unwrap()
+        );
+    }
+
+    /// VEP 116 REST ENST00000616125.5 (`cds_start_NF`, phase 0, codon 1
+    /// `ATG`): `c.1A>G` is `missense_variant` `p.Met1Val` and `c.1_3del`
+    /// `inframe_deletion` `p.Met1del`, never `start_lost`
+    /// (`tests/data/tools/vep_rest/vep_rest_wp2.tsv`).
+    #[test]
+    fn whole_atg_on_a_start_incomplete_cds_is_not_a_start_codon() {
+        let (_tmp, fasta) = write_test_fasta();
+        let mut tx = plus_strand_coding();
+        tx.cds_start_complete = false;
+        let index = LocateIndex::build(&tx).unwrap();
+        assert!(!super::super::helpers::has_complete_start_codon(
+            &tx, &index
+        ));
+
+        let snv = annotate_snv("chr1", 1500, b'A', b'G', &tx, &index, &fasta).unwrap();
+        assert_eq!(snv.consequences, vec![Consequence::MissenseVariant]);
+        assert_eq!(snv.hgvs_p.as_deref(), Some("p.Met1Val"));
+
+        let deletion = annotate_deletion("chr1", 1500, 1503, b"ATG", &tx, &index, &fasta).unwrap();
+        assert!(
+            deletion
+                .consequences
+                .contains(&Consequence::InframeDeletion)
+        );
+        assert!(!deletion.consequences.contains(&Consequence::StartLost));
+        assert_ne!(deletion.hgvs_p.as_deref(), Some("p.Met1?"));
+    }
+
+    #[test]
+    fn gapped_cds_alignment_drops_hgvs() {
+        let (_tmp, fasta) = write_test_fasta();
+        let mut tx = plus_strand_coding();
+        tx.cds_alignment_gap = true;
+        let index = LocateIndex::build(&tx).unwrap();
+        let snv = annotate_snv("chr1", 1503, b'C', b'A', &tx, &index, &fasta).unwrap();
+        assert!(!snv.consequences.is_empty());
+        assert_eq!((snv.hgvs_c, snv.hgvs_p), (None, None));
+        let deletion = annotate_deletion("chr1", 1503, 1504, b"C", &tx, &index, &fasta).unwrap();
+        assert_eq!((deletion.hgvs_c, deletion.hgvs_p), (None, None));
+        let insertion = annotate_insertion("chr1", 1504, b"T", &tx, &index, &fasta).unwrap();
+        assert_eq!((insertion.hgvs_c, insertion.hgvs_p), (None, None));
+
+        tx.cds_alignment_gap = false;
+        let index = LocateIndex::build(&tx).unwrap();
+        let snv = annotate_snv("chr1", 1503, b'C', b'A', &tx, &index, &fasta).unwrap();
+        assert!(snv.hgvs_c.is_some());
     }
 
     #[test]
@@ -2789,9 +2862,14 @@ fn shift_transcript(strand: Strand) -> TranscriptModel {
         cds_genomic_end: Some(cds_end),
         exons: vec![exon(1, 10, 40), exon(2, 60, 90)],
         cds_segments: vec![segment(0, 10, 40), segment(1, 60, 87)],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 2,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 

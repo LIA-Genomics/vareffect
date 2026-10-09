@@ -29,9 +29,14 @@ fn single_exon_coding() -> TranscriptModel {
             genomic_end: 1_400,
             phase: 0,
         }],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -839,9 +844,14 @@ fn plus_strand_multi_exon_utr() -> TranscriptModel {
                 phase: 0,
             },
         ],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -895,9 +905,14 @@ fn minus_strand_multi_exon_utr() -> TranscriptModel {
                 phase: 0,
             },
         ],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 4,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -1401,6 +1416,7 @@ mod insertion_point {
         // first genomic coding base has CDS offset 3.
         let mut padded = plus_strand_coding();
         padded.cds_segments[0].phase = 1;
+        padded.cds_start_complete = false;
         let padded_idx = LocateIndex::build(&padded).unwrap();
         let loc = locate_indel("chr1", 1_501, 1_501, &padded, &padded_idx).unwrap();
         assert_eq!(loc.region, cds(3));

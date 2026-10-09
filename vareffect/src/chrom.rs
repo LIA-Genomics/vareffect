@@ -127,9 +127,79 @@ pub fn is_patch_sequence(chrom: &str) -> bool {
         || chrom.starts_with("chrUn_")
 }
 
+/// Canonical sort key for a UCSC chromosome name: `chr1`..`chr22`, then
+/// `chrX`, `chrY`, `chrM`, then every other contig by name.
+///
+/// Orders the copies of a multi-locus accession (the chrX and chrY PAR
+/// copies) in [`crate::TranscriptStore`] and the builder's output.
+///
+/// # Arguments
+///
+/// * `chrom` - UCSC-style chromosome name
+///
+/// # Returns
+///
+/// A key whose `Ord` is the canonical order: the rank (1-22, 23 for `chrX`,
+/// 24 for `chrY`, 25 for `chrM`, `u8::MAX` for any other contig) and the name.
+///
+/// # Examples
+///
+/// ```
+/// use vareffect::chrom::canonical_order_key;
+///
+/// assert!(canonical_order_key("chr2") < canonical_order_key("chr10"));
+/// assert!(canonical_order_key("chrX") < canonical_order_key("chrY"));
+/// assert!(canonical_order_key("chrM") < canonical_order_key("chr1_KI270706v1_random"));
+/// ```
+pub fn canonical_order_key(chrom: &str) -> (u8, &str) {
+    let rank = match chrom.strip_prefix("chr") {
+        Some("X") => 23,
+        Some("Y") => 24,
+        Some("M") => 25,
+        Some(number) => match number.parse::<u8>() {
+            Ok(n @ 1..=22) if !number.starts_with('0') => n,
+            Ok(_) | Err(_) => u8::MAX,
+        },
+        None => u8::MAX,
+    };
+    (rank, chrom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_order_sorts_numerically_then_sex_then_mito_then_contigs() {
+        let mut names = vec![
+            "chrUn_KI270302v1",
+            "chrM",
+            "chr10",
+            "chrY",
+            "chr2",
+            "chrX",
+            "chr1",
+            "chr01",
+            "chr23",
+            "NW_025791820.1",
+        ];
+        names.sort_by_key(|name| canonical_order_key(name));
+        assert_eq!(
+            names,
+            vec![
+                "chr1",
+                "chr2",
+                "chr10",
+                "chrX",
+                "chrY",
+                "chrM",
+                "NW_025791820.1",
+                "chr01",
+                "chr23",
+                "chrUn_KI270302v1",
+            ]
+        );
+    }
 
     #[test]
     fn maps_all_standard_chromosomes() {

@@ -350,9 +350,14 @@ mod tests {
                     phase: 0,
                 },
             ],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -383,9 +388,14 @@ mod tests {
                 genomic_end: 30,
                 phase: 0,
             }],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -653,9 +663,14 @@ mod tests {
                     phase: 0,
                 },
             ],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -704,9 +719,14 @@ mod tests {
                     phase: 0,
                 },
             ],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 2,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 

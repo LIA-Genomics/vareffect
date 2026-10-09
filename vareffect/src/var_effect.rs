@@ -346,8 +346,10 @@ impl VarEffect {
     /// # Errors
     ///
     /// `HgvsParseError`, `TranscriptNotFound`, `PositionOutOfRange`,
-    /// `HgvsRefMismatch`, `ChromNotFound`, `CoordinateOutOfRange`,
-    /// `Malformed`.
+    /// `CdsNumberingUnavailable` (a transcript flagged
+    /// [`TranscriptModel::cds_alignment_gap`]), `HgvsRefMismatch`,
+    /// `ChromNotFound`, `CoordinateOutOfRange`, `Malformed`. A
+    /// pseudoautosomal accession resolves to its chrX copy.
     pub fn resolve_hgvs_c(&self, hgvs: &str) -> Result<GenomicVariant, VarEffectError> {
         crate::hgvs_reverse::resolve_hgvs_c(hgvs, &self.transcripts, &self.fasta)
     }

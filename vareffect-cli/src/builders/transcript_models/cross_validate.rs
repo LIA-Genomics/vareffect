@@ -41,11 +41,13 @@ pub(super) fn cross_validate_summary(
         Box::new(BufReader::new(file))
     };
 
-    // Index the built transcripts by accession for O(1) lookup.
-    let by_acc: HashMap<&str, &TranscriptModel> = transcripts
-        .iter()
-        .map(|t| (t.accession.as_str(), t))
-        .collect();
+    // Index the built transcripts by accession for O(1) lookup. A
+    // pseudoautosomal accession has a chrX and a chrY copy; the row is
+    // compared with the copy on the summary's chromosome.
+    let mut by_acc: HashMap<&str, Vec<&TranscriptModel>> = HashMap::new();
+    for t in transcripts {
+        by_acc.entry(t.accession.as_str()).or_default().push(t);
+    }
 
     // Column indices are resolved from the header row so ordering changes
     // in future MANE releases don't silently break validation.
@@ -92,7 +94,15 @@ pub(super) fn cross_validate_summary(
 
         summary_seen.insert(row.refseq_nuc.clone());
 
-        let Some(tx) = by_acc.get(row.refseq_nuc.as_str()) else {
+        let summary_chrom = normalize_summary_chrom(row.grch38_chr.trim());
+        let copies = by_acc
+            .get(row.refseq_nuc.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        let Some(tx) = copies
+            .iter()
+            .find(|t| t.chrom == summary_chrom)
+            .or_else(|| copies.first())
+        else {
             mismatches.push(format!(
                 "summary row {} ({}): no matching transcript in built store",
                 line_no + 1,
@@ -107,7 +117,6 @@ pub(super) fn cross_validate_summary(
         // resolves the patch case. A patch/primary disagreement between the
         // two sides is a real discrepancy and must fail the build.
         let summary_raw = row.grch38_chr.trim();
-        let summary_chrom = normalize_summary_chrom(summary_raw);
         let built_is_patch = is_patch_sequence(&tx.chrom);
         let summary_is_patch = summary_raw.starts_with("NW_") || summary_raw.starts_with("NT_");
         match (built_is_patch, summary_is_patch) {
@@ -197,7 +206,7 @@ pub(super) fn cross_validate_summary(
             _ => None,
         };
         if let Some(tier) = expected_tier
-            && tier != tx.tier
+            && Some(tier) != tx.tier
         {
             mismatches.push(format!(
                 "{}: tier mismatch -- summary={:?}, built={:?}",
@@ -364,33 +373,23 @@ mod tests {
     /// Build a minimal patch-sequence `TranscriptModel` suitable for
     /// `cross_validate_summary` testing.
     fn patch_transcript(accession: &str, chrom: &str, gene_symbol: &str) -> TranscriptModel {
-        TranscriptModel {
-            accession: accession.to_string(),
-            protein_accession: Some("NP_999999.1".into()),
-            gene_symbol: gene_symbol.to_string(),
-            hgnc_id: Some("HGNC:99999".into()),
-            ensembl_accession: None,
-            chrom: chrom.to_string(),
-            strand: Strand::Plus,
-            tx_start: 999,
-            tx_end: 2000,
-            cds_genomic_start: Some(1099),
-            cds_genomic_end: Some(1900),
-            exons: vec![Exon {
-                exon_number: 1,
-                genomic_start: 999,
-                genomic_end: 2000,
-            }],
-            cds_segments: vec![CdsSegment {
-                exon_index: 0,
-                genomic_start: 1099,
-                genomic_end: 1900,
-                phase: 0,
-            }],
-            tier: TranscriptTier::ManeSelect,
-            biotype: Biotype::ProteinCoding,
-            exon_count: 1,
-        }
+        let exon = Exon {
+            exon_number: 1,
+            genomic_start: 999,
+            genomic_end: 2000,
+        };
+        let cds = CdsSegment {
+            exon_index: 0,
+            genomic_start: 1099,
+            genomic_end: 1900,
+            phase: 0,
+        };
+        TranscriptModel::new(accession, gene_symbol, chrom, Strand::Plus, vec![exon])
+            .with_cds_segments(vec![cds])
+            .with_protein_accession(Some("NP_999999.1".into()))
+            .with_hgnc_id(Some("HGNC:99999".into()))
+            .with_tier(TranscriptTier::ManeSelect)
+            .with_biotype(Biotype::ProteinCoding)
     }
 
     fn write_minimal_summary_tsv(
@@ -414,6 +413,19 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn cross_validate_summary_compares_the_par_copy_on_the_summary_chrom() {
+        // The chrX copy comes last, so a map keyed on accession alone would
+        // compare the chrY row against it.
+        let transcripts = vec![
+            patch_transcript("NM_PAR1.1", "chrY", "PAR1"),
+            patch_transcript("NM_PAR1.1", "chrX", "PAR1"),
+        ];
+        let summary_file = write_minimal_summary_tsv("NM_PAR1.1", "Y", "PAR1");
+        cross_validate_summary(&transcripts, summary_file.path(), &HashMap::new())
+            .expect("the chrY copy matches the chrY summary row");
     }
 
     #[test]

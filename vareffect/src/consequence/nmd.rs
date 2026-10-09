@@ -397,9 +397,14 @@ mod tests {
                 genomic_end: 200,
                 phase: 0,
             }],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         };
         let idx = build_index(&tx);
         assert!(!predicts_nmd(10, &idx));

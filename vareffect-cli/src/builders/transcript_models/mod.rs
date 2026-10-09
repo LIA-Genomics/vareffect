@@ -30,6 +30,10 @@
 //!
 //! If a summary TSV path is supplied, a cross-validation pass compares
 //! every row against the built vec and fails the build on mismatches.
+//!
+//! An accession may repeat only as one chrX and one chrY copy inside the
+//! GRCh38 pseudoautosomal regions ([`check_repeated_accessions`]); any other
+//! repeat fails the build.
 
 mod cross_validate;
 mod gff3_attrs;
@@ -40,8 +44,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
-use vareffect::chrom::{is_patch_sequence, refseq_to_ucsc};
-use vareffect::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
+use vareffect::chrom::{canonical_order_key, is_patch_sequence, refseq_to_ucsc};
+use vareffect::{
+    Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptSource, TranscriptTier,
+};
 
 use cross_validate::cross_validate_summary;
 use gff3_attrs::{
@@ -113,6 +119,8 @@ pub fn build(
         );
     }
 
+    check_repeated_accessions(&transcripts)?;
+
     if let Some(summary_path) = summary_input {
         let aliases_path = patch_aliases_input.ok_or_else(|| {
             anyhow::anyhow!(
@@ -136,11 +144,66 @@ pub fn build(
     }
 
     write_transcript_store(
-        "transcript_models",
+        TranscriptSource::Mane,
         &transcripts,
         input,
         output_dir,
         version,
+    )
+}
+
+/// GRCh38 pseudoautosomal regions as 0-based half-open `(chrom, start, end)`
+/// (GRC, https://www.ncbi.nlm.nih.gov/grc/human: PAR1 X/Y 10,001-2,781,479;
+/// PAR2 X 155,701,383-156,030,895, Y 56,887,903-57,217,415, 1-based).
+const GRCH38_PARS: [(&str, u64, u64); 4] = [
+    ("chrX", 10_000, 2_781_479),
+    ("chrX", 155_701_382, 156_030_895),
+    ("chrY", 10_000, 2_781_479),
+    ("chrY", 56_887_902, 57_217_415),
+];
+
+/// `true` if the transcript lies wholly inside a GRCh38 PAR on its chromosome.
+fn in_par(tx: &TranscriptModel) -> bool {
+    GRCH38_PARS
+        .iter()
+        .any(|&(chrom, start, end)| tx.chrom == chrom && start <= tx.tx_start && tx.tx_end <= end)
+}
+
+/// Refuse every repeated accession except a PAR pair: one chrX and one chrY
+/// copy, both inside a GRCh38 pseudoautosomal region.
+///
+/// # Errors
+///
+/// Returns an error listing every other repeated accession with its
+/// chromosomes.
+fn check_repeated_accessions(transcripts: &[TranscriptModel]) -> Result<()> {
+    let mut copies: HashMap<&str, Vec<&TranscriptModel>> = HashMap::new();
+    for tx in transcripts {
+        copies.entry(tx.accession.as_str()).or_default().push(tx);
+    }
+    let mut refused: Vec<String> = copies
+        .iter()
+        .filter(|(_, txs)| txs.len() > 1)
+        .filter(|(_, txs)| {
+            let par_pair = txs.len() == 2
+                && txs.iter().all(|tx| in_par(tx))
+                && txs.iter().any(|tx| tx.chrom == "chrX")
+                && txs.iter().any(|tx| tx.chrom == "chrY");
+            !par_pair
+        })
+        .map(|(accession, txs)| {
+            let chroms: Vec<&str> = txs.iter().map(|tx| tx.chrom.as_str()).collect();
+            format!("{accession} ({})", chroms.join(", "))
+        })
+        .collect();
+    if refused.is_empty() {
+        return Ok(());
+    }
+    refused.sort();
+    bail!(
+        "{} accession(s) repeat outside a chrX + chrY pseudoautosomal pair: {}",
+        refused.len(),
+        refused.join("; ")
     )
 }
 
@@ -412,8 +475,6 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             })
             .collect();
 
-        let exon_count = exons.len() as u16;
-
         // --- CDS segments + bounds ---
         // For each CDS row, convert to 0-based half-open, sort into transcript
         // order (ascending genomic on plus strand, descending on minus to
@@ -426,25 +487,20 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             &pending.strand,
             cds_ranges.get(mrna_id),
         )?;
-        let (cds_genomic_start, cds_genomic_end) = if cds_segments.is_empty() {
-            (None, None)
-        } else {
-            let min = cds_segments
-                .iter()
-                .map(|s| s.genomic_start)
-                .min()
-                .expect("cds_segments verified non-empty");
-            let max = cds_segments
-                .iter()
-                .map(|s| s.genomic_end)
-                .max()
-                .expect("cds_segments verified non-empty");
-            (Some(min), Some(max))
-        };
 
         // --- tx bounds (convert 1-based -> 0-based) ---
+        // The model's span is the exon span; a transcript row that disagrees
+        // is a GFF3 inconsistency, refused rather than silently resolved.
         let tx_start = pending.tx_start_gff.saturating_sub(1);
         let tx_end = pending.tx_end_gff;
+        let exon_start = exons.iter().map(|e| e.genomic_start).min();
+        let exon_end = exons.iter().map(|e| e.genomic_end).max();
+        if (exon_start, exon_end) != (Some(tx_start), Some(tx_end)) {
+            bail!(
+                "transcript {} spans {tx_start}..{tx_end} but its exons span {exon_start:?}..{exon_end:?}",
+                pending.accession
+            );
+        }
 
         // --- Gene-level lookup for HGNC, symbol, biotype ---
         let parent_info = gene_info.get(&pending.parent_gene);
@@ -483,29 +539,41 @@ fn parse_gff3(input: &Path) -> Result<Vec<TranscriptModel>> {
             patch_seq_count += 1;
         }
 
-        transcripts.push(TranscriptModel {
-            accession: pending.accession.clone(),
-            protein_accession,
-            gene_symbol,
-            hgnc_id,
-            ensembl_accession: pending.ensembl_accession.clone(),
-            chrom: pending.chrom.clone(),
-            strand: pending.strand,
-            tx_start,
-            tx_end,
-            cds_genomic_start,
-            cds_genomic_end,
-            exons,
-            cds_segments,
-            tier: pending.tier,
-            biotype,
-            exon_count,
-        });
+        // MANE transcripts are complete, genome-matching CDSs; their
+        // selenocysteine codons are read in a later store version.
+        transcripts.push(
+            TranscriptModel::new(
+                pending.accession.clone(),
+                gene_symbol,
+                pending.chrom.clone(),
+                pending.strand,
+                exons,
+            )
+            .with_cds_segments(cds_segments)
+            .with_protein_accession(protein_accession)
+            .with_hgnc_id(hgnc_id)
+            .with_ensembl_accession(pending.ensembl_accession.clone())
+            .with_tier(pending.tier)
+            .with_biotype(biotype),
+        );
     }
 
-    // Deterministic output: sort by accession so rebuilds with identical
-    // inputs produce byte-identical MessagePack (and hence stable sha256).
-    transcripts.sort_by(|a, b| a.accession.cmp(&b.accession));
+    // Deterministic output: sort by accession, and the copies of a
+    // repeated (PAR) accession canonically, so rebuilds with identical
+    // inputs produce byte-identical MessagePack (and hence stable sha256)
+    // whatever the `mrna_info` iteration order.
+    transcripts.sort_by(|a, b| {
+        (
+            a.accession.as_str(),
+            canonical_order_key(&a.chrom),
+            a.tx_start,
+        )
+            .cmp(&(
+                b.accession.as_str(),
+                canonical_order_key(&b.chrom),
+                b.tx_start,
+            ))
+    });
 
     // Build a deterministic per-feature-type breakdown for the build log.
     // Sorted by feature type for stable output across runs -- the warning
@@ -884,10 +952,12 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         assert_eq!(size, bin.len());
         assert_eq!(
             &bin[..vareffect::transcript::TRANSCRIPT_STORE_HEADER_LEN],
-            b"VEFXTXM\0\x01\x00\x00\x00"
+            b"VEFXTXM\0\x02\x00\x00\x00"
         );
         let store = vareffect::TranscriptStore::load_from_path(&bin_path).expect("load");
         assert_eq!(store.len() as u64, built.record_count);
+        assert_eq!(store.source(), Some(TranscriptSource::Mane));
+        assert_eq!(store.source_release(), Some("1.5"));
 
         let manifest: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(output.path().join("transcript_models.manifest.json"))
@@ -897,11 +967,55 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
         assert_eq!(manifest["sha256"], sha(&bin));
         assert_eq!(manifest["payload_sha256"], sha(&bin[12..]));
-        assert_eq!(manifest["format_version"], 1);
+        assert_eq!(manifest["format_version"], 2);
         assert_eq!(
             manifest["source_file_sha256"],
             sha(&std::fs::read(input.path()).expect("read input"))
         );
+    }
+
+    /// A one-exon model of `accession` on `chrom` at `start..start + 1000`.
+    fn copy_at(accession: &str, chrom: &str, start: u64) -> TranscriptModel {
+        let exon = Exon {
+            exon_number: 1,
+            genomic_start: start,
+            genomic_end: start + 1_000,
+        };
+        TranscriptModel::new(accession, "G", chrom, Strand::Plus, vec![exon])
+    }
+
+    #[test]
+    fn repeated_accessions_are_admitted_only_as_a_par_pair() {
+        let par_pair = [
+            copy_at("NM_1.1", "chrX", 1_500_000),
+            copy_at("NM_1.1", "chrY", 1_500_000),
+            copy_at("NM_2.1", "chrX", 155_800_000),
+            copy_at("NM_2.1", "chrY", 56_900_000),
+            copy_at("NM_3.1", "chr1", 1_000),
+        ];
+        check_repeated_accessions(&par_pair).expect("PAR pairs are admitted");
+
+        let refused = [
+            // Same chromosome twice.
+            copy_at("NM_4.1", "chrX", 1_500_000),
+            copy_at("NM_4.1", "chrX", 1_600_000),
+            // Autosomes.
+            copy_at("NM_5.1", "chr1", 1_000),
+            copy_at("NM_5.1", "chr2", 1_000),
+            // chrY copy outside the PAR.
+            copy_at("NM_6.1", "chrX", 1_500_000),
+            copy_at("NM_6.1", "chrY", 20_000_000),
+            // Three copies.
+            copy_at("NM_7.1", "chrX", 1_500_000),
+            copy_at("NM_7.1", "chrY", 1_500_000),
+            copy_at("NM_7.1", "chr1", 1_000),
+        ];
+        let error = check_repeated_accessions(&refused).expect_err("refused");
+        let message = error.to_string();
+        assert!(message.starts_with("4 accession(s)"), "{message}");
+        for accession in ["NM_4.1", "NM_5.1", "NM_6.1", "NM_7.1"] {
+            assert!(message.contains(accession), "{message}");
+        }
     }
 
     #[test]
@@ -931,7 +1045,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
 
         assert_eq!(syngap.chrom, "chr6");
         assert_eq!(syngap.strand, Strand::Minus);
-        assert_eq!(syngap.tier, TranscriptTier::ManeSelect);
+        assert_eq!(syngap.tier, Some(TranscriptTier::ManeSelect));
         assert_eq!(syngap.gene_symbol, "SYNGAP1");
         assert_eq!(syngap.hgnc_id.as_deref(), Some("HGNC:11497"));
         assert_eq!(
@@ -978,7 +1092,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
             .expect("TP53 transcript present");
 
         assert_eq!(tp53.strand, Strand::Plus);
-        assert_eq!(tp53.tier, TranscriptTier::ManePlusClinical);
+        assert_eq!(tp53.tier, Some(TranscriptTier::ManePlusClinical));
         assert_eq!(tp53.chrom, "chr17");
 
         assert_eq!(tp53.protein_accession.as_deref(), Some("NP_000537.3"));
@@ -1015,6 +1129,37 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         assert_eq!(transcripts.len(), 5);
     }
 
+    /// One MANE transcript in PAR1 on chrY (listed first) and chrX.
+    const PAR_GFF: &str = "\
+##gff-version 3
+chrY\tNCBI\tgene\t1000000\t1002000\t.\t+\t.\tID=gene-PARG-Y;Name=PARG;gene_biotype=protein_coding
+chrY\tNCBI\tmRNA\t1000000\t1002000\t.\t+\t.\tID=rna-NM_123456.1-2;Parent=gene-PARG-Y;Name=NM_123456.1;tag=MANE Select
+chrY\tNCBI\texon\t1000000\t1002000\t.\t+\t.\tID=ye1;Parent=rna-NM_123456.1-2
+chrX\tNCBI\tgene\t1000000\t1002000\t.\t+\t.\tID=gene-PARG;Name=PARG;gene_biotype=protein_coding
+chrX\tNCBI\tmRNA\t1000000\t1002000\t.\t+\t.\tID=rna-NM_123456.1;Parent=gene-PARG;Name=NM_123456.1;tag=MANE Select
+chrX\tNCBI\texon\t1000000\t1002000\t.\t+\t.\tID=xe1;Parent=rna-NM_123456.1
+";
+
+    #[test]
+    fn par_copies_are_built_in_canonical_order_with_stable_bytes() {
+        let input = write_temp(PAR_GFF);
+        let chroms: Vec<String> = parse_gff3(input.path())
+            .expect("parse")
+            .into_iter()
+            .map(|t| t.chrom)
+            .collect();
+        assert_eq!(chroms, vec!["chrX", "chrY"]);
+        // Each build hashes `mrna_info` with a fresh random state.
+        let builds: Vec<Vec<u8>> = (0..8)
+            .map(|_| {
+                let output = tempfile::tempdir().expect("tempdir");
+                build(input.path(), None, None, output.path(), "1.5").expect("build");
+                std::fs::read(output.path().join("transcript_models.bin")).expect("read")
+            })
+            .collect();
+        assert!(builds.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
     #[test]
     fn output_is_sorted_by_accession_for_determinism() {
         let file = write_temp(MINI_GFF);
@@ -1044,7 +1189,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
 
         assert_eq!(lncx.chrom, "chr11");
         assert_eq!(lncx.strand, Strand::Plus);
-        assert_eq!(lncx.tier, TranscriptTier::ManeSelect);
+        assert_eq!(lncx.tier, Some(TranscriptTier::ManeSelect));
         assert_eq!(lncx.gene_symbol, "LNCX");
         assert_eq!(lncx.hgnc_id.as_deref(), Some("HGNC:99991"));
         assert!(lncx.cds_genomic_start.is_none());
@@ -1067,7 +1212,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
 
         assert_eq!(vault.chrom, "chr5");
         assert_eq!(vault.strand, Strand::Plus);
-        assert_eq!(vault.tier, TranscriptTier::ManeSelect);
+        assert_eq!(vault.tier, Some(TranscriptTier::ManeSelect));
         assert_eq!(vault.gene_symbol, "VAULT1");
         assert!(vault.cds_genomic_start.is_none());
         assert!(vault.cds_segments.is_empty());
@@ -1099,7 +1244,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         );
 
         assert_eq!(fixed.strand, Strand::Plus);
-        assert_eq!(fixed.tier, TranscriptTier::ManeSelect);
+        assert_eq!(fixed.tier, Some(TranscriptTier::ManeSelect));
         assert_eq!(fixed.gene_symbol, "FIXED");
         assert_eq!(fixed.biotype, Biotype::ProteinCoding);
         assert_eq!(fixed.exon_count, 1);

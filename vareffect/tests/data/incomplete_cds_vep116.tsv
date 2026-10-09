@@ -1,4 +1,4 @@
-# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-07; one row per (variant, transcript).
+# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-07 and 2026-10-09 (dates per record in vep_rest/); one row per (variant, transcript).
 # pos is 1-based; ref/alt as VEP's allele_string (`-` = empty). `-` in any other column = field absent in VEP's JSON;
 # `?` in exon/intron = not requested (rows queried without numbers=1).
 # Built by tools/merge_vep_rows.py (next to this file) from the per-query REST records; see tools/README.md.
@@ -227,3 +227,7 @@ partial3_ins_5p_edge_stop_then_codon	chr2	46484424	-	TGAGGG	NM_001424184.1	stop_
 gap1_donor_window_del	chr1	151767229	CCC	-	ENST00000400999.7	inframe_deletion,splice_donor_region_variant	MODERATE	ENST00000400999.7:c.233_235del	ENSP00000383784.3:p.Ser78del	300	233	78	tCCCta/tta	SL/L	3/6	-
 partial3_ins_inside_stop_then_partial	chr2	46484425	-	GA	NM_001424184.1	stop_gained,incomplete_terminal_codon_variant,coding_sequence_variant	HIGH	NM_001424184.1:c.658_659insGA	NP_001411113.1:p.Ter220=	679	658	220	ta/tGAa	X/*	3/3	-
 partial3_ins_5p_edge_stop_then_partial	chr2	46484424	-	GGGTGAG	NM_001424184.1	stop_gained,inframe_insertion,incomplete_terminal_codon_variant,coding_sequence_variant	HIGH	NM_001424184.1:c.657_658insGGGTGAG	-	678	657	219	-/GGGTGAG	-/G*X	3/3	-
+start_nf_atg_c1	chr1	925942	A	G	ENST00000616125.5	missense_variant	MODERATE	ENST00000616125.5:c.1A>G	ENSP00000484643.1:p.Met1Val	1	1	1	Atg/Gtg	M/V	1/11	-
+start_nf_atg_c2	chr1	925943	T	C	ENST00000616125.5	missense_variant	MODERATE	ENST00000616125.5:c.2T>C	ENSP00000484643.1:p.Met1Thr	2	2	1	aTg/aCg	M/T	1/11	-
+start_nf_atg_c3	chr1	925944	G	A	ENST00000616125.5	missense_variant	MODERATE	ENST00000616125.5:c.3G>A	ENSP00000484643.1:p.Met1Ile	3	3	1	atG/atA	M/I	1/11	-
+start_nf_atg_codon_del	chr1	925942	ATG	-	ENST00000616125.5	inframe_deletion	MODERATE	ENST00000616125.5:c.1_3del	ENSP00000484643.1:p.Met1del	1	1	1	ATG/-	M/-	1/11	-
