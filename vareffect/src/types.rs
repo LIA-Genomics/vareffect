@@ -375,14 +375,16 @@ pub struct TranscriptModel {
     /// (a RefSeq `exception` or a gapped genome alignment). The model is
     /// built from the genome.
     pub genome_mismatch: bool,
-    /// `true` when, inside the CDS span, the transcript has bases the genome
-    /// lacks (a RefSeq `cDNA_match` `I` gap). The genome-built CDS numbering
-    /// is then not the transcript's own, so no HGVS c. or p. is reported for
-    /// it and HGVS c. is not resolved on it. Consequence terms, positions,
-    /// codons and amino acids keep the genome-built numbering. A genomic
-    /// base the transcript lacks (a `D` gap) does not set it:
-    /// RefSeq splits the exon there, a frameshift intron, and the numbering
-    /// stays the transcript's.
+    /// `true` when, inside the CDS span, the genome-built numbering is not the
+    /// transcript's own: the transcript has bases the genome lacks (a RefSeq
+    /// `cDNA_match` `I` gap, or transcript bases aligned nowhere between two
+    /// blocks or at an interior CDS `start_range` / `end_range`), or the
+    /// genome has bases inside an exon that the transcript lacks (a `D` gap
+    /// that is not an exon split). No HGVS c. or p. is then reported
+    /// for it and HGVS c. is not resolved on it. Consequence terms, positions,
+    /// codons and amino acids keep the genome-built numbering. A `D` gap where
+    /// RefSeq splits the exon (a frameshift intron) does not set it: the
+    /// numbering stays the transcript's.
     pub cds_alignment_gap: bool,
     /// 0-based genomic start of each selenocysteine codon (the lowest base of
     /// the codon on either strand), in ascending order. Empty when the

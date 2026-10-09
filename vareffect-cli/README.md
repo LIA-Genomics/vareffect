@@ -191,7 +191,8 @@ MANE release.
 
 ## `build-transcripts`
 
-Standalone transcript model builder for iterative development:
+Standalone transcript model builder. `--source` selects the GFF3 and the
+admission rules (default `mane`):
 
 ```bash
 vareffect build-transcripts \
@@ -200,7 +201,26 @@ vareffect build-transcripts \
   --patch-chrom-aliases data/vareffect/patch_chrom_aliases.csv \
   --output data/vareffect \
   --version 1.5
+
+vareffect build-transcripts --source refseq \
+  --input GCF_000001405.40_GRCh38.p14_genomic.gff.gz \
+  --output data/vareffect --version RS_2025_08
+
+vareffect build-transcripts --source gencode \
+  --input gencode.v50.annotation.gff3.gz \
+  --output data/vareffect --version 50
 ```
+
+| Source | Candidates | Store |
+|--------|------------|-------|
+| `mane` | rows tagged `MANE Select` / `MANE Plus Clinical` | `transcript_models.bin` |
+| `refseq` | rows with a curated `transcript_id` (`NM_` / `NR_`); only `NC_` (primary assembly) rows are admitted | `transcript_models_refseq.bin` |
+| `gencode` | every `transcript` row | `transcript_models_gencode.bin` |
+
+Each build also writes `<stem>.excluded.tsv` (accession, chromosome, 0-based
+start and reason for every candidate not admitted) and records the counts in
+the manifest. GENCODE v50 gives 644,292 models (about 640 MB, 1.7 GB resident
+when loaded); RefSeq RS_2025_08 gives 93,432.
 
 ## Disk requirements
 

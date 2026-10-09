@@ -224,14 +224,16 @@ pub fn run(
         let aliases_ref = aliases_path
             .as_deref()
             .expect("patch aliases must be built before transcript models in vareffect-cli setup");
-        let (out, size_bytes) = builders::transcript_models::build(
-            &gff_path,
-            Some(&summary_path),
-            Some(aliases_ref),
-            &output_dir,
-            &config.vareffect.transcript_models_version,
-        )
-        .context("building transcript_models store")?;
+        let (out, size_bytes) =
+            builders::transcript_models::build(&builders::transcript_models::BuildRequest {
+                source: vareffect::TranscriptSource::Mane,
+                input: &gff_path,
+                summary_input: Some(&summary_path),
+                patch_aliases_input: Some(aliases_ref),
+                output_dir: &output_dir,
+                release: &config.vareffect.transcript_models_version,
+            })
+            .context("building transcript_models store")?;
 
         eprintln!(
             "  {}  wrote {} ({} records, {} in {}s)",

@@ -53,6 +53,9 @@ pub struct ManifestFields {
     /// format versions the link key is (`format_version`, `payload_sha256`),
     /// since a version bump may change meaning without changing bytes.
     pub payload_sha256: Option<String>,
+    /// Further top-level manifest keys (e.g. a transcript build's counts and
+    /// exclusion list), written after the fields above.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Write the .bin file, compute SHA-256, and create sidecar files.
@@ -109,6 +112,9 @@ pub fn finalize_store(
     }
     if let Some(payload_sha) = &fields.payload_sha256 {
         manifest["payload_sha256"] = serde_json::Value::String(payload_sha.clone());
+    }
+    for (key, value) in &fields.extra {
+        manifest[key.as_str()] = value.clone();
     }
     let manifest_path = output_dir.join(format!("{name}.manifest.json"));
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
@@ -178,22 +184,35 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// A transcript store to write, with its provenance.
+#[derive(Debug)]
+pub(crate) struct StoreWrite<'a> {
+    /// Annotation source; names the file stem (see [`store_stem`]).
+    pub source: TranscriptSource,
+    /// Upstream release, recorded as the store's source release.
+    pub release: &'a str,
+    /// The models to store.
+    pub transcripts: &'a [TranscriptModel],
+    /// Original source file (name and SHA-256 recorded for provenance).
+    pub input: &'a Path,
+    /// Directory to write files into.
+    pub output_dir: &'a Path,
+    /// Further manifest keys (see [`ManifestFields::extra`]).
+    pub manifest_extra: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Encode transcript models as a versioned store and write its sidecar files.
 ///
 /// Encodes through [`vareffect::encode_transcript_store`], so the builder and
-/// the library's reader share one format implementation. The store payload
-/// records `source` and `version`; the manifest records the format version,
-/// the payload SHA-256 and the source file's SHA-256.
+/// the library's reader share one format implementation, and loads the
+/// encoded bytes back with [`vareffect::TranscriptStore::from_bytes`] before
+/// writing, so a store that would not load is never written. The store
+/// payload records the source and release; the manifest records the format
+/// version, the payload SHA-256 and the source file's SHA-256.
 ///
 /// # Arguments
 ///
-/// * `source` -- Annotation source; names the file stem (see [`store_stem`]).
-/// * `transcripts` -- The models to store.
-/// * `input` -- Original source file path (name and SHA-256 recorded for
-///   provenance).
-/// * `output_dir` -- Directory to write files into.
-/// * `version` -- Upstream data version string, recorded as the store's
-///   source release.
+/// * `store` -- The models, their provenance and the output directory.
 ///
 /// # Returns
 ///
@@ -201,24 +220,25 @@ fn sha256_file(path: &Path) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if `transcripts` is empty, encoding fails, the source has
-/// no file stem, or the source file or output files cannot be read or
-/// written.
-pub(crate) fn write_transcript_store(
-    source: TranscriptSource,
-    transcripts: &[TranscriptModel],
-    input: &Path,
-    output_dir: &Path,
-    version: &str,
-) -> Result<(BuildOutput, usize)> {
-    let name = store_stem(source)?;
-    let data = vareffect::encode_transcript_store(Some(source), Some(version), transcripts)
-        .with_context(|| format!("encoding {name} store"))?;
-    let source_sha256 = sha256_file(input)?;
+/// Returns an error if the source has no file stem, encoding fails, the
+/// encoded store does not load (an empty store or a model violating a store
+/// invariant), or the source file or output files cannot be read or written.
+pub(crate) fn write_transcript_store(store: &StoreWrite<'_>) -> Result<(BuildOutput, usize)> {
+    let name = store_stem(store.source)?;
+    let data = vareffect::encode_transcript_store(
+        Some(store.source),
+        Some(store.release),
+        store.transcripts,
+    )
+    .with_context(|| format!("encoding {name} store"))?;
+    vareffect::TranscriptStore::from_bytes(&data)
+        .with_context(|| format!("loading the encoded {name} store back"))?;
+    let source_sha256 = sha256_file(store.input)?;
     let fields = ManifestFields {
-        record_count: transcripts.len() as u64,
-        source_version: version.to_string(),
-        source_file: input
+        record_count: store.transcripts.len() as u64,
+        source_version: store.release.to_string(),
+        source_file: store
+            .input
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default(),
@@ -227,8 +247,16 @@ pub(crate) fn write_transcript_store(
         payload_sha256: Some(hex::encode(Sha256::digest(
             &data[TRANSCRIPT_STORE_HEADER_LEN..],
         ))),
+        extra: {
+            let mut extra = store.manifest_extra.clone();
+            extra.insert(
+                "source".to_string(),
+                serde_json::Value::from(store.source.as_str()),
+            );
+            extra
+        },
     };
-    let output = finalize_store(name, output_dir, &data, &fields)?;
+    let output = finalize_store(name, store.output_dir, &data, &fields)?;
     Ok((output, data.len()))
 }
 

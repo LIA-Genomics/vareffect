@@ -108,19 +108,24 @@ enum Command {
         patch_aliases: Option<PathBuf>,
     },
 
-    /// Build transcript model store from a MANE GFF3 file.
+    /// Build a transcript model store from a MANE, RefSeq or GENCODE GFF3.
     ///
-    /// Produces `transcript_models.bin` containing full
-    /// `Vec<vareffect::TranscriptModel>` with exon structure, CDS bounds,
-    /// protein accessions, and MANE tier. When `--summary-input` is
-    /// provided, every transcript is cross-validated against the MANE
-    /// summary TSV and the build fails on mismatches.
+    /// Produces `transcript_models.bin` (MANE), `transcript_models_refseq.bin`
+    /// or `transcript_models_gencode.bin`, with a `.excluded.tsv` listing
+    /// every candidate transcript that was not admitted and why. When
+    /// `--summary-input` is provided (MANE only), every transcript is
+    /// cross-validated against the MANE summary TSV and the build fails on
+    /// mismatches.
     ///
-    /// Prefer `setup` for production builds -- it downloads the source
-    /// files automatically. This standalone subcommand is kept for
-    /// iterative development.
+    /// Prefer `setup` for production MANE builds -- it downloads the source
+    /// files automatically.
     BuildTranscripts {
-        /// Path to `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`.
+        /// Annotation source of `--input`.
+        #[arg(long, value_enum, default_value_t = SourceArg::Mane)]
+        source: SourceArg,
+        /// Path to the source GFF3: `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`,
+        /// `GCF_000001405.40_GRCh38.p14_genomic.gff.gz` or
+        /// `gencode.vNN.annotation.gff3.gz`.
         #[arg(long)]
         input: PathBuf,
         /// Optional path to `MANE.GRCh38.vX.X.summary.txt.gz` for
@@ -134,10 +139,32 @@ enum Command {
         /// Output directory.
         #[arg(long, default_value = "data/vareffect")]
         output: PathBuf,
-        /// MANE release version (e.g. "1.5").
+        /// Source release (e.g. "1.5" for MANE, "RS_2025_08" for RefSeq,
+        /// "50" for GENCODE).
         #[arg(long)]
         version: String,
     },
+}
+
+/// `--source` values of `build-transcripts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SourceArg {
+    /// MANE Select and MANE Plus Clinical (NCBI MANE GFF3).
+    Mane,
+    /// Curated RefSeq `NM_` / `NR_` on the primary assembly.
+    Refseq,
+    /// GENCODE comprehensive.
+    Gencode,
+}
+
+impl From<SourceArg> for vareffect::TranscriptSource {
+    fn from(source: SourceArg) -> Self {
+        match source {
+            SourceArg::Mane => Self::Mane,
+            SourceArg::Refseq => Self::RefSeq,
+            SourceArg::Gencode => Self::Gencode,
+        }
+    }
 }
 
 /// Install a compact stderr tracing subscriber.
@@ -201,6 +228,7 @@ fn main() -> Result<()> {
         }
 
         Command::BuildTranscripts {
+            source,
             input,
             summary_input,
             patch_chrom_aliases,
@@ -214,15 +242,18 @@ fn main() -> Result<()> {
                 );
             }
             let start = Instant::now();
-            let (out, size) = builders::transcript_models::build(
-                &input,
-                summary_input.as_deref(),
-                patch_chrom_aliases.as_deref(),
-                &output,
-                &version,
-            )?;
+            let source = vareffect::TranscriptSource::from(source);
+            let (out, size) =
+                builders::transcript_models::build(&builders::transcript_models::BuildRequest {
+                    source,
+                    input: &input,
+                    summary_input: summary_input.as_deref(),
+                    patch_aliases_input: patch_chrom_aliases.as_deref(),
+                    output_dir: &output,
+                    release: &version,
+                })?;
             print_build_header();
-            print_build_summary("transcript_models", &out, size, start);
+            print_build_summary(common::store_stem(source)?, &out, size, start);
         }
     }
 
