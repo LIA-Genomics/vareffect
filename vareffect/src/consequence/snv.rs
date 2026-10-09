@@ -67,7 +67,7 @@ pub fn annotate_snv(
             got: String::from(ref_base as char),
         });
     }
-    annotate_snv_verified(
+    let result = annotate_snv_verified(
         chrom,
         pos,
         ref_base,
@@ -75,7 +75,8 @@ pub fn annotate_snv(
         transcript,
         locate_index,
         fasta,
-    )
+    )?;
+    Ok(super::helpers::without_gapped_hgvs(transcript, result))
 }
 
 /// Internal SNV annotator that skips REF verification. Called by the
@@ -350,7 +351,7 @@ fn annotate_cds_snv(
         return Ok(result);
     }
 
-    let is_start_codon = codon_number == 1 && has_complete_start_codon(index);
+    let is_start_codon = codon_number == 1 && has_complete_start_codon(transcript, index);
     let coding_consequence = if ref_aa == alt_aa {
         if is_start_codon && ref_aa == b'M' {
             Consequence::StartRetainedVariant
@@ -411,9 +412,9 @@ fn annotate_cds_snv(
         cdna_position_end: Some(compute_cdna_position_for_cds(cds_offset, index)),
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p: None,
         predicts_nmd,

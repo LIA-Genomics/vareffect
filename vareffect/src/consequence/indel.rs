@@ -4,6 +4,7 @@ use super::helpers::{
     add_splice_spill, build_base_result, compute_cdna_position_exonic,
     compute_cdna_position_for_cds, ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon,
     finalize_consequences, has_complete_start_codon, is_incomplete_terminal_codon,
+    without_gapped_hgvs,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -55,7 +56,7 @@ pub fn annotate_deletion(
         &mut result,
         exonic_splice_spill(start, end, transcript, locate_index),
     );
-    Ok(result)
+    Ok(without_gapped_hgvs(transcript, result))
 }
 
 /// [`annotate_deletion`] without the splice terms a one-base frameshift intron spills
@@ -600,7 +601,7 @@ pub fn annotate_insertion(
             locate_index,
         );
         result.hgvs_c = hgvs;
-        return Ok(result);
+        return Ok(without_gapped_hgvs(transcript, result));
     }
 
     let mut result = match &location.region {
@@ -714,7 +715,7 @@ pub fn annotate_insertion(
         result.exon = None;
     }
     result.hgvs_c = hgvs;
-    Ok(result)
+    Ok(without_gapped_hgvs(transcript, result))
 }
 
 /// Build the result for a CDS frameshift (shared by deletion, insertion,
@@ -754,7 +755,7 @@ pub(super) fn annotate_cds_frameshift(
 
     // VEP's start_lost() checks _overlaps_start_codon() AND
     // _ins_del_start_altered() (methionine actually changed).
-    let overlaps_start_codon = codon_number == 1 && has_complete_start_codon(index);
+    let overlaps_start_codon = codon_number == 1 && has_complete_start_codon(transcript, index);
     let start_lost = if overlaps_start_codon {
         if cds_offset_start == 0 && cds_offset_end >= 3 {
             true
@@ -928,9 +929,9 @@ pub(super) fn annotate_cds_frameshift(
         cdna_position_end: Some(cdna_end),
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
@@ -974,7 +975,7 @@ fn annotate_cds_inframe_deletion(
     let mut consequences = Vec::new();
 
     if first_codon == 0
-        && has_complete_start_codon(index)
+        && has_complete_start_codon(transcript, index)
         && ((cds_offset_start == 0 && cds_offset_end >= 3) || alt_aas.first() != Some(&b'M'))
     {
         consequences.push(Consequence::StartLost);
@@ -1088,9 +1089,9 @@ fn annotate_cds_inframe_deletion(
         cdna_position_end: Some(cdna_end),
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
@@ -1423,11 +1424,14 @@ fn annotate_cds_inframe_insertion(
         inframe_insertion_terms(
             &codons,
             coding_inserted.len(),
-            has_complete_start_codon(index),
+            has_complete_start_codon(transcript, index),
             index.utr5_exonic_len() > 0,
             &protein,
         )?
-    } else if codons.codon_index == 0 && codons.local != 0 && has_complete_start_codon(index) {
+    } else if codons.codon_index == 0
+        && codons.local != 0
+        && has_complete_start_codon(transcript, index)
+    {
         vec![Consequence::StartRetainedVariant]
     } else {
         vec![Consequence::CodingSequenceVariant]
@@ -1523,9 +1527,9 @@ fn annotate_cds_inframe_insertion(
         cdna_position_end: Some(cdna_before.max(cdna_after)),
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,

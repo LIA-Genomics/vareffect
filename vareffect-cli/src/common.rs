@@ -10,11 +10,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use vareffect::TranscriptModel;
 use vareffect::transcript::{TRANSCRIPT_STORE_FORMAT_VERSION, TRANSCRIPT_STORE_HEADER_LEN};
+use vareffect::{TranscriptModel, TranscriptSource};
 
 /// Metadata returned after a successful store build.
 #[derive(Debug)]
@@ -181,17 +181,19 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// Encode transcript models as a versioned store and write its sidecar files.
 ///
 /// Encodes through [`vareffect::encode_transcript_store`], so the builder and
-/// the library's reader share one format implementation. The manifest records
-/// the format version, the payload SHA-256 and the source file's SHA-256.
+/// the library's reader share one format implementation. The store payload
+/// records `source` and `version`; the manifest records the format version,
+/// the payload SHA-256 and the source file's SHA-256.
 ///
 /// # Arguments
 ///
-/// * `name` -- Store name used as the file stem (e.g. `"transcript_models"`).
+/// * `source` -- Annotation source; names the file stem (see [`store_stem`]).
 /// * `transcripts` -- The models to store.
 /// * `input` -- Original source file path (name and SHA-256 recorded for
 ///   provenance).
 /// * `output_dir` -- Directory to write files into.
-/// * `version` -- Upstream data version string.
+/// * `version` -- Upstream data version string, recorded as the store's
+///   source release.
 ///
 /// # Returns
 ///
@@ -199,16 +201,18 @@ fn sha256_file(path: &Path) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if `transcripts` is empty, encoding fails, or the source
-/// file or output files cannot be read or written.
+/// Returns an error if `transcripts` is empty, encoding fails, the source has
+/// no file stem, or the source file or output files cannot be read or
+/// written.
 pub(crate) fn write_transcript_store(
-    name: &str,
+    source: TranscriptSource,
     transcripts: &[TranscriptModel],
     input: &Path,
     output_dir: &Path,
     version: &str,
 ) -> Result<(BuildOutput, usize)> {
-    let data = vareffect::encode_transcript_store(transcripts)
+    let name = store_stem(source)?;
+    let data = vareffect::encode_transcript_store(Some(source), Some(version), transcripts)
         .with_context(|| format!("encoding {name} store"))?;
     let source_sha256 = sha256_file(input)?;
     let fields = ManifestFields {
@@ -226,6 +230,21 @@ pub(crate) fn write_transcript_store(
     };
     let output = finalize_store(name, output_dir, &data, &fields)?;
     Ok((output, data.len()))
+}
+
+/// File stem of the transcript store built from `source`.
+///
+/// # Errors
+///
+/// Returns an error for a source this CLI has no store name for (the
+/// library's `TranscriptSource` is `#[non_exhaustive]`).
+pub(crate) fn store_stem(source: TranscriptSource) -> Result<&'static str> {
+    match source {
+        TranscriptSource::Mane => Ok("transcript_models"),
+        TranscriptSource::RefSeq => Ok("transcript_models_refseq"),
+        TranscriptSource::Gencode => Ok("transcript_models_gencode"),
+        other => bail!("no store file name for transcript source {other}"),
+    }
 }
 
 /// Print the summary table header for build output.
@@ -257,4 +276,25 @@ pub fn print_build_summary(name: &str, output: &BuildOutput, data_size: usize, e
         console::style(&output.sha256[..12]).dim(),
         console::style(time_str).dim(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_stems_are_distinct_per_source() {
+        assert_eq!(
+            store_stem(TranscriptSource::Mane).expect("mane"),
+            "transcript_models"
+        );
+        assert_eq!(
+            store_stem(TranscriptSource::RefSeq).expect("refseq"),
+            "transcript_models_refseq"
+        );
+        assert_eq!(
+            store_stem(TranscriptSource::Gencode).expect("gencode"),
+            "transcript_models_gencode"
+        );
+    }
 }

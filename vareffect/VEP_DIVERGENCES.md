@@ -30,6 +30,7 @@ Contents:
 | Partial codon, HGVS p. | `p.Ter…` | `p.?` | [3.1](#31-partial-first-and-last-codons) |
 | Deletion removing a CDS end with no stop | `stop_lost` / `stop_retained_variant` | no stop term | [3.1](#31-partial-first-and-last-codons) |
 | Splice-region windows near a frameshift intron | spill up to 7 exon bases (SNVs), stop at 8 (indels) | 3 exon bases (SNVs), up to 16 (indel acceptor side) | [3.2](#32-frameshift-introns) |
+| CDS alignment gap with transcript-only bases | HGVS c./p. (not measured) | no HGVS c./p. | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
 | NMD | `NMD.pm` rules, biotype term `NMD_transcript_variant` | last-junction rule only; `ptc` field for PVS1 | [4](#4-nmd) |
 | Structural variants | codon and splice terms at breakpoints | region-level terms only | [5](#5-structural-variants) |
 | HGVS 3' shift | `--shift_hgvs` toggle | always on | [6.2](#62-not-yet-implemented) |
@@ -146,6 +147,23 @@ on 1-based bounds). `vareffect` follows VEP 116:
 - **Codon case.** For a gap-spanning deletion VEP uppercases as many codon
   bases as the genomic footprint is long (`tCCGAg/tag`); `vareffect`
   uppercases the coding bases removed (`tCCGag/tag`).
+
+### 3.3 Transcripts with a gapped CDS alignment
+
+A RefSeq transcript can differ from the genome. Where the transcript lacks a
+genomic base (a `cDNA_match` `D` gap), RefSeq splits the exon there, and the
+genome-built model numbers the CDS as the transcript does (a frameshift
+intron, [3.2](#32-frameshift-introns)): NM_001304717.5 matches VEP 116. Where
+the transcript has bases the genome lacks (an `I` gap) inside the CDS, the
+genome-built numbering after the gap is not the transcript's own. Those
+models carry `TranscriptModel::cds_alignment_gap`, and `vareffect` reports
+no HGVS c. or p. for them and refuses to resolve HGVS c. on them
+(`CdsNumberingUnavailable`). Consequence terms, cDNA/CDS/protein positions,
+codons and amino acids are still computed from the genome, in the
+genome-built numbering. VEP's HGVS for these transcripts has not been measured yet
+(issue 13, WP3).
+Accepted by maintainer decision (issue 13): a missing HGVS string is safer
+than one that names the wrong residue. MANE 1.5 has no such transcript.
 
 ## 4. NMD
 

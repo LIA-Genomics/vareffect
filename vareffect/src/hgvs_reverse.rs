@@ -885,6 +885,10 @@ fn build_delins(
 ///    a `u32`. Return the pair with the highest version.
 /// 3. If still not found: `TranscriptNotFound`.
 ///
+/// An accession on both chrX and chrY (a pseudoautosomal transcript)
+/// resolves to its first copy in canonical chromosome order, the chrX one
+/// ([`TranscriptStore::get_by_accession`]).
+///
 /// The fallback runs for **both** unversioned inputs (e.g. `"NM_000546"`)
 /// and dotted inputs that miss the exact index (e.g. `"NM_000546.3"` when
 /// the store only carries `.6`). The clinical trade-off — CDS coordinates
@@ -952,6 +956,8 @@ fn lookup_transcript<'a>(
 /// * [`VarEffectError::HgvsParseError`] -- input string cannot be parsed
 /// * [`VarEffectError::TranscriptNotFound`] -- accession not in store
 /// * [`VarEffectError::PositionOutOfRange`] -- c. position exceeds transcript
+/// * [`VarEffectError::CdsNumberingUnavailable`] -- the transcript is flagged
+///   [`crate::TranscriptModel::cds_alignment_gap`]
 /// * [`VarEffectError::Malformed`] -- transcript model inconsistency
 /// * [`VarEffectError::HgvsRefMismatch`] -- stated REF doesn't match FASTA
 ///   (includes the HGVS input string in its payload so callers can emit a
@@ -972,6 +978,13 @@ pub(crate) fn resolve_hgvs_c_with_meta(
             "c. notation requires a protein-coding transcript, but {} is {:?}",
             transcript.accession, transcript.biotype,
         )));
+    }
+    // The forward path writes no HGVS for these transcripts; mapping a c.
+    // position through the genome-built numbering would land past the gap.
+    if transcript.cds_alignment_gap {
+        return Err(VarEffectError::CdsNumberingUnavailable {
+            accession: transcript.accession.clone(),
+        });
     }
 
     // Snapshot the accession before the match — once we move into the
@@ -1706,6 +1719,19 @@ mod tests {
         assert_eq!(drifted.resolved_accession, "NM_TEST_PLUS.1");
         // The variant payload must match the exact-version resolution.
         assert_eq!(drifted.variant, exact.variant);
+    }
+
+    #[test]
+    fn gapped_cds_alignment_refuses_reverse_mapping() {
+        let mut tx = plus_strand_coding();
+        tx.cds_alignment_gap = true;
+        let store = single_tx_store(tx);
+        let (_tmp, fasta) = build_test_fasta();
+        let error = resolve_hgvs_c("NM_TEST_PLUS.1:c.1A>T", &store, &fasta).unwrap_err();
+        assert!(matches!(
+            error,
+            VarEffectError::CdsNumberingUnavailable { ref accession } if accession == "NM_TEST_PLUS.1"
+        ));
     }
 
     // -- Integration tests (require real store + FASTA) ----------------------

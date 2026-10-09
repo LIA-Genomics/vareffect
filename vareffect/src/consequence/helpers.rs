@@ -108,9 +108,9 @@ pub(super) fn build_base_result(
         cdna_position_end: None,
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p: None,
         predicts_nmd: false,
@@ -250,20 +250,37 @@ pub(super) fn add_splice_spill(
     result.impact = finalize_consequences(&mut result.consequences);
 }
 
+/// Clear HGVS c. and p. on a transcript flagged
+/// [`TranscriptModel::cds_alignment_gap`]: its genome-built CDS numbering
+/// differs from the transcript's own, so a genome-derived HGVS string would
+/// name the wrong residue (maintainer decision, issue 13).
+pub(super) fn without_gapped_hgvs(
+    transcript: &TranscriptModel,
+    mut result: ConsequenceResult,
+) -> ConsequenceResult {
+    if transcript.cds_alignment_gap {
+        result.hgvs_c = None;
+        result.hgvs_p = None;
+    }
+    result
+}
+
 /// `true` when codon 1 is a complete start codon, the only case in which
 /// VEP's start-codon predicates (`start_lost`, `start_retained_variant`)
-/// apply. A 5'-incomplete CDS (`cds_start_NF`) has no start codon:
+/// apply. A 5'-incomplete CDS (`cds_start_NF`) has no start codon, even
+/// when its first codon is whole and reads ATG:
 /// `VariationEffect.pm::_overlaps_start_codon` returns 0 for it
 /// (ensembl-variation release/115).
-pub(super) fn has_complete_start_codon(index: &LocateIndex) -> bool {
-    index.cds_start_pad() == 0
+pub(super) fn has_complete_start_codon(transcript: &TranscriptModel, index: &LocateIndex) -> bool {
+    transcript.cds_start_complete && index.cds_start_pad() == 0
 }
 
 /// `true` when the CDS ends in a stop codon on the genome: its length is a
 /// whole number of codons and the last one translates to `*`.
 ///
-/// False for a 3'-incomplete CDS and for a stop that only polyadenylation
-/// completes (NM_001424184.1, MT-ND4). VEP 116 gives a deletion from such a
+/// False for a 3'-incomplete CDS (`cds_end_NF`, whatever its last codon
+/// reads) and for a stop that only polyadenylation completes
+/// (NM_001424184.1, MT-ND4). VEP 116 gives a deletion from such a
 /// partial codon into the 3'UTR no stop-codon term (NM_001424184.1
 /// c.658_*2del: `incomplete_terminal_codon_variant`,
 /// `coding_sequence_variant`, `3_prime_UTR_variant`), and
@@ -279,7 +296,11 @@ pub(super) fn ends_in_stop_codon(
     fasta: &FastaReader,
 ) -> Result<bool, VarEffectError> {
     let total = index.total_cds_length();
-    if total < 3 || !total.is_multiple_of(3) || total - 3 < index.cds_start_pad() {
+    if !transcript.cds_end_complete
+        || total < 3
+        || !total.is_multiple_of(3)
+        || total - 3 < index.cds_start_pad()
+    {
         return Ok(false);
     }
     let codon = fetch_ref_codon(total - 3, chrom, transcript, index, fasta)?;

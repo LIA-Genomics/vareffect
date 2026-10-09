@@ -3,8 +3,13 @@
 //! A store file is a fixed 12-byte header followed by a MessagePack payload:
 //!
 //! ```text
-//! [magic: b"VEFXTXM\0"][format version: u32 little-endian][Vec<TranscriptModel>]
+//! [magic: b"VEFXTXM\0"][format version: u32 little-endian][payload]
 //! ```
+//!
+//! Since format version 2 the payload is a map with named fields:
+//! `source` (a [`TranscriptSource`] label or nil), `source_release` (a
+//! string or nil) and `transcripts` (the `Vec<TranscriptModel>`). Version 1
+//! stores held the bare model array and are refused like any other version.
 //!
 //! The header is checked before the ~27 MB payload is decoded, so a store
 //! written by an incompatible version fails loudly instead of deserializing
@@ -16,17 +21,18 @@
 
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::VarEffectError;
-use crate::types::TranscriptModel;
+use crate::types::{TranscriptModel, TranscriptSource};
 
 /// Current transcript store format version, written into every store header
 /// and required at load time.
 ///
 /// Bump it on any change to:
 ///
-/// - the header or the payload container;
+/// - the header or the payload container (its fields, including `source`
+///   and `source_release`);
 /// - the fields, variants or encoding of any serialized type
 ///   ([`TranscriptModel`] and everything it contains), **including additive
 ///   `Option` fields and new enum variants**: serde ignores unknown fields and
@@ -40,9 +46,12 @@ use crate::types::TranscriptModel;
 /// The schema-fingerprint test in this module catches shape changes; changes
 /// of meaning alone are not caught mechanically and must follow this list.
 /// The version says whether a reader can decode a store. It is not
-/// provenance: which transcript source or release a store holds is recorded
-/// in its manifest.
-pub const TRANSCRIPT_STORE_FORMAT_VERSION: u32 = 1;
+/// provenance: the payload names the transcript source and release, and the
+/// manifest records the input file. Version 2 added that container, the
+/// optional tier, the CDS completeness and genome-mismatch flags, the
+/// selenocysteine codons and multi-locus accessions (one chrX and one chrY
+/// PAR copy).
+pub const TRANSCRIPT_STORE_FORMAT_VERSION: u32 = 2;
 
 /// Length in bytes of the store header that precedes the MessagePack payload.
 pub const TRANSCRIPT_STORE_HEADER_LEN: usize = 12;
@@ -119,16 +128,43 @@ pub fn store_format(bytes: &[u8]) -> StoreFormat {
     }
 }
 
+/// The decoded payload of a store file.
+#[derive(Debug, Deserialize)]
+pub(crate) struct StoreData {
+    /// Annotation source the store was built from, if recorded. The key is
+    /// required (nil allowed): the encoder always writes it.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) source: Option<TranscriptSource>,
+    /// Release of that source (e.g. `"1.5"`, `"50"`), if recorded. Required
+    /// key, nil allowed.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) source_release: Option<String>,
+    /// The transcript models, in load order.
+    pub(crate) transcripts: Vec<TranscriptModel>,
+}
+
+/// Borrowed view of [`StoreData`], so encoding does not copy the models.
+/// Field names and order must match [`StoreData`].
+#[derive(Serialize)]
+struct StoreDataRef<'a> {
+    source: Option<TranscriptSource>,
+    source_release: Option<&'a str>,
+    transcripts: &'a [TranscriptModel],
+}
+
 /// Encode transcript models as a versioned store file.
 ///
 /// Writes the header for [`TRANSCRIPT_STORE_FORMAT_VERSION`] followed by the
-/// models as MessagePack with named fields, the form
+/// payload as MessagePack with named fields, the form
 /// [`crate::TranscriptStore::from_bytes`] reads. Third-party builders use this
 /// to write stores from models they built; it is not a way to upgrade an
 /// existing store of another version.
 ///
 /// # Arguments
 ///
+/// * `source` - Annotation source of the models, `None` if not one of the
+///   [`TranscriptSource`] variants
+/// * `source_release` - Release of that source (e.g. `"1.5"`), if known
 /// * `transcripts` - The models to store, in the order they should be loaded
 ///
 /// # Returns
@@ -139,7 +175,29 @@ pub fn store_format(bytes: &[u8]) -> StoreFormat {
 ///
 /// * [`VarEffectError::EmptyStore`] if `transcripts` is empty.
 /// * [`VarEffectError::Serialize`] if MessagePack encoding fails.
-pub fn encode_transcript_store(transcripts: &[TranscriptModel]) -> Result<Vec<u8>, VarEffectError> {
+///
+/// # Examples
+///
+/// ```
+/// use vareffect::{Exon, Strand, TranscriptModel, TranscriptSource, TranscriptStore};
+///
+/// let exon = Exon { exon_number: 1, genomic_start: 100, genomic_end: 400 };
+/// let model = TranscriptModel::new("NR_000001.1", "GENE1", "chr1", Strand::Plus, vec![exon]);
+/// let bytes = vareffect::encode_transcript_store(
+///     Some(TranscriptSource::RefSeq),
+///     Some("RS_2025_08"),
+///     &[model],
+/// )?;
+/// let store = TranscriptStore::from_bytes(&bytes)?;
+/// assert_eq!(store.source(), Some(TranscriptSource::RefSeq));
+/// assert_eq!(store.source_release(), Some("RS_2025_08"));
+/// # Ok::<(), vareffect::VarEffectError>(())
+/// ```
+pub fn encode_transcript_store(
+    source: Option<TranscriptSource>,
+    source_release: Option<&str>,
+    transcripts: &[TranscriptModel],
+) -> Result<Vec<u8>, VarEffectError> {
     if transcripts.is_empty() {
         return Err(VarEffectError::EmptyStore);
     }
@@ -148,11 +206,16 @@ pub fn encode_transcript_store(transcripts: &[TranscriptModel]) -> Result<Vec<u8
     );
     buffer.extend_from_slice(&MAGIC);
     buffer.extend_from_slice(&TRANSCRIPT_STORE_FORMAT_VERSION.to_le_bytes());
-    rmp_serde::encode::write_named(&mut buffer, transcripts)?;
+    let payload = StoreDataRef {
+        source,
+        source_release,
+        transcripts,
+    };
+    rmp_serde::encode::write_named(&mut buffer, &payload)?;
     Ok(buffer)
 }
 
-/// Decode a versioned store file into its transcript models.
+/// Decode a versioned store file into its payload.
 ///
 /// Requires the current format version, a payload that is consumed exactly
 /// (trailing bytes are an error) and at least one model.
@@ -161,12 +224,11 @@ pub fn encode_transcript_store(transcripts: &[TranscriptModel]) -> Result<Vec<u8
 ///
 /// * [`VarEffectError::UnsupportedStoreFormat`] if the header is missing,
 ///   truncated or carries another version.
-/// * [`VarEffectError::Deserialize`] if the payload is not a valid model list.
+/// * [`VarEffectError::Deserialize`] if the payload is not a valid store
+///   payload.
 /// * [`VarEffectError::Malformed`] if bytes follow the payload.
 /// * [`VarEffectError::EmptyStore`] if the payload holds no models.
-pub(crate) fn decode_transcript_store(
-    bytes: &[u8],
-) -> Result<Vec<TranscriptModel>, VarEffectError> {
+pub(crate) fn decode_transcript_store(bytes: &[u8]) -> Result<StoreData, VarEffectError> {
     let found = store_format(bytes);
     if found != StoreFormat::Version(TRANSCRIPT_STORE_FORMAT_VERSION) {
         return Err(VarEffectError::UnsupportedStoreFormat {
@@ -177,9 +239,9 @@ pub(crate) fn decode_transcript_store(
     // A `&mut &[u8]` reader advances past exactly what the decoder consumed,
     // so whatever remains afterwards is trailing data.
     let mut remaining = &bytes[TRANSCRIPT_STORE_HEADER_LEN..];
-    let transcripts = {
+    let data = {
         let mut deserializer = rmp_serde::Deserializer::new(&mut remaining);
-        Vec::<TranscriptModel>::deserialize(&mut deserializer)?
+        StoreData::deserialize(&mut deserializer)?
     };
     if !remaining.is_empty() {
         return Err(VarEffectError::Malformed(format!(
@@ -187,10 +249,10 @@ pub(crate) fn decode_transcript_store(
             remaining.len()
         )));
     }
-    if transcripts.is_empty() {
+    if data.transcripts.is_empty() {
         return Err(VarEffectError::EmptyStore);
     }
-    Ok(transcripts)
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -200,12 +262,27 @@ mod tests {
     use crate::types::{Biotype, CdsSegment, Exon, Strand, TranscriptTier};
     use sha2::{Digest, Sha256};
 
-    /// SHA-256 of [`fingerprint_fixture`] encoded at the current version.
+    /// SHA-256 over [`fingerprint_fixture`] encoded once per source chain
+    /// entry at the current version.
     const SCHEMA_FINGERPRINT: &str =
-        "51aa8fa35034c03a8898ce01e47c6beba53930064f9a7538ca12eb0fcda58e72";
+        "fcd9c8c2272541e357f087c8acea5a4121c49aeded2f4e1cfee9a2480a31f058";
+
+    /// The header of a current-version store.
+    const HEADER: &[u8; TRANSCRIPT_STORE_HEADER_LEN] = b"VEFXTXM\0\x02\x00\x00\x00";
 
     fn one_store() -> Vec<TranscriptModel> {
         vec![plus_strand_coding()]
+    }
+
+    fn encode(transcripts: &[TranscriptModel]) -> Result<Vec<u8>, VarEffectError> {
+        encode_transcript_store(None, None, transcripts)
+    }
+
+    /// `HEADER` followed by `payload` encoded as a named MessagePack map.
+    fn with_header(payload: &serde_json::Value) -> Vec<u8> {
+        let mut bytes = HEADER.to_vec();
+        bytes.extend(rmp_serde::to_vec_named(payload).expect("encode payload"));
+        bytes
     }
 
     // Each enum's variants come from a successor chain written as an
@@ -213,12 +290,22 @@ mod tests {
     // gets an arm, which forces a decision about its place in the chain. An
     // arm no other arm points to compiles but stays out of the fingerprint.
 
-    fn next_tier(tier: Option<TranscriptTier>) -> Option<TranscriptTier> {
+    /// Tiers including `None`; the chain ends when it returns to `None`.
+    fn next_tier(tier: Option<TranscriptTier>) -> Option<Option<TranscriptTier>> {
         match tier {
-            None => Some(TranscriptTier::ManeSelect),
-            Some(TranscriptTier::ManeSelect) => Some(TranscriptTier::ManePlusClinical),
-            Some(TranscriptTier::ManePlusClinical) => Some(TranscriptTier::RefSeqSelect),
+            None => Some(Some(TranscriptTier::ManeSelect)),
+            Some(TranscriptTier::ManeSelect) => Some(Some(TranscriptTier::ManePlusClinical)),
+            Some(TranscriptTier::ManePlusClinical) => Some(Some(TranscriptTier::RefSeqSelect)),
             Some(TranscriptTier::RefSeqSelect) => None,
+        }
+    }
+
+    fn next_source(source: Option<TranscriptSource>) -> Option<Option<TranscriptSource>> {
+        match source {
+            None => Some(Some(TranscriptSource::Mane)),
+            Some(TranscriptSource::Mane) => Some(Some(TranscriptSource::RefSeq)),
+            Some(TranscriptSource::RefSeq) => Some(Some(TranscriptSource::Gencode)),
+            Some(TranscriptSource::Gencode) => None,
         }
     }
 
@@ -247,8 +334,12 @@ mod tests {
         }
     }
 
-    fn all_tiers() -> Vec<TranscriptTier> {
-        std::iter::successors(next_tier(None), |tier| next_tier(Some(*tier))).collect()
+    fn all_tiers() -> Vec<Option<TranscriptTier>> {
+        std::iter::successors(Some(None), |tier| next_tier(*tier)).collect()
+    }
+
+    fn all_sources() -> Vec<Option<TranscriptSource>> {
+        std::iter::successors(Some(None), |source| next_source(*source)).collect()
     }
 
     fn all_strands() -> Vec<Strand> {
@@ -261,14 +352,16 @@ mod tests {
 
     /// A record owned by this test alone, as a full struct literal (no
     /// `..base`), so a new field in any serialized type fails to compile here
-    /// rather than slipping past the fingerprint.
+    /// rather than slipping past the fingerprint. The boolean flags and the
+    /// selenocysteine list alternate with `index`.
     fn fingerprint_record(
         index: usize,
-        tier: TranscriptTier,
+        tier: Option<TranscriptTier>,
         strand: Strand,
         biotype: Biotype,
     ) -> TranscriptModel {
         let offset = index as u64 * 10_000;
+        let odd = index % 2 == 1;
         TranscriptModel {
             accession: format!("NM_{:06}.1", index + 1),
             protein_accession: Some(format!("NP_{:06}.1", index + 1)),
@@ -310,6 +403,15 @@ mod tests {
             tier,
             biotype,
             exon_count: 2,
+            cds_start_complete: !odd,
+            cds_end_complete: odd,
+            genome_mismatch: odd,
+            cds_alignment_gap: !odd,
+            selenocysteine_codons: if odd {
+                vec![offset + 1_600, offset + 4_100]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -331,36 +433,70 @@ mod tests {
             .collect()
     }
 
+    /// The fixture encoded once per source, alternating a release and none.
+    fn fingerprint_stores() -> Vec<Vec<u8>> {
+        let fixture = fingerprint_fixture();
+        all_sources()
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let release = (index % 2 == 0).then_some("1.5");
+                encode_transcript_store(source, release, &fixture).expect("encode")
+            })
+            .collect()
+    }
+
     #[test]
     fn variant_chains_cover_every_variant() {
-        assert_eq!(all_tiers().len(), 3);
+        assert_eq!(all_tiers().len(), 4);
+        assert_eq!(all_sources().len(), 4);
         assert_eq!(all_strands().len(), 2);
         assert_eq!(all_biotypes().len(), 11);
     }
 
     fn reencode(bytes: &[u8]) -> Vec<u8> {
-        encode_transcript_store(&decode_transcript_store(bytes).expect("decode")).expect("encode")
+        let data = decode_transcript_store(bytes).expect("decode");
+        encode_transcript_store(
+            data.source,
+            data.source_release.as_deref(),
+            &data.transcripts,
+        )
+        .expect("encode")
     }
 
     #[test]
     fn header_bytes_are_pinned() {
-        let encoded = encode_transcript_store(&one_store()).expect("encode");
-        assert_eq!(
-            &encoded[..TRANSCRIPT_STORE_HEADER_LEN],
-            b"VEFXTXM\0\x01\x00\x00\x00"
-        );
+        let encoded = encode(&one_store()).expect("encode");
+        assert_eq!(&encoded[..TRANSCRIPT_STORE_HEADER_LEN], HEADER);
     }
 
     #[test]
     fn round_trip_reencodes_identically() {
-        let encoded = encode_transcript_store(&fingerprint_fixture()).expect("encode");
-        assert_eq!(reencode(&encoded), encoded);
+        for encoded in fingerprint_stores() {
+            assert_eq!(reencode(&encoded), encoded);
+        }
+    }
+
+    #[test]
+    fn source_and_release_round_trip() {
+        let encoded =
+            encode_transcript_store(Some(TranscriptSource::Gencode), Some("50"), &one_store())
+                .expect("encode");
+        let data = decode_transcript_store(&encoded).expect("decode");
+        assert_eq!(data.source, Some(TranscriptSource::Gencode));
+        assert_eq!(data.source_release.as_deref(), Some("50"));
+        assert_eq!(data.transcripts.len(), 1);
+        let bare = decode_transcript_store(&encode(&one_store()).expect("encode")).expect("decode");
+        assert_eq!((bare.source, bare.source_release), (None, None));
     }
 
     #[test]
     fn schema_fingerprint_is_unchanged() {
-        let encoded = encode_transcript_store(&fingerprint_fixture()).expect("encode");
-        let fingerprint = hex::encode(Sha256::digest(&encoded));
+        let mut hasher = Sha256::new();
+        for encoded in fingerprint_stores() {
+            hasher.update(&encoded);
+        }
+        let fingerprint = hex::encode(hasher.finalize());
         assert_eq!(
             fingerprint, SCHEMA_FINGERPRINT,
             "the encoded store bytes changed. If a serialized type changed (a field, a \
@@ -404,30 +540,41 @@ mod tests {
     #[test]
     fn header_without_payload_is_a_deserialize_error() {
         assert!(matches!(
-            decode_transcript_store(b"VEFXTXM\0\x01\x00\x00\x00"),
+            decode_transcript_store(HEADER),
             Err(VarEffectError::Deserialize(_))
         ));
     }
 
     #[test]
     fn other_versions_are_rejected() {
-        let mut encoded = encode_transcript_store(&one_store()).expect("encode");
-        encoded[8..12].copy_from_slice(&2u32.to_le_bytes());
+        for version in [1u32, 3] {
+            let mut encoded = encode(&one_store()).expect("encode");
+            encoded[8..12].copy_from_slice(&version.to_le_bytes());
+            assert!(matches!(
+                decode_transcript_store(&encoded),
+                Err(VarEffectError::UnsupportedStoreFormat {
+                    found: StoreFormat::Version(found),
+                    ..
+                }) if found == version
+            ));
+        }
+    }
+
+    #[test]
+    fn version_one_payload_behind_the_current_header_is_a_deserialize_error() {
+        let mut bytes = HEADER.to_vec();
+        bytes.extend(rmp_serde::to_vec_named(&one_store()).expect("encode"));
         assert!(matches!(
-            decode_transcript_store(&encoded),
-            Err(VarEffectError::UnsupportedStoreFormat {
-                found: StoreFormat::Version(2),
-                ..
-            })
+            decode_transcript_store(&bytes),
+            Err(VarEffectError::Deserialize(_))
         ));
     }
 
     #[test]
     fn truncated_header_is_named() {
         for length in [1, 5, 8, 11] {
-            let header = &b"VEFXTXM\0\x01\x00\x00\x00"[..length];
             assert_eq!(
-                store_format(header),
+                store_format(&HEADER[..length]),
                 StoreFormat::TruncatedHeader,
                 "{length} bytes"
             );
@@ -450,7 +597,7 @@ mod tests {
 
     #[test]
     fn garbage_payload_is_a_deserialize_error() {
-        let mut bytes = b"VEFXTXM\0\x01\x00\x00\x00".to_vec();
+        let mut bytes = HEADER.to_vec();
         bytes.extend_from_slice(b"\xc1not messagepack");
         assert!(matches!(
             decode_transcript_store(&bytes),
@@ -460,7 +607,7 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_rejected() {
-        let mut encoded = encode_transcript_store(&one_store()).expect("encode");
+        let mut encoded = encode(&one_store()).expect("encode");
         encoded.extend_from_slice(b"extra");
         assert!(matches!(
             decode_transcript_store(&encoded),
@@ -470,12 +617,12 @@ mod tests {
 
     #[test]
     fn empty_stores_are_rejected_on_both_sides() {
-        assert!(matches!(
-            encode_transcript_store(&[]),
-            Err(VarEffectError::EmptyStore)
-        ));
-        let mut empty = b"VEFXTXM\0\x01\x00\x00\x00".to_vec();
-        empty.push(0x90);
+        assert!(matches!(encode(&[]), Err(VarEffectError::EmptyStore)));
+        let empty = with_header(&serde_json::json!({
+            "source": null,
+            "source_release": null,
+            "transcripts": [],
+        }));
         assert!(matches!(
             decode_transcript_store(&empty),
             Err(VarEffectError::EmptyStore)
@@ -484,15 +631,21 @@ mod tests {
 
     #[test]
     fn compact_payload_behind_a_valid_header_decodes() {
-        let mut bytes = b"VEFXTXM\0\x01\x00\x00\x00".to_vec();
-        bytes.extend(rmp_serde::to_vec(&one_store()).expect("compact"));
+        let mut bytes = HEADER.to_vec();
+        let payload = StoreDataRef {
+            source: Some(TranscriptSource::Mane),
+            source_release: Some("1.5"),
+            transcripts: &one_store(),
+        };
+        bytes.extend(rmp_serde::to_vec(&payload).expect("compact"));
         let decoded = decode_transcript_store(&bytes).expect("compact payload");
-        assert_eq!(decoded[0].accession, one_store()[0].accession);
+        assert_eq!(decoded.source, Some(TranscriptSource::Mane));
+        assert_eq!(decoded.transcripts[0].accession, one_store()[0].accession);
     }
 
     #[test]
     fn pre_header_readers_fail_on_versioned_stores() {
-        let encoded = encode_transcript_store(&one_store()).expect("encode");
+        let encoded = encode(&one_store()).expect("encode");
         assert!(rmp_serde::from_slice::<Vec<TranscriptModel>>(&encoded).is_err());
     }
 
@@ -504,9 +657,67 @@ mod tests {
         let fields = record.as_object_mut().expect("struct is a map");
         fields.remove("protein_accession");
         fields.insert("field_from_a_newer_version".into(), serde_json::json!(1));
-        let mut bytes = b"VEFXTXM\0\x01\x00\x00\x00".to_vec();
-        bytes.extend(rmp_serde::to_vec_named(&vec![record]).expect("encode map"));
+        let bytes = with_header(&serde_json::json!({
+            "source": "mane",
+            "source_release": null,
+            "transcripts": [record],
+            "container_field_from_a_newer_version": true,
+        }));
         let decoded = decode_transcript_store(&bytes).expect("silently accepted");
-        assert_eq!(decoded[0].protein_accession, None);
+        assert_eq!(decoded.transcripts[0].protein_accession, None);
+    }
+
+    /// The container's `source`, `source_release` and the model's `tier`
+    /// keys are required even though their values may be nil, so a
+    /// truncated or foreign payload cannot load as "source unknown" or
+    /// "no tier".
+    #[test]
+    fn missing_container_or_tier_keys_are_deserialize_errors() {
+        let record = serde_json::to_value(plus_strand_coding()).expect("to json");
+        let full = serde_json::json!({
+            "source": null,
+            "source_release": null,
+            "transcripts": [record.clone()],
+        });
+        assert!(decode_transcript_store(&with_header(&full)).is_ok());
+        for key in ["source", "source_release"] {
+            let mut payload = full.clone();
+            payload.as_object_mut().expect("map").remove(key);
+            assert!(
+                matches!(
+                    decode_transcript_store(&with_header(&payload)),
+                    Err(VarEffectError::Deserialize(_))
+                ),
+                "{key}"
+            );
+        }
+        let mut no_tier = record;
+        no_tier.as_object_mut().expect("map").remove("tier");
+        let payload = serde_json::json!({
+            "source": null,
+            "source_release": null,
+            "transcripts": [no_tier],
+        });
+        assert!(matches!(
+            decode_transcript_store(&with_header(&payload)),
+            Err(VarEffectError::Deserialize(_))
+        ));
+    }
+
+    /// A missing required field (here a v2 flag) is an error, not a default.
+    #[test]
+    fn missing_required_field_is_a_deserialize_error() {
+        let mut record = serde_json::to_value(plus_strand_coding()).expect("to json");
+        let fields = record.as_object_mut().expect("struct is a map");
+        fields.remove("cds_start_complete");
+        let bytes = with_header(&serde_json::json!({
+            "source": null,
+            "source_release": null,
+            "transcripts": [record],
+        }));
+        assert!(matches!(
+            decode_transcript_store(&bytes),
+            Err(VarEffectError::Deserialize(_))
+        ));
     }
 }

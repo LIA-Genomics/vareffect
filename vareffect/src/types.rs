@@ -211,26 +211,99 @@ impl<'de> Deserialize<'de> for Biotype {
     }
 }
 
-/// A canonical transcript model sourced from MANE or RefSeq Select.
+/// Annotation source a transcript store was built from.
+///
+/// Recorded once per store (see [`crate::TranscriptStore::source`]); the
+/// per-source meaning of the [`TranscriptModel`] identifier fields is
+/// documented there. Serialized as the lowercase label returned by
+/// [`TranscriptSource::as_str`]. `#[non_exhaustive]` so further sources can
+/// be added without a SemVer break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum TranscriptSource {
+    /// MANE Select and MANE Plus Clinical (the NCBI RefSeq MANE GFF3).
+    Mane,
+    /// NCBI RefSeq, curated `NM_` / `NR_` transcripts on the primary assembly.
+    RefSeq,
+    /// GENCODE comprehensive gene annotation.
+    Gencode,
+}
+
+impl TranscriptSource {
+    /// Return the lowercase label used on disk and in output headers.
+    ///
+    /// # Returns
+    ///
+    /// `"mane"`, `"refseq"` or `"gencode"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mane => "mane",
+            Self::RefSeq => "refseq",
+            Self::Gencode => "gencode",
+        }
+    }
+}
+
+impl std::fmt::Display for TranscriptSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One transcript model from MANE, RefSeq or GENCODE.
 ///
 /// Every coordinate is 0-based half-open. Accessions include the version
 /// suffix (e.g., `"NM_006772.2"`) — version-less lookup is intentionally out
 /// of scope; resolving an unversioned HGVS string to "the latest" belongs
 /// with the consumer, not the raw store.
+///
+/// The identifier fields mean the same thing for every
+/// [`TranscriptSource`]:
+///
+/// | Field | MANE / RefSeq | GENCODE |
+/// |---|---|---|
+/// | `accession` | `NM_` / `NR_` | `ENST` |
+/// | `protein_accession` | `NP_` | `ENSP` |
+/// | `ensembl_accession` | the `ENST` cross-reference | `None` |
+/// | `hgnc_id` | `HGNC:n` | `HGNC:n` |
+///
+/// `#[non_exhaustive]`: construct with [`TranscriptModel::new`] and the
+/// `with_*` setters. The fields stay public for reading.
+///
+/// # Examples
+///
+/// ```
+/// use vareffect::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
+///
+/// let exons = vec![Exon { exon_number: 1, genomic_start: 100, genomic_end: 400 }];
+/// let cds = vec![CdsSegment { exon_index: 0, genomic_start: 150, genomic_end: 300, phase: 0 }];
+/// let model = TranscriptModel::new("NM_000001.1", "GENE1", "chr1", Strand::Plus, exons)
+///     .with_cds_segments(cds)
+///     .with_biotype(Biotype::ProteinCoding)
+///     .with_tier(TranscriptTier::ManeSelect);
+/// assert_eq!((model.tx_start, model.tx_end), (100, 400));
+/// assert_eq!(model.cds_genomic_start, Some(150));
+/// assert!(model.cds_start_complete && model.cds_end_complete);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TranscriptModel {
-    /// RefSeq transcript accession including version, e.g. `"NM_006772.2"`.
+    /// Transcript accession including version: `NM_` / `NR_` for MANE and
+    /// RefSeq (e.g. `"NM_006772.2"`), `ENST` for GENCODE.
     pub accession: String,
-    /// RefSeq protein accession including version, e.g. `"NP_006763.2"`.
-    /// `None` for non-coding transcripts (`NR_*` accessions).
+    /// Protein accession including version: `NP_` for MANE and RefSeq,
+    /// `ENSP` for GENCODE. `None` for non-coding transcripts.
     pub protein_accession: Option<String>,
     /// HGNC-approved gene symbol, e.g. `"SYNGAP1"`.
     pub gene_symbol: String,
     /// HGNC identifier including the `HGNC:` prefix, e.g. `"HGNC:11497"`.
-    /// `None` if the parent gene row did not carry an HGNC cross-reference.
+    /// `None` if the source did not carry an HGNC cross-reference.
     pub hgnc_id: Option<String>,
-    /// Ensembl transcript accession with version, e.g. `"ENST00000418600.6"`.
-    /// `None` if the Dbxref did not list an Ensembl cross-reference.
+    /// Ensembl transcript cross-reference with version, e.g.
+    /// `"ENST00000418600.6"`, for RefSeq-based models. `None` if the Dbxref
+    /// did not list one, and always `None` for GENCODE (whose `accession` is
+    /// the Ensembl ID).
     pub ensembl_accession: Option<String>,
     /// Chromosome name in UCSC style (`"chr1"`, …, `"chrX"`, `"chrY"`, `"chrM"`).
     /// For transcripts on GRCh38 patch sequences, this field holds the UCSC
@@ -274,8 +347,11 @@ pub struct TranscriptModel {
     /// without re-scanning) and the GFF3 column-8 phase (needed for codon
     /// walking across exon boundaries and frameshift detection).
     pub cds_segments: Vec<CdsSegment>,
-    /// MANE / RefSeq Select curation tier.
-    pub tier: TranscriptTier,
+    /// The highest curation tier the transcript carries (MANE Select >
+    /// MANE Plus Clinical > RefSeq Select), `None` when it has none. Every
+    /// MANE model has a tier. The store requires the key (nil allowed).
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tier: Option<TranscriptTier>,
     /// Biotype, either a known variant or a raw upstream label preserved
     /// verbatim via [`Biotype::Other`].
     pub biotype: Biotype,
@@ -284,6 +360,190 @@ pub struct TranscriptModel {
     /// Stored for O(1) access without traversing the vec. `u16` suffices
     /// (TTN, the longest known, is ~363).
     pub exon_count: u16,
+    /// `false` when the source marks the CDS 5' end as incomplete (GENCODE
+    /// `cds_start_NF`, a RefSeq `start_range` at the 5' end). Without a
+    /// complete start, VEP calls no `start_lost` or `start_retained_variant`.
+    /// A CDS whose first phase is non-zero is always incomplete (the store
+    /// refuses the contradiction). `true` for non-coding transcripts.
+    pub cds_start_complete: bool,
+    /// `false` when the source marks the CDS 3' end as incomplete (GENCODE
+    /// `cds_end_NF`, a RefSeq `end_range` at the 3' end). Without a complete
+    /// end, the CDS has no stop codon to lose or retain. `true` for
+    /// non-coding transcripts.
+    pub cds_end_complete: bool,
+    /// `true` when the transcript sequence differs from the reference genome
+    /// (a RefSeq `exception` or a gapped genome alignment). The model is
+    /// built from the genome.
+    pub genome_mismatch: bool,
+    /// `true` when, inside the CDS span, the transcript has bases the genome
+    /// lacks (a RefSeq `cDNA_match` `I` gap). The genome-built CDS numbering
+    /// is then not the transcript's own, so no HGVS c. or p. is reported for
+    /// it and HGVS c. is not resolved on it. Consequence terms, positions,
+    /// codons and amino acids keep the genome-built numbering. A genomic
+    /// base the transcript lacks (a `D` gap) does not set it:
+    /// RefSeq splits the exon there, a frameshift intron, and the numbering
+    /// stays the transcript's.
+    pub cds_alignment_gap: bool,
+    /// 0-based genomic start of each selenocysteine codon (the lowest base of
+    /// the codon on either strand), in ascending order. Empty when the
+    /// source names none.
+    pub selenocysteine_codons: Vec<u64>,
+}
+
+impl TranscriptModel {
+    /// Create a model from its required parts.
+    ///
+    /// `tx_start` / `tx_end` are the exon span and `exon_count` is
+    /// `exons.len()`. Everything else starts empty: no CDS, protein or
+    /// cross-references, no tier, [`Biotype::Unknown`], a complete CDS at
+    /// both ends and no genome mismatch. Set the rest with the `with_*`
+    /// setters.
+    ///
+    /// # Arguments
+    ///
+    /// * `accession` - Versioned transcript accession
+    /// * `gene_symbol` - Gene symbol
+    /// * `chrom` - UCSC-style chromosome name
+    /// * `strand` - Transcript strand
+    /// * `exons` - Exons in transcript order (0-based half-open)
+    ///
+    /// # Returns
+    ///
+    /// The model. With no exons the span is `0..0`, which
+    /// [`crate::TranscriptStore`] refuses; more than `u16::MAX` exons
+    /// saturate `exon_count`, which the store also refuses.
+    pub fn new(
+        accession: impl Into<String>,
+        gene_symbol: impl Into<String>,
+        chrom: impl Into<String>,
+        strand: Strand,
+        exons: Vec<Exon>,
+    ) -> Self {
+        let tx_start = exons.iter().map(|e| e.genomic_start).min().unwrap_or(0);
+        let tx_end = exons.iter().map(|e| e.genomic_end).max().unwrap_or(0);
+        let exon_count = u16::try_from(exons.len()).unwrap_or(u16::MAX);
+        Self {
+            accession: accession.into(),
+            protein_accession: None,
+            gene_symbol: gene_symbol.into(),
+            hgnc_id: None,
+            ensembl_accession: None,
+            chrom: chrom.into(),
+            strand,
+            tx_start,
+            tx_end,
+            cds_genomic_start: None,
+            cds_genomic_end: None,
+            exons,
+            cds_segments: Vec::new(),
+            tier: None,
+            biotype: Biotype::Unknown,
+            exon_count,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
+        }
+    }
+
+    /// Set the CDS segments and derive `cds_genomic_start` / `cds_genomic_end`
+    /// from them (`None` for an empty list).
+    ///
+    /// # Arguments
+    ///
+    /// * `segments` - CDS segments in transcript order
+    pub fn with_cds_segments(mut self, segments: Vec<CdsSegment>) -> Self {
+        self.cds_genomic_start = segments.iter().map(|s| s.genomic_start).min();
+        self.cds_genomic_end = segments.iter().map(|s| s.genomic_end).max();
+        self.cds_segments = segments;
+        self
+    }
+
+    /// Set the protein accession.
+    ///
+    /// # Arguments
+    ///
+    /// * `protein_accession` - Versioned `NP_` / `ENSP` accession, or `None`
+    pub fn with_protein_accession(mut self, protein_accession: Option<String>) -> Self {
+        self.protein_accession = protein_accession;
+        self
+    }
+
+    /// Set the HGNC identifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `hgnc_id` - `HGNC:n`, or `None`
+    pub fn with_hgnc_id(mut self, hgnc_id: Option<String>) -> Self {
+        self.hgnc_id = hgnc_id;
+        self
+    }
+
+    /// Set the Ensembl transcript cross-reference.
+    ///
+    /// # Arguments
+    ///
+    /// * `ensembl_accession` - Versioned `ENST` accession, or `None`
+    pub fn with_ensembl_accession(mut self, ensembl_accession: Option<String>) -> Self {
+        self.ensembl_accession = ensembl_accession;
+        self
+    }
+
+    /// Set the curation tier.
+    ///
+    /// # Arguments
+    ///
+    /// * `tier` - The highest tier the transcript carries
+    pub fn with_tier(mut self, tier: TranscriptTier) -> Self {
+        self.tier = Some(tier);
+        self
+    }
+
+    /// Set the biotype.
+    ///
+    /// # Arguments
+    ///
+    /// * `biotype` - Transcript biotype
+    pub fn with_biotype(mut self, biotype: Biotype) -> Self {
+        self.biotype = biotype;
+        self
+    }
+
+    /// Set whether the CDS is complete at its 5' and 3' ends.
+    ///
+    /// # Arguments
+    ///
+    /// * `start_complete` - `false` for a 5'-incomplete CDS (`cds_start_NF`)
+    /// * `end_complete` - `false` for a 3'-incomplete CDS (`cds_end_NF`)
+    pub fn with_cds_completeness(mut self, start_complete: bool, end_complete: bool) -> Self {
+        self.cds_start_complete = start_complete;
+        self.cds_end_complete = end_complete;
+        self
+    }
+
+    /// Set the genome-mismatch flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `genome_mismatch` - The transcript sequence differs from the genome
+    /// * `cds_alignment_gap` - The genome alignment has a gap inside the CDS
+    pub fn with_genome_mismatch(mut self, genome_mismatch: bool, cds_alignment_gap: bool) -> Self {
+        self.genome_mismatch = genome_mismatch;
+        self.cds_alignment_gap = cds_alignment_gap;
+        self
+    }
+
+    /// Set the selenocysteine codon positions.
+    ///
+    /// # Arguments
+    ///
+    /// * `codons` - 0-based genomic start of each Sec codon; sorted here
+    pub fn with_selenocysteine_codons(mut self, mut codons: Vec<u64>) -> Self {
+        codons.sort_unstable();
+        self.selenocysteine_codons = codons;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +578,94 @@ mod tests {
         let decoded: Biotype = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, custom);
         assert_eq!(decoded.as_str(), "misc_RNA");
+    }
+
+    #[test]
+    fn transcript_source_labels_match_serde() {
+        for (source, label) in [
+            (TranscriptSource::Mane, "mane"),
+            (TranscriptSource::RefSeq, "refseq"),
+            (TranscriptSource::Gencode, "gencode"),
+        ] {
+            assert_eq!(source.as_str(), label);
+            assert_eq!(source.to_string(), label);
+            assert_eq!(
+                serde_json::to_value(source).expect("json"),
+                serde_json::json!(label)
+            );
+        }
+    }
+
+    #[test]
+    fn new_derives_span_and_defaults() {
+        let exons = vec![
+            Exon {
+                exon_number: 1,
+                genomic_start: 900,
+                genomic_end: 1_000,
+            },
+            Exon {
+                exon_number: 2,
+                genomic_start: 100,
+                genomic_end: 200,
+            },
+        ];
+        let model = TranscriptModel::new("NM_1.1", "G", "chr1", Strand::Minus, exons);
+        assert_eq!(
+            (model.tx_start, model.tx_end, model.exon_count),
+            (100, 1_000, 2)
+        );
+        assert_eq!(model.tier, None);
+        assert_eq!(model.biotype, Biotype::Unknown);
+        assert!(model.cds_start_complete && model.cds_end_complete);
+        assert!(!model.genome_mismatch && !model.cds_alignment_gap);
+        assert!(model.cds_segments.is_empty() && model.cds_genomic_start.is_none());
+    }
+
+    #[test]
+    fn new_without_exons_has_an_empty_span() {
+        let model = TranscriptModel::new("NM_1.1", "G", "chr1", Strand::Plus, Vec::new());
+        assert_eq!((model.tx_start, model.tx_end, model.exon_count), (0, 0, 0));
+    }
+
+    #[test]
+    fn setters_fill_every_optional_field() {
+        let exon = Exon {
+            exon_number: 1,
+            genomic_start: 0,
+            genomic_end: 500,
+        };
+        let segments = vec![CdsSegment {
+            exon_index: 0,
+            genomic_start: 100,
+            genomic_end: 400,
+            phase: 0,
+        }];
+        let model = TranscriptModel::new("ENST1.1", "G", "chr1", Strand::Plus, vec![exon])
+            .with_cds_segments(segments)
+            .with_protein_accession(Some("ENSP1.1".into()))
+            .with_hgnc_id(Some("HGNC:1".into()))
+            .with_ensembl_accession(None)
+            .with_tier(TranscriptTier::ManePlusClinical)
+            .with_biotype(Biotype::ProteinCoding)
+            .with_cds_completeness(false, true)
+            .with_genome_mismatch(true, true)
+            .with_selenocysteine_codons(vec![300, 120]);
+        assert_eq!(
+            (model.cds_genomic_start, model.cds_genomic_end),
+            (Some(100), Some(400))
+        );
+        assert_eq!(model.protein_accession.as_deref(), Some("ENSP1.1"));
+        assert_eq!(model.hgnc_id.as_deref(), Some("HGNC:1"));
+        assert_eq!(model.tier, Some(TranscriptTier::ManePlusClinical));
+        assert!(!model.cds_start_complete && model.cds_end_complete);
+        assert!(model.genome_mismatch && model.cds_alignment_gap);
+        assert_eq!(model.selenocysteine_codons, vec![120, 300]);
+        let cleared = model.with_cds_segments(Vec::new());
+        assert_eq!(
+            (cleared.cds_genomic_start, cleared.cds_genomic_end),
+            (None, None)
+        );
     }
 
     #[test]

@@ -65,9 +65,14 @@ pub fn plus_strand_coding() -> TranscriptModel {
                 phase: 0,
             },
         ],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 3,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -132,9 +137,14 @@ pub fn minus_strand_coding() -> TranscriptModel {
                 phase: 0,
             },
         ],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 3,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -172,9 +182,14 @@ pub fn single_exon_coding() -> TranscriptModel {
             genomic_end: 4_800,
             phase: 0,
         }],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::ProteinCoding,
         exon_count: 1,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }
 
@@ -205,8 +220,13 @@ pub fn noncoding_2_exon() -> TranscriptModel {
             },
         ],
         cds_segments: vec![],
-        tier: TranscriptTier::ManeSelect,
+        tier: Some(TranscriptTier::ManeSelect),
         biotype: Biotype::NonCodingRna,
         exon_count: 2,
+        cds_start_complete: true,
+        cds_end_complete: true,
+        genome_mismatch: false,
+        cds_alignment_gap: false,
+        selenocysteine_codons: Vec::new(),
     }
 }

@@ -12,8 +12,22 @@ For releases before `0.5.0`, see the git history.
 
 - A versioned transcript store format. `transcript_models.bin` now opens
   with a 12-byte header (magic `VEFXTXM\0` plus a `u32` little-endian format
-  version) followed by the MessagePack `Vec<TranscriptModel>`. The version is
-  checked before the payload is decoded.
+  version, 2 in this release) followed by a MessagePack payload: the
+  transcript source, its release and the `Vec<TranscriptModel>`. The version
+  is checked before the payload is decoded.
+- `TranscriptSource` (`Mane`, `RefSeq`, `Gencode`; `#[non_exhaustive]`), and
+  `TranscriptStore::source`, `TranscriptStore::source_release` and
+  `TranscriptStore::try_from_data`. `vareffect setup` records MANE and its
+  release in the store.
+- `TranscriptModel::new` and `with_*` setters. New model fields:
+  `cds_start_complete` / `cds_end_complete` (GENCODE `cds_start_NF` /
+  `cds_end_NF`, RefSeq partial CDS ranges), `genome_mismatch`,
+  `cds_alignment_gap` and `selenocysteine_codons`. MANE models are complete,
+  genome-matching and carry no selenocysteine codons yet.
+- Multi-locus accessions: one chrX and one chrY copy of a pseudoautosomal
+  transcript. `TranscriptStore::get_all_by_accession` returns every copy in
+  canonical chromosome order (`chrom::canonical_order_key`, then
+  `tx_start`). The MANE builder refuses any other repeated accession.
 - `TranscriptStore::from_bytes`, for callers that read the file themselves
   (for example to hash exactly the bytes they load).
   `TranscriptStore::load_from_path` now reads the file and calls it.
@@ -59,8 +73,29 @@ For releases before `0.5.0`, see the git history.
 
 ### Changed
 
+- **Breaking.** `TranscriptModel` is `#[non_exhaustive]` (build it with
+  `TranscriptModel::new`), `TranscriptModel::tier` is an
+  `Option<TranscriptTier>` (`None` for a transcript without a MANE or RefSeq
+  Select tag), and `encode_transcript_store` takes the source and release:
+  `encode_transcript_store(source, source_release, transcripts)`.
+- **Breaking.** `TranscriptStore` accepts an accession on two chromosomes;
+  the uniqueness rule is now per (accession, chromosome).
+  `get_by_accession`, and with it HGVS c. resolution, returns the first copy
+  in canonical chromosome order (chrX for a PAR transcript). Construction
+  also fails when `exon_count` disagrees with `exons`, or when a CDS with a
+  non-zero first phase is marked `cds_start_complete`.
+- **Breaking.** On a CDS marked `cds_start_complete = false`, codon 1 is not a
+  start codon even when it reads ATG: no `start_lost`,
+  `start_retained_variant` or `p.Met1?` (VEP 116 ENST00000616125.5 `c.1A>G`
+  is `missense_variant` `p.Met1Val`). On `cds_end_complete = false` the CDS
+  has no stop codon on the genome. A model flagged `cds_alignment_gap` gets
+  no HGVS c. or p., and `resolve_hgvs_c` refuses it with the new
+  `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3). No MANE 1.5 output
+  changes.
 - **Breaking.** Stores written by vareffect 0.5 and earlier are refused with
-  `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`. Rebuild
+  `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`, and
+  format 1 stores from development builds of 0.6 with
+  `found: StoreFormat::Version(1)`. Rebuild
   them with `vareffect setup` (the transcript store rebuilds in seconds from
   cached sources). A 0.5 reader given a 0.6 store fails at byte 0, so the CLI
   and every library consumer upgrade together.
@@ -113,14 +148,12 @@ For releases before `0.5.0`, see the git history.
   is an error at load time. The builder refuses a GFF3 that admits no
   transcripts instead of writing an empty store, which would annotate every
   variant as overlapping nothing.
-- The whole-file SHA-256 of a rebuilt store changes because of the header.
-  The models do not: for the MANE 1.5 GRCh38 store, `payload_sha256` equals
-  the 0.5 file's SHA-256 (`edff7c1416b2989a882186360c1782fefb33274edb6efe0441f5236a0ec38b84`).
-  To link provenance records across this upgrade, compute
-  `sha256(bytes[TRANSCRIPT_STORE_HEADER_LEN..])` over the bytes you loaded and
-  compare it with the 0.5 file SHA. That link holds only for this
-  header-only transition; across later format versions, key on
-  (`format_version`, `payload_sha256`).
+- The SHA-256 of a rebuilt store changes: the payload now holds the source,
+  the release and the new model fields. Identify a store by
+  (`format_version`, `payload_sha256`) from its manifest, never by
+  `payload_sha256` alone; the 0.5 file SHA does not link to any 0.6 value.
+  The MANE 1.5 GRCh38 models themselves are unchanged: every 0.5 field
+  holds the same value, with `tier` wrapped in `Some`.
 
 ### Fixed
 

@@ -297,9 +297,11 @@ impl LocateIndex {
     ///
     /// Returns [`VarEffectError::Malformed`] if a CDS phase is above 2, if a
     /// CDS boundary coordinate does
-    /// not fall within any exon, or if one exon holds more than one CDS
+    /// not fall within any exon, if one exon holds more than one CDS
     /// segment (a ribosomal-slippage CDS, which the codon walk cannot
-    /// represent).
+    /// represent), or if the first CDS phase is non-zero on a transcript
+    /// marked [`TranscriptModel::cds_start_complete`] (a partial first codon
+    /// cannot be a complete start).
     pub fn build(transcript: &TranscriptModel) -> Result<Self, VarEffectError> {
         let malformed =
             |msg: &str| VarEffectError::Malformed(format!("{}: {}", transcript.accession, msg));
@@ -315,6 +317,11 @@ impl LocateIndex {
             .cds_segments
             .first()
             .map_or(0, |seg| (3 - u32::from(seg.phase)) % 3);
+        if cds_start_pad != 0 && transcript.cds_start_complete {
+            return Err(malformed(
+                "non-zero first CDS phase on a CDS marked start-complete",
+            ));
+        }
 
         let mut cumulative_cds = Vec::with_capacity(transcript.cds_segments.len() + 1);
         cumulative_cds.push(cds_start_pad);

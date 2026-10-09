@@ -1,0 +1,5 @@
+# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-09, with numbers=1. Columns as vep_rest_wp1.tsv. Tool: tests/data/tools/vep_rows.py
+start_nf_atg_c1	1:925942-925942	A/G	ENST00000616125	missense_variant	MODERATE	ENST00000616125.5:c.1A>G	ENSP00000484643.1:p.Met1Val	1	1	1	Atg/Gtg	M/V	1/11	None	cds_start_NF
+start_nf_atg_c2	1:925943-925943	T/C	ENST00000616125	missense_variant	MODERATE	ENST00000616125.5:c.2T>C	ENSP00000484643.1:p.Met1Thr	2	2	1	aTg/aCg	M/T	1/11	None	cds_start_NF
+start_nf_atg_c3	1:925944-925944	G/A	ENST00000616125	missense_variant	MODERATE	ENST00000616125.5:c.3G>A	ENSP00000484643.1:p.Met1Ile	3	3	1	atG/atA	M/I	1/11	None	cds_start_NF
+start_nf_atg_codon_del	1:925942-925944	ATG/-	ENST00000616125	inframe_deletion	MODERATE	ENST00000616125.5:c.1_3del	ENSP00000484643.1:p.Met1del	1	1	1	ATG/-	M/-	1/11	None	cds_start_NF

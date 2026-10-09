@@ -1,14 +1,17 @@
 //! In-memory transcript store with per-chromosome interval tree indexing.
 //!
 //! The store is loaded from a versioned store file (a 12-byte header followed
-//! by a MessagePack `Vec<TranscriptModel>`, see [`encode_transcript_store`])
-//! produced offline by `vareffect-cli`. At load time it constructs:
+//! by a MessagePack payload naming the source, its release and the
+//! `Vec<TranscriptModel>`, see [`encode_transcript_store`]) produced offline
+//! by `vareffect-cli`. At load time it constructs:
 //!
 //! 1. A shared `Arc<[TranscriptModel]>` slice for O(1) index lookup and cheap
 //!    cross-thread sharing.
 //! 2. A `HashMap<chrom, COITree>` — one interval tree per chromosome, whose
 //!    payload is the index of the corresponding record in the slice.
-//! 3. A `HashMap<accession, index>` for O(1) direct lookup by accession.
+//! 3. A `HashMap<accession, indices>` for O(1) direct lookup by accession.
+//!    An accession maps to one model, or to two when a gene in a
+//!    pseudoautosomal region is annotated on both chrX and chrY.
 //!
 //! Query coordinates are **0-based half-open** `[start, end)`. Internally,
 //! coitrees uses end-inclusive `[first, last]`, so we convert both at
@@ -20,10 +23,11 @@ use std::sync::Arc;
 
 use coitrees::{COITree, IntervalNode, IntervalTree};
 
+use crate::chrom::canonical_order_key;
 use crate::error::VarEffectError;
 use crate::locate::LocateIndex;
 use crate::store_format::decode_transcript_store;
-use crate::types::TranscriptModel;
+use crate::types::{TranscriptModel, TranscriptSource};
 
 pub use crate::store_format::{
     StoreFormat, TRANSCRIPT_STORE_FORMAT_VERSION, TRANSCRIPT_STORE_HEADER_LEN,
@@ -34,8 +38,15 @@ pub use crate::store_format::{
 /// accession.
 ///
 /// Construct via [`TranscriptStore::load_from_path`] (production),
-/// [`TranscriptStore::from_bytes`] (a store file already in memory) or
+/// [`TranscriptStore::from_bytes`] (a store file already in memory),
+/// [`TranscriptStore::try_from_data`] (models with their source) or
 /// [`TranscriptStore::from_transcripts`] (tests and build-time callers).
+///
+/// An accession is unique per chromosome. The only repeated accessions a
+/// vareffect builder writes are the chrX and chrY copies of a
+/// pseudoautosomal (PAR) transcript; lookups by accession see them in
+/// canonical chromosome order ([`crate::chrom::canonical_order_key`], then
+/// `tx_start`), so the chrX copy comes first.
 ///
 /// `Debug` is implemented manually (the `COITree` field does not derive
 /// `Debug`); it prints a compact summary (`len`, chromosome count, first few
@@ -54,11 +65,16 @@ pub struct TranscriptStore {
     /// internal tree index type; `u32` is smaller than the default `usize`
     /// and is fine because no chromosome has > 4B transcripts.
     trees: HashMap<String, COITree<usize, u32>>,
-    /// Full accession (with version, e.g. `"NM_006772.2"`) → index into
-    /// `transcripts`. Version-less lookup is intentionally *not* provided
-    /// here; resolving an unversioned HGVS input to "the latest version"
-    /// belongs with the caller, not the raw store.
-    by_accession: HashMap<String, usize>,
+    /// Full accession (with version, e.g. `"NM_006772.2"`) → indices into
+    /// `transcripts`, in canonical chromosome order. Version-less lookup is
+    /// intentionally *not* provided here; resolving an unversioned HGVS
+    /// input to "the latest version" belongs with the caller, not the raw
+    /// store.
+    by_accession: HashMap<String, Vec<usize>>,
+    /// Annotation source recorded in the store, if any.
+    source: Option<TranscriptSource>,
+    /// Release of that source recorded in the store, if any.
+    source_release: Option<String>,
 }
 
 impl TranscriptStore {
@@ -101,13 +117,11 @@ impl TranscriptStore {
     /// * [`VarEffectError::Deserialize`] if the MessagePack payload is
     ///   malformed or the wrong type.
     /// * [`VarEffectError::Malformed`] if bytes follow the payload, or any
-    ///   record violates a coordinate invariant (`tx_end <= tx_start`,
-    ///   `tx_end > i32::MAX`, duplicate accession) or cannot be indexed (see
-    ///   [`LocateIndex::build`]: a CDS phase above 2, two CDS segments in one
-    ///   exon, a CDS boundary outside the exons).
+    ///   record violates an invariant of [`TranscriptStore::try_from_data`].
     /// * [`VarEffectError::EmptyStore`] if the store holds no transcripts.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, VarEffectError> {
-        Self::try_from_transcripts(decode_transcript_store(bytes)?)
+        let data = decode_transcript_store(bytes)?;
+        Self::try_from_data(data.source, data.source_release, data.transcripts)
     }
 
     /// Build a store from an owned `Vec<TranscriptModel>`.
@@ -119,15 +133,44 @@ impl TranscriptStore {
             .expect("TranscriptStore::from_transcripts: invariant violation in input")
     }
 
-    /// Fallible version of [`TranscriptStore::from_transcripts`].
+    /// Fallible version of [`TranscriptStore::from_transcripts`], with no
+    /// source or release recorded.
     ///
-    /// Used by the MessagePack loader so corrupt on-disk data surfaces as an
-    /// error rather than a panic.
+    /// # Errors
+    ///
+    /// Every error of [`TranscriptStore::try_from_data`].
     pub fn try_from_transcripts(transcripts: Vec<TranscriptModel>) -> Result<Self, VarEffectError> {
+        Self::try_from_data(None, None, transcripts)
+    }
+
+    /// Build a store from models and the source they came from.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Annotation source, returned by [`TranscriptStore::source`]
+    /// * `source_release` - Its release, returned by
+    ///   [`TranscriptStore::source_release`]
+    /// * `transcripts` - The models; lookups by accession order repeated
+    ///   accessions canonically, whatever their order here
+    ///
+    /// # Errors
+    ///
+    /// [`VarEffectError::Malformed`] if a record violates a coordinate
+    /// invariant (`tx_end <= tx_start`, a coordinate above `i32::MAX`,
+    /// `exon_count != exons.len()`), repeats an accession on the same
+    /// chromosome, or cannot be indexed (see [`LocateIndex::build`]: a CDS
+    /// phase above 2, two CDS segments in one exon, a CDS boundary outside
+    /// the exons, a non-zero first phase on a CDS marked start-complete).
+    pub fn try_from_data(
+        source: Option<TranscriptSource>,
+        source_release: Option<String>,
+        transcripts: Vec<TranscriptModel>,
+    ) -> Result<Self, VarEffectError> {
         // Per-chromosome scratch buckets so we can `COITree::new(&nodes)` once
         // per chromosome without re-sorting the global vec.
         let mut scratch: HashMap<String, Vec<IntervalNode<usize, u32>>> = HashMap::new();
-        let mut by_accession: HashMap<String, usize> = HashMap::with_capacity(transcripts.len());
+        let mut by_accession: HashMap<String, Vec<usize>> =
+            HashMap::with_capacity(transcripts.len());
 
         for (idx, tx) in transcripts.iter().enumerate() {
             // Invariant: tx_start < tx_end. Rejecting `==` catches zero-length
@@ -158,15 +201,28 @@ impl TranscriptStore {
                 )));
             }
 
-            // Insert a duplicate-accession guard. MANE is supposed to have
-            // unique (accession, version) tuples, but defending against dup
-            // keys means the builder cannot silently drop records.
-            if by_accession.insert(tx.accession.clone(), idx).is_some() {
+            if usize::from(tx.exon_count) != tx.exons.len() {
                 return Err(VarEffectError::Malformed(format!(
-                    "duplicate accession {} in transcript store",
-                    tx.accession
+                    "transcript {} has exon_count={} but {} exons",
+                    tx.accession,
+                    tx.exon_count,
+                    tx.exons.len()
                 )));
             }
+
+            // (accession, chrom) is unique, so a lookup can never silently
+            // pick one of two copies on the same chromosome.
+            let copies = by_accession.entry(tx.accession.clone()).or_default();
+            if copies
+                .iter()
+                .any(|&other| transcripts[other].chrom == tx.chrom)
+            {
+                return Err(VarEffectError::Malformed(format!(
+                    "duplicate accession {} on {} in transcript store",
+                    tx.accession, tx.chrom
+                )));
+            }
+            copies.push(idx);
 
             // Convert half-open [start, end) to end-inclusive [start, end-1]
             // for coitrees.
@@ -174,6 +230,14 @@ impl TranscriptStore {
             let end_i32 = (tx.tx_end - 1) as i32;
             let node = IntervalNode::new(start_i32, end_i32, idx);
             scratch.entry(tx.chrom.clone()).or_default().push(node);
+        }
+
+        for copies in by_accession.values_mut().filter(|copies| copies.len() > 1) {
+            copies.sort_by(|&a, &b| {
+                let (a, b) = (&transcripts[a], &transcripts[b]);
+                (canonical_order_key(&a.chrom), a.tx_start)
+                    .cmp(&(canonical_order_key(&b.chrom), b.tx_start))
+            });
         }
 
         let mut trees: HashMap<String, COITree<usize, u32>> = HashMap::with_capacity(scratch.len());
@@ -192,6 +256,8 @@ impl TranscriptStore {
             locate_indices: Arc::from(locate_indices.into_boxed_slice()),
             trees,
             by_accession,
+            source,
+            source_release,
         })
     }
 
@@ -254,11 +320,65 @@ impl TranscriptStore {
     }
 
     /// Direct lookup by full accession with version, e.g. `"NM_006772.2"`.
-    /// Returns both the transcript model and its precomputed [`LocateIndex`].
+    ///
+    /// For an accession on both chrX and chrY (a PAR transcript) this is the
+    /// first copy in canonical chromosome order, the chrX one; HGVS c.
+    /// resolution uses it too. [`TranscriptStore::get_all_by_accession`]
+    /// returns every copy, and overlap queries see every copy.
+    ///
+    /// # Arguments
+    ///
+    /// * `accession` - Versioned accession
+    ///
+    /// # Returns
+    ///
+    /// The transcript model and its precomputed [`LocateIndex`], or `None`
+    /// if the store has no such accession.
     pub fn get_by_accession(&self, accession: &str) -> Option<(&TranscriptModel, &LocateIndex)> {
+        self.get_all_by_accession(accession).next()
+    }
+
+    /// Every copy of an accession, in canonical chromosome order
+    /// ([`crate::chrom::canonical_order_key`], then `tx_start`).
+    ///
+    /// # Arguments
+    ///
+    /// * `accession` - Versioned accession
+    ///
+    /// # Returns
+    ///
+    /// An iterator over the models and their [`LocateIndex`]es: one item for
+    /// most accessions, two for a PAR transcript on chrX and chrY, none for
+    /// an unknown accession.
+    pub fn get_all_by_accession(
+        &self,
+        accession: &str,
+    ) -> impl ExactSizeIterator<Item = (&TranscriptModel, &LocateIndex)> + '_ {
         self.by_accession
             .get(accession)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
             .map(|&idx| (&self.transcripts[idx], &self.locate_indices[idx]))
+    }
+
+    /// The annotation source the store was built from.
+    ///
+    /// # Returns
+    ///
+    /// The recorded source, or `None` for a store built without one (for
+    /// example with [`TranscriptStore::from_transcripts`]).
+    pub fn source(&self) -> Option<TranscriptSource> {
+        self.source
+    }
+
+    /// The release of the annotation source the store was built from.
+    ///
+    /// # Returns
+    ///
+    /// The recorded release (e.g. `"1.5"` for MANE), or `None` if none was
+    /// recorded.
+    pub fn source_release(&self) -> Option<&str> {
+        self.source_release.as_deref()
     }
 
     /// Total number of transcripts in the store.
@@ -299,6 +419,8 @@ impl std::fmt::Debug for TranscriptStore {
             .map(|t| t.accession.as_str())
             .collect();
         f.debug_struct("TranscriptStore")
+            .field("source", &self.source)
+            .field("source_release", &self.source_release)
             .field("len", &self.transcripts.len())
             .field("chromosomes", &self.trees.len())
             .field("first_accessions", &accessions)
@@ -361,9 +483,14 @@ mod tests {
                     phase: 0,
                 },
             ],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 3,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -411,9 +538,14 @@ mod tests {
                 },
             ],
             cds_segments: vec![],
-            tier: TranscriptTier::ManePlusClinical,
+            tier: Some(TranscriptTier::ManePlusClinical),
             biotype: Biotype::ProteinCoding,
             exon_count: 5,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -436,9 +568,14 @@ mod tests {
                 genomic_end: 500,
             }],
             cds_segments: vec![],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::NonCodingRna,
             exon_count: 1,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -466,9 +603,14 @@ mod tests {
                 genomic_end: 1_400,
                 phase: 0,
             }],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::ProteinCoding,
             exon_count: 1,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }
     }
 
@@ -569,7 +711,8 @@ mod tests {
             minus_strand_5_exon(),
             noncoding_1_exon(),
         ];
-        let bytes = encode_transcript_store(&original).expect("encode");
+        let bytes = encode_transcript_store(Some(TranscriptSource::Mane), Some("1.5"), &original)
+            .expect("encode");
         let store = TranscriptStore::from_bytes(&bytes).expect("decode");
 
         let (tx, _) = store.get_by_accession("NM_000001.1").unwrap();
@@ -577,7 +720,7 @@ mod tests {
         assert_eq!(tx.exons.len(), 3);
         assert_eq!(tx.exons[0].genomic_start, 1_000);
         assert_eq!(tx.exons[2].genomic_end, 5_000);
-        assert_eq!(tx.tier, TranscriptTier::ManeSelect);
+        assert_eq!(tx.tier, Some(TranscriptTier::ManeSelect));
         assert_eq!(tx.cds_segments.len(), 3);
         assert_eq!(tx.cds_segments[0].phase, 0);
         assert_eq!(tx.cds_segments[1].phase, 2);
@@ -586,7 +729,7 @@ mod tests {
         assert_eq!(tx.biotype, Biotype::ProteinCoding);
 
         let (minus_tx, _) = store.get_by_accession("NM_000002.1").unwrap();
-        assert_eq!(minus_tx.tier, TranscriptTier::ManePlusClinical);
+        assert_eq!(minus_tx.tier, Some(TranscriptTier::ManePlusClinical));
         assert_eq!(minus_tx.ensembl_accession, None);
 
         let (nc, _) = store.get_by_accession("NR_000001.1").unwrap();
@@ -625,9 +768,14 @@ mod tests {
             cds_genomic_end: None,
             exons: vec![],
             cds_segments: vec![],
-            tier: TranscriptTier::ManeSelect,
+            tier: Some(TranscriptTier::ManeSelect),
             biotype: Biotype::Unknown,
             exon_count: 0,
+            cds_start_complete: true,
+            cds_end_complete: true,
+            genome_mismatch: false,
+            cds_alignment_gap: false,
+            selenocysteine_codons: Vec::new(),
         }];
         // Explicit match instead of `unwrap_err` because TranscriptStore
         // owns a COITree that does not implement Debug.
@@ -648,10 +796,113 @@ mod tests {
         }
     }
 
+    /// `plus_strand_3_exon` moved to `chrom` at `shift` bases further on.
+    fn copy_on(chrom: &str, shift: u64) -> TranscriptModel {
+        let mut tx = plus_strand_3_exon();
+        tx.chrom = chrom.into();
+        tx.tx_start += shift;
+        tx.tx_end += shift;
+        tx.cds_genomic_start = tx.cds_genomic_start.map(|p| p + shift);
+        tx.cds_genomic_end = tx.cds_genomic_end.map(|p| p + shift);
+        for exon in &mut tx.exons {
+            exon.genomic_start += shift;
+            exon.genomic_end += shift;
+        }
+        for segment in &mut tx.cds_segments {
+            segment.genomic_start += shift;
+            segment.genomic_end += shift;
+        }
+        tx
+    }
+
+    #[test]
+    fn multi_locus_accession_lookups_follow_canonical_order() {
+        // chrY before chrX in the input: lookups still give chrX first.
+        let store = TranscriptStore::from_transcripts(vec![
+            copy_on("chrY", 0),
+            noncoding_1_exon(),
+            copy_on("chrX", 50_000),
+        ]);
+        let (first, _) = store.get_by_accession("NM_000001.1").expect("present");
+        assert_eq!(first.chrom, "chrX");
+        let chroms: Vec<&str> = store
+            .get_all_by_accession("NM_000001.1")
+            .map(|(tx, _)| tx.chrom.as_str())
+            .collect();
+        assert_eq!(chroms, vec!["chrX", "chrY"]);
+        assert_eq!(store.get_all_by_accession("NR_000001.1").len(), 1);
+        assert_eq!(store.get_all_by_accession("NM_999999.1").len(), 0);
+        // Overlap queries see every copy.
+        assert_eq!(store.query_overlap("chrY", 1_500, 1_501).len(), 1);
+        assert_eq!(store.query_overlap("chrX", 51_500, 51_501).len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_repeated_accession_on_one_chromosome() {
+        let repeated = vec![copy_on("chrX", 0), copy_on("chrX", 50_000)];
+        match TranscriptStore::try_from_transcripts(repeated) {
+            Ok(_) => panic!("expected Malformed for a repeat on one chromosome"),
+            Err(VarEffectError::Malformed(msg)) => {
+                assert!(
+                    msg.contains("duplicate accession NM_000001.1 on chrX"),
+                    "{msg}"
+                );
+            }
+            Err(other) => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_an_exon_count_that_disagrees_with_the_exons() {
+        let mut tx = plus_strand_3_exon();
+        tx.exon_count = 2;
+        match TranscriptStore::try_from_transcripts(vec![tx]) {
+            Ok(_) => panic!("expected Malformed for exon_count"),
+            Err(VarEffectError::Malformed(msg)) => assert!(msg.contains("exon_count=2"), "{msg}"),
+            Err(other) => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_a_partial_first_codon_marked_start_complete() {
+        let mut tx = plus_strand_3_exon();
+        tx.cds_segments[0].phase = 1;
+        match TranscriptStore::try_from_transcripts(vec![tx.clone()]) {
+            Ok(_) => panic!("expected Malformed for a padded start-complete CDS"),
+            Err(VarEffectError::Malformed(msg)) => assert!(msg.contains("start-complete"), "{msg}"),
+            Err(other) => panic!("expected Malformed, got {other:?}"),
+        }
+        tx.cds_start_complete = false;
+        assert!(TranscriptStore::try_from_transcripts(vec![tx]).is_ok());
+    }
+
+    #[test]
+    fn source_and_release_are_kept() {
+        let bytes = encode_transcript_store(
+            Some(TranscriptSource::Gencode),
+            Some("50"),
+            &[plus_strand_3_exon()],
+        )
+        .expect("encode");
+        let store = TranscriptStore::from_bytes(&bytes).expect("decode");
+        assert_eq!(store.source(), Some(TranscriptSource::Gencode));
+        assert_eq!(store.source_release(), Some("50"));
+        let bare = build_sample_store();
+        assert_eq!((bare.source(), bare.source_release()), (None, None));
+        let direct = TranscriptStore::try_from_data(
+            Some(TranscriptSource::RefSeq),
+            Some("RS_2025_08".into()),
+            vec![noncoding_1_exon()],
+        )
+        .expect("build");
+        assert_eq!(direct.source(), Some(TranscriptSource::RefSeq));
+        assert_eq!(direct.source_release(), Some("RS_2025_08"));
+    }
+
     #[test]
     fn load_from_path_reads_a_versioned_store_file() {
         let file = tempfile::NamedTempFile::new().expect("tempfile");
-        let bytes = encode_transcript_store(&[plus_strand_3_exon()]).expect("encode");
+        let bytes = encode_transcript_store(None, None, &[plus_strand_3_exon()]).expect("encode");
         std::fs::write(file.path(), &bytes).expect("write");
         let store = TranscriptStore::load_from_path(file.path()).expect("load");
         assert!(store.get_by_accession("NM_000001.1").is_some());

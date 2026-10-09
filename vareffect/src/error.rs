@@ -164,6 +164,18 @@ pub enum VarEffectError {
         detail: String,
     },
 
+    /// HGVS c. cannot be mapped on this transcript: inside its CDS the
+    /// transcript has bases the genome lacks
+    /// ([`crate::TranscriptModel::cds_alignment_gap`]), so the genome-built
+    /// c. numbering is not the transcript's own.
+    #[error(
+        "HGVS c. numbering is unavailable for {accession}: its CDS alignment to the genome has a gap"
+    )]
+    CdsNumberingUnavailable {
+        /// Transcript accession for context.
+        accession: String,
+    },
+
     /// An HGVS c. notation string could not be parsed into structured
     /// components. The inner string describes what went wrong.
     #[error("failed to parse HGVS notation: {0}")]

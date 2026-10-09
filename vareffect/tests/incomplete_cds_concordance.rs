@@ -140,15 +140,36 @@ fn open_fasta() -> FastaReader {
     FastaReader::open(Path::new(&path)).unwrap_or_else(|e| panic!("open {path}: {e}"))
 }
 
-fn load_engine() -> VarEffect {
+fn load_models() -> Vec<TranscriptModel> {
     let text = std::fs::read_to_string(data_dir().join("incomplete_cds_transcripts.jsonl"))
         .expect("read transcript fixture");
-    let models: Vec<TranscriptModel> = text
-        .lines()
+    text.lines()
         .map(|line| serde_json::from_str(line).expect("transcript fixture line"))
-        .collect();
-    let store = TranscriptStore::try_from_transcripts(models).expect("fixture store");
+        .collect()
+}
+
+fn load_engine() -> VarEffect {
+    let store = TranscriptStore::try_from_transcripts(load_models()).expect("fixture store");
     VarEffect::new(store, open_fasta())
+}
+
+/// The fixture's store-format-2 flags, from the source GFF3 rows (not VEP):
+/// NM_001304717.5 has `Gap=M479 D1 M444` (a genomic base the transcript
+/// lacks, an exon split) and ENST00000616125.5 the `cds_start_NF` tag.
+#[test]
+fn fixture_flags_follow_the_source_annotation() {
+    let models = load_models();
+    let find = |accession: &str| {
+        models
+            .iter()
+            .find(|m| m.accession == accession)
+            .expect("fixture transcript")
+    };
+    let pten_l = find("NM_001304717.5");
+    assert!(pten_l.genome_mismatch && !pten_l.cds_alignment_gap);
+    let start_nf = find("ENST00000616125.5");
+    assert!(!start_nf.cds_start_complete && start_nf.cds_end_complete);
+    assert_eq!(start_nf.cds_segments[0].phase, 0);
 }
 
 /// One recorded VEP row.
@@ -230,7 +251,12 @@ fn expected_terms(row: &VepRow) -> BTreeSet<String> {
 /// VEP's HGVS p. with normalization 2 applied, without the accession.
 fn expected_hgvsp(row: &VepRow) -> Option<String> {
     let has_term = |term: &str| row.consequences.iter().any(|t| t == term);
-    if has_term("stop_gained") && has_term("incomplete_terminal_codon_variant") {
+    // Only where VEP writes an HGVS c.: when its 3' shift moves an insertion
+    // past the CDS (row partial3_ins_5p_edge_tag) neither tool writes a p.
+    if has_term("stop_gained")
+        && has_term("incomplete_terminal_codon_variant")
+        && row.hgvsc.is_some()
+    {
         return Some("p.?".to_string());
     }
     let p = row.hgvsp.as_deref()?.split_once(':').map(|(_, p)| p)?;

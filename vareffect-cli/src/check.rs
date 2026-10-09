@@ -336,29 +336,26 @@ output_dir = "{output_dir}"
 
     /// A complete one-transcript store as `vareffect setup` writes it.
     fn versioned_store() -> Vec<u8> {
-        let transcript = vareffect::TranscriptModel {
-            accession: "NM_000001.1".into(),
-            protein_accession: None,
-            gene_symbol: "FAKE1".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr1".into(),
-            strand: vareffect::Strand::Plus,
-            tx_start: 1_000,
-            tx_end: 2_000,
-            cds_genomic_start: None,
-            cds_genomic_end: None,
-            exons: vec![vareffect::Exon {
-                exon_number: 1,
-                genomic_start: 1_000,
-                genomic_end: 2_000,
-            }],
-            cds_segments: Vec::new(),
-            tier: vareffect::TranscriptTier::ManeSelect,
-            biotype: vareffect::Biotype::NonCodingRna,
-            exon_count: 1,
+        let exon = vareffect::Exon {
+            exon_number: 1,
+            genomic_start: 1_000,
+            genomic_end: 2_000,
         };
-        vareffect::encode_transcript_store(&[transcript]).expect("encode")
+        let transcript = vareffect::TranscriptModel::new(
+            "NM_000001.1",
+            "FAKE1",
+            "chr1",
+            vareffect::Strand::Plus,
+            vec![exon],
+        )
+        .with_tier(vareffect::TranscriptTier::ManeSelect)
+        .with_biotype(vareffect::Biotype::NonCodingRna);
+        vareffect::encode_transcript_store(
+            Some(vareffect::TranscriptSource::Mane),
+            Some("1.5"),
+            &[transcript],
+        )
+        .expect("encode")
     }
 
     #[test]

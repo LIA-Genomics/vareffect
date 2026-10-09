@@ -347,7 +347,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         Strand::Plus => start < cds_genomic_start,
         Strand::Minus => end > cds_genomic_end,
     };
-    let start_codon_complete = has_complete_start_codon(locate_index);
+    let start_codon_complete = has_complete_start_codon(transcript, locate_index);
     // A 5'-incomplete CDS has no start codon to lose, and VEP's frame
     // predicates short-circuit on the undefined `cds_start` the same way, so
     // a deletion running in from the 5'UTR is only a coding change.
@@ -714,9 +714,9 @@ pub(super) fn annotate_boundary_spanning_deletion(
         cdna_position_end: Some(cdna_end),
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-        is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-        is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
         hgvs_c: None,
         hgvs_p,
         predicts_nmd,
@@ -899,7 +899,7 @@ fn annotate_complex_delins_core(
                 let mut consequences = Vec::new();
 
                 if first_codon == 0
-                    && has_complete_start_codon(locate_index)
+                    && has_complete_start_codon(transcript, locate_index)
                     && alt_aas.first() != Some(&b'M')
                 {
                     consequences.push(Consequence::StartLost);
@@ -974,9 +974,10 @@ fn annotate_complex_delins_core(
                     cdna_position_end: Some(cdna_end),
                     strand: transcript.strand,
                     biotype: transcript.biotype.clone(),
-                    is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-                    is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-                    is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+                    is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+                    is_mane_plus_clinical: transcript.tier
+                        == Some(TranscriptTier::ManePlusClinical),
+                    is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
                     hgvs_c: None,
                     hgvs_p,
                     predicts_nmd: nmd,
@@ -1159,7 +1160,8 @@ fn annotate_mnv_core(
                 .iter()
                 .zip(alt_aas.iter())
                 .any(|(r, a)| r != a && *r != b'X' && *a != b'X');
-            let is_start_codon = first_codon == 0 && has_complete_start_codon(locate_index);
+            let is_start_codon =
+                first_codon == 0 && has_complete_start_codon(transcript, locate_index);
             if has_unknown && !known_change {
                 consequences.push(Consequence::CodingSequenceVariant);
             } else if all_same {
@@ -1248,9 +1250,9 @@ fn annotate_mnv_core(
                 cdna_position_end: Some(cdna_end),
                 strand: transcript.strand,
                 biotype: transcript.biotype.clone(),
-                is_mane_select: transcript.tier == TranscriptTier::ManeSelect,
-                is_mane_plus_clinical: transcript.tier == TranscriptTier::ManePlusClinical,
-                is_refseq_select: transcript.tier == TranscriptTier::RefSeqSelect,
+                is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
+                is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
+                is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
                 hgvs_c: hgvs,
                 hgvs_p,
                 predicts_nmd,

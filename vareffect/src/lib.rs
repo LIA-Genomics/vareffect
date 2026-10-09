@@ -153,7 +153,8 @@ pub use locate::{
 };
 pub use transcript::{StoreFormat, TranscriptStore, encode_transcript_store};
 pub use types::{
-    Biotype, CdsSegment, Exon, GenomicVariant, Strand, TranscriptModel, TranscriptTier,
+    Biotype, CdsSegment, Exon, GenomicVariant, Strand, TranscriptModel, TranscriptSource,
+    TranscriptTier,
 };
 pub use var_effect::VarEffect;
 
