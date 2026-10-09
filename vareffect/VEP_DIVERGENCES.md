@@ -228,7 +228,7 @@ no translation):
 | `frameshift_variant` | yes | Drives NMD prediction. |
 | `inframe_insertion` | yes | |
 | `inframe_deletion` | yes | |
-| `protein_altering_variant` | yes | Length-preserving complex changes. |
+| `protein_altering_variant` | yes | Length-preserving complex changes; in-frame insertions inside a codon whose peptide neither starts nor ends with the reference residue. |
 | `coding_sequence_variant` | yes | Ambiguous codons, partial codons, frameshift introns of coding transcripts. |
 | `incomplete_terminal_codon_variant` | yes | CDS length not divisible by 3. |
 | `splice_donor_variant` | yes | Intron +1, +2; the exon base after a one-base frameshift intron. |
@@ -319,5 +319,28 @@ for exon numbers) next to it.
   misalignment offset (`hgvs_transcript`). `vareffect` has no edit
   attributes and builds HGVS from the genome, so HGVS c. and p. can differ
   on those transcripts. MANE transcripts match the genome.
+- **Start-codon insertions.** An in-frame insertion inside codon 1 gets
+  VEP's terms (`_inv_start_altered` calls `start_lost` whenever a transcript
+  with a 5'UTR no longer has `ATG` at the start position). When it is
+  `start_lost`, VEP 116 reads the residue before position 1 with a negative
+  string offset, which yields the protein's last residue, and writes it as a
+  range (NM_000546.6 `c.1_2insCGA`: `p.Asp1_?0`, Asp393); `vareffect` writes
+  `p.Met1?`. The same offset gives VEP text such as `p.Asp0_Asp1ins...` for
+  a `start_retained_variant` insertion that clips before residue 1 on a
+  transcript without a 5'UTR; `vareffect` writes no HGVS p. there.
+- **Unknown bases in in-frame insertions.** An inserted `N` gives VEP 116
+  no peptide, so the insertion is `coding_sequence_variant` (or
+  `start_retained_variant` inside codon 1) with no amino acids or HGVS p.,
+  as in `vareffect`. Before its stop-codon overlap test VEP adds the
+  inserted length to the genomic start (`_overlaps_stop_codon_cil`), which
+  on the minus strand reaches back over the stop codon from up to the
+  insertion's length upstream; VEP then calls `stop_retained_variant`
+  (NM_000546.6 `c.1180_1181insNNN`, and long N-containing ClinVar insertions
+  such as NM_024675.4 near residue 1167). `vareffect` keeps
+  `coding_sequence_variant`.
 - **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
-  resolve to `chrM` through the reader's alias table.
+  resolve to `chrM` through the reader's alias table. VEP's in-frame
+  insertion duplication check (`_check_for_peptide_duplication`) translates
+  the reference with the standard table even on `chrM`; `vareffect` uses
+  table 2 there too, so an HGVS p. `dup` can differ where `TGA`, `AGA`,
+  `AGG` or `ATA` codons precede the insertion.

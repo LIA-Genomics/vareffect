@@ -678,158 +678,208 @@ pub(crate) fn format_hgvs_p_inframe_del(
     }
 }
 
-/// Generate HGVS p. notation for an inframe insertion.
+/// Reference protein residues read on demand, for placing an in-frame
+/// insertion's HGVS p. against the whole protein rather than a codon window.
+pub(crate) trait ReferenceProtein {
+    /// Number of residues before the terminal stop codon (VEP's `_peptide`
+    /// length).
+    fn residue_count(&self) -> u32;
+
+    /// Residues `[start, end)` by 0-based index, `end <= residue_count()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the coding sequence cannot be read.
+    fn residues(&self, start: u32, end: u32) -> Result<Vec<u8>, VarEffectError>;
+}
+
+/// The peptides of an in-frame insertion in VEP's codon window
+/// (`TranscriptVariationAllele::codon`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InsertionPeptides {
+    /// Reference peptide; empty for an insertion between two codons.
+    pub ref_aas: Vec<u8>,
+    /// Alternate peptide.
+    pub alt_aas: Vec<u8>,
+    /// 1-based residue VEP's `translation_start` gives: the codon holding the
+    /// insertion, or the codon after it at a codon boundary.
+    pub tl_start: u32,
+    /// 1-based residue VEP's `translation_end` gives: `tl_start` inside a
+    /// codon, `tl_start - 1` at a codon boundary.
+    pub tl_end: u32,
+}
+
+/// Residues read per step while shifting an inserted peptide 3'.
+const SHIFT_CHUNK: u32 = 32;
+
+/// Generate HGVS p. notation for an in-frame insertion, as VEP 116's
+/// `hgvs_protein` does.
 ///
-/// Checks for duplication first (inserted AAs match the immediately
-/// preceding reference), then formats as insertion or duplication.
+/// Port of `TranscriptVariationAllele.pm` (release/116): `_clip_alleles`
+/// (common prefix and suffix, left unclipped when both peptides start with a
+/// stop), `_get_hgvs_protein_type`, `_check_peptides_post_var` and
+/// `_shift_3prime` (the inserted peptide shifts C-terminal across the whole
+/// protein), `_check_for_peptide_duplication`, `_get_surrounding_peptides`
+/// and `_get_hgvs_protein_format`. VEP 116 writes `p.Glu199_Tyr200insTer`
+/// (NM_001625.4 c.597_599dup), `p.Ter394delinsTer` and
+/// `p.Ter394delinsTrpGly` (NM_000546.6 c.1180_1181insAAG / insGGG), and no
+/// HGVS p. for a non-duplicating insertion just before the stop codon
+/// (NM_000546.6 c.1179_1180insCTGTAA).
 ///
 /// # Arguments
 ///
-/// * `ref_aas` — reference amino acid(s) at the affected codon
-/// * `alt_aas` — alternate amino acids (longer than ref)
-/// * `protein_start` — 1-based position of the affected codon
-/// * `consequences` — SO consequence terms
-/// * `right_flanking_aa` — amino acid at `protein_start + 1` (next codon,
-///   needed for HGVS flanking position notation)
+/// * `peptides` -- reference and alternate peptides at the HGVS (3'-shifted)
+///   insertion point
+/// * `protein` -- reference protein of the transcript
+///
+/// # Returns
+///
+/// The notation without accession, or `None` where VEP writes none.
+///
+/// # Errors
+///
+/// Returns an error if reference residues cannot be read.
 pub(crate) fn format_hgvs_p_inframe_ins(
-    ref_aas: &[u8],
-    alt_aas: &[u8],
-    protein_start: u32,
-    consequences: &[Consequence],
-    right_flanking_aa: u8,
-) -> Option<String> {
-    if consequences.contains(&Consequence::StartLost) {
-        return Some("p.Met1?".to_string());
-    }
-    if consequences.contains(&Consequence::StopLost) {
-        return None;
-    }
+    peptides: &InsertionPeptides,
+    protein: &impl ReferenceProtein,
+) -> Result<Option<String>, VarEffectError> {
+    let original_ref = peptides.ref_aas.as_slice();
+    let mut ref_aas = original_ref;
+    let mut alt_aas = peptides.alt_aas.as_slice();
+    let mut start = i64::from(peptides.tl_start);
+    let mut end = i64::from(peptides.tl_end);
 
-    // Strip common prefix and suffix to isolate inserted AAs.
-    let prefix_len = ref_aas
-        .iter()
-        .zip(alt_aas.iter())
-        .take_while(|(r, a)| r == a)
-        .count();
-
-    let ref_tail = &ref_aas[prefix_len..];
-    let alt_tail = &alt_aas[prefix_len..];
-    let suffix_len = ref_tail
-        .iter()
-        .rev()
-        .zip(alt_tail.iter().rev())
-        .take_while(|(r, a)| r == a)
-        .count();
-
-    let remaining_ref = &ref_aas[prefix_len..ref_aas.len() - suffix_len];
-    let inserted_aas = &alt_aas[prefix_len..alt_aas.len() - suffix_len];
-
-    if inserted_aas.is_empty() {
-        return None; // no actual insertion
-    }
-
-    // If ref portion is non-empty, this is really a delins.
-    if !remaining_ref.is_empty() {
-        let start_pos = protein_start + prefix_len as u32;
-        let end_pos = start_pos + remaining_ref.len() as u32 - 1;
-        let alt_display = truncate_at_stop(inserted_aas);
-        if remaining_ref.len() == 1 {
-            return Some(format!(
-                "p.{}{}delins{}",
-                aa_three_letter(remaining_ref[0]),
-                start_pos,
-                format_aa_sequence(alt_display),
-            ));
+    // `_clip_alleles` returns before clipping anything when the next residues
+    // are both stops.
+    let both_stop = |r: &[u8], a: &[u8]| r.first() == Some(&b'*') && a.first() == Some(&b'*');
+    let mut unclipped = false;
+    while let (Some(&r), Some(&a)) = (ref_aas.first(), alt_aas.first()) {
+        if both_stop(ref_aas, alt_aas) {
+            unclipped = true;
+            break;
         }
-        return Some(format!(
-            "p.{}{}_{}{}delins{}",
-            aa_three_letter(remaining_ref[0]),
-            start_pos,
-            aa_three_letter(
-                *remaining_ref
-                    .last()
-                    .expect("remaining_ref verified non-empty")
-            ),
-            end_pos,
-            format_aa_sequence(alt_display),
-        ));
-    }
-
-    // Pure insertion. Check if stop gained (alone).
-    if consequences.contains(&Consequence::StopGained) && inserted_aas == *b"*" {
-        // The insertion introduced a premature stop at the ref codon position.
-        let pos = protein_start + prefix_len as u32;
-        if prefix_len > 0 {
-            let ref_aa = ref_aas[prefix_len - 1];
-            return Some(format!("p.{}{}Ter", aa_three_letter(ref_aa), pos));
+        if r != a {
+            break;
         }
+        ref_aas = &ref_aas[1..];
+        alt_aas = &alt_aas[1..];
+        start += 1;
     }
-
-    // Duplication check: do the inserted AAs match the immediately
-    // preceding (N-terminal) reference AAs?
-    let ins_len = inserted_aas.len();
-    if prefix_len >= ins_len {
-        let preceding = &ref_aas[prefix_len - ins_len..prefix_len];
-        if preceding == inserted_aas {
-            // Duplication. Apply protein 3' rule.
-            let dup_start_0based = prefix_len - ins_len;
-            let adjusted = apply_protein_3prime_rule(ref_aas, ins_len, dup_start_0based);
-            let dup_start = protein_start + adjusted as u32;
-
-            if ins_len == 1 {
-                let aa = ref_aas[adjusted];
-                return Some(format!("p.{}{}dup", aa_three_letter(aa), dup_start));
-            }
-            let first_aa = ref_aas[adjusted];
-            let last_aa = ref_aas[adjusted + ins_len - 1];
-            let dup_end = dup_start + ins_len as u32 - 1;
-            return Some(format!(
-                "p.{}{}_{}{}dup",
-                aa_three_letter(first_aa),
-                dup_start,
-                aa_three_letter(last_aa),
-                dup_end,
-            ));
-        }
-    }
-
-    // Insertion notation: p.{Left}_{Right}ins{Inserted}
-    let left_aa;
-    let left_pos;
-    let right_aa;
-    let right_pos;
-
-    if prefix_len > 0 && prefix_len <= ref_aas.len() {
-        left_aa = ref_aas[prefix_len - 1];
-        left_pos = protein_start + prefix_len as u32 - 1;
-        // Right flanking: if the insertion is at the end of the ref
-        // window, use the caller-provided next codon AA.
-        if prefix_len < ref_aas.len() {
-            right_aa = ref_aas[prefix_len];
-            right_pos = left_pos + 1;
-        } else {
-            right_aa = right_flanking_aa;
-            right_pos = left_pos + 1;
-        }
+    if unclipped {
+        ref_aas = original_ref;
+        alt_aas = &peptides.alt_aas;
+        start = i64::from(peptides.tl_start);
     } else {
-        // Insertion at position 0 within the codon window — edge case.
-        left_aa = ref_aas[0];
-        left_pos = protein_start;
-        right_aa = right_flanking_aa;
-        right_pos = left_pos + 1;
+        while let (Some(&r), Some(&a)) = (ref_aas.last(), alt_aas.last()) {
+            if r != a {
+                break;
+            }
+            ref_aas = &ref_aas[..ref_aas.len() - 1];
+            alt_aas = &alt_aas[..alt_aas.len() - 1];
+            end -= 1;
+        }
     }
 
-    // Truncate inserted AAs at stop if present.
-    let ins_display = truncate_at_stop(inserted_aas);
+    if !ref_aas.is_empty() {
+        // `delins`: one residue after clipping, or the unclipped stop codon.
+        let alt = format_aa_sequence(truncate_at_stop(alt_aas));
+        let first = aa_three_letter(ref_aas[0]);
+        if start == end {
+            return Ok(Some(format!("p.{first}{start}delins{alt}")));
+        }
+        let (lo, hi) = (start.min(end), start.max(end));
+        let last = aa_three_letter(*ref_aas.last().expect("ref_aas checked non-empty"));
+        return Ok(Some(format!("p.{first}{lo}_{last}{hi}delins{alt}")));
+    }
 
-    Some(format!(
+    // `ins`. VEP turns the first stop into `X` before shifting, so the
+    // inserted peptide never rotates past it and never matches as a dup; a
+    // marker that matches no residue does the same without being confused
+    // with an unknown amino acid.
+    const STOP_MARKER: u8 = 0;
+    let mut inserted = alt_aas.to_vec();
+    if let Some(stop) = inserted.iter().position(|&aa| aa == b'*') {
+        inserted[stop] = STOP_MARKER;
+    }
+    let count = i64::from(protein.residue_count());
+    // `_get_surrounding_peptides` reads the protein with the original
+    // reference peptide appended when that starts with a stop.
+    let stop_tail: &[u8] = if original_ref.first() == Some(&b'*') {
+        original_ref
+    } else {
+        &[]
+    };
+    let surrounding_len = count + stop_tail.len() as i64;
+    let surrounding = |from: i64, to: i64| -> Result<Vec<u8>, VarEffectError> {
+        let mut out = Vec::new();
+        if from < count {
+            out = protein.residues(from as u32, to.min(count) as u32)?;
+        }
+        for i in from.max(count)..to.min(surrounding_len) {
+            out.push(stop_tail[(i - count) as usize]);
+        }
+        Ok(out)
+    };
+
+    // `_check_peptides_post_var` reads from residue `end + 1` (0-based index
+    // `end`) and shifts nothing unless the protein extends past it.
+    let post_start = end;
+    if surrounding_len > end + 1 {
+        let post_len = surrounding_len - post_start;
+        let max_steps = post_len - inserted.len() as i64;
+        let mut step = 0;
+        'shift: while step <= max_steps {
+            let chunk_end = (post_start + step + i64::from(SHIFT_CHUNK)).min(surrounding_len);
+            let chunk = surrounding(post_start + step, chunk_end)?;
+            for &next in &chunk {
+                if step > max_steps || inserted[0] != next {
+                    break 'shift;
+                }
+                inserted.rotate_left(1);
+                start += 1;
+                end += 1;
+                step += 1;
+            }
+        }
+    }
+
+    // `_check_for_peptide_duplication`.
+    let len = inserted.len() as i64;
+    let dup_from = start - len - 1;
+    if dup_from >= 0 && !inserted.contains(&b'*') {
+        let upstream = surrounding(dup_from, dup_from + len)?;
+        if upstream == inserted {
+            let dup_start = start - len;
+            let dup_end = start - 1;
+            let first = aa_three_letter(inserted[0]);
+            if dup_start < dup_end {
+                let last = aa_three_letter(inserted[inserted.len() - 1]);
+                return Ok(Some(format!("p.{first}{dup_start}_{last}{dup_end}dup")));
+            }
+            return Ok(Some(format!("p.{first}{dup_start}dup")));
+        }
+    }
+
+    // `p.{R1}{m}_{R2}{m+1}ins...` with `m = min(start, end)`; none when the
+    // protein has no residue after `m`.
+    let m = start.min(end);
+    if m < 1 || surrounding_len <= m {
+        return Ok(None);
+    }
+    let flank = surrounding(m - 1, m + 1)?;
+    for aa in &mut inserted {
+        if *aa == STOP_MARKER {
+            *aa = b'*';
+        }
+    }
+    Ok(Some(format!(
         "p.{}{}_{}{}ins{}",
-        aa_three_letter(left_aa),
-        left_pos,
-        aa_three_letter(right_aa),
-        right_pos,
-        format_aa_sequence(ins_display),
-    ))
+        aa_three_letter(flank[0]),
+        m,
+        aa_three_letter(flank[1]),
+        m + 1,
+        format_aa_sequence(truncate_at_stop(&inserted)),
+    )))
 }
 
 /// Generate HGVS p. notation for an inframe delins or MNV.
@@ -1293,34 +1343,132 @@ mod tests {
     // Inframe insertion
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn inframe_ins_simple() {
-        // ref=[K], alt=[K,Q,S,K], protein_start=2, right_flanking=M
-        let result =
-            format_hgvs_p_inframe_ins(b"K", b"KQSK", 2, &[Consequence::InframeInsertion], b'M');
-        assert_eq!(result.as_deref(), Some("p.Lys2_Met3insGlnSerLys"));
+    /// An in-memory reference protein without its terminal stop.
+    struct TestProtein(&'static [u8]);
+
+    impl ReferenceProtein for TestProtein {
+        fn residue_count(&self) -> u32 {
+            self.0.len() as u32
+        }
+
+        fn residues(&self, start: u32, end: u32) -> Result<Vec<u8>, VarEffectError> {
+            Ok(self.0[start as usize..end as usize].to_vec())
+        }
+    }
+
+    fn ins_p(
+        protein: &'static [u8],
+        ref_aas: &[u8],
+        alt_aas: &[u8],
+        tl: (u32, u32),
+    ) -> Option<String> {
+        let peptides = InsertionPeptides {
+            ref_aas: ref_aas.to_vec(),
+            alt_aas: alt_aas.to_vec(),
+            tl_start: tl.0,
+            tl_end: tl.1,
+        };
+        format_hgvs_p_inframe_ins(&peptides, &TestProtein(protein)).expect("in-memory protein")
     }
 
     #[test]
-    fn inframe_ins_dup_single() {
-        // ref=[K], alt=[K,K], protein_start=5, right_flanking=M
-        // Inserted K matches preceding K → p.Lys5dup
-        let result =
-            format_hgvs_p_inframe_ins(b"K", b"KK", 5, &[Consequence::InframeInsertion], b'M');
-        assert_eq!(result.as_deref(), Some("p.Lys5dup"));
-    }
-
-    #[test]
-    fn inframe_ins_with_stop() {
-        // Inserted sequence contains stop → include Ter
-        let result = format_hgvs_p_inframe_ins(
-            b"P",
-            b"PG*",
-            2,
-            &[Consequence::InframeInsertion, Consequence::StopGained],
-            b'I',
+    fn inframe_ins_between_codons() {
+        // VEP 116 NM_000059.4 CDS 42/43 shape: `-/L` between Ile and Phe.
+        assert_eq!(
+            ins_p(b"MPIFST", b"", b"L", (4, 3)).as_deref(),
+            Some("p.Ile3_Phe4insLeu")
         );
-        assert_eq!(result.as_deref(), Some("p.Pro2_Ile3insGlyTer"));
+    }
+
+    #[test]
+    fn inframe_ins_inside_codon_clips_the_reference() {
+        // NM_000546.6 c.525_526insAGC shape: `R/RS` -> p.Arg175_Cys176insSer.
+        assert_eq!(
+            ins_p(b"MARCD", b"R", b"RS", (3, 3)).as_deref(),
+            Some("p.Arg3_Cys4insSer")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_inside_codon_without_flank_is_delins() {
+        // NM_000546.6 c.523_524insTTT: `R/LC` -> p.Arg175delinsLeuCys.
+        assert_eq!(
+            ins_p(b"MARCD", b"R", b"LC", (3, 3)).as_deref(),
+            Some("p.Arg3delinsLeuCys")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_dup_shifts_across_the_whole_repeat() {
+        assert_eq!(
+            ins_p(b"MAKKKKD", b"", b"K", (3, 2)).as_deref(),
+            Some("p.Lys6dup")
+        );
+        assert_eq!(
+            ins_p(b"MAGSGSD", b"", b"GS", (3, 2)).as_deref(),
+            Some("p.Gly5_Ser6dup")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_of_a_stop_is_an_insertion() {
+        // VEP 116 NM_206933.4 c.987_988insTAA (`-/*`) and NM_001625.4
+        // c.597_599dup (`E/E*`): p.Asp329_Asn330insTer, p.Glu199_Tyr200insTer.
+        assert_eq!(
+            ins_p(b"MEYQ", b"", b"*", (3, 2)).as_deref(),
+            Some("p.Glu2_Tyr3insTer")
+        );
+        assert_eq!(
+            ins_p(b"MEYQ", b"E", b"E*", (2, 2)).as_deref(),
+            Some("p.Glu2_Tyr3insTer")
+        );
+        // NM_000374.5 c.385_386insAGT (`S/*S`): p.Ala128_Ser129insTer.
+        assert_eq!(
+            ins_p(b"MASQ", b"S", b"*S", (3, 3)).as_deref(),
+            Some("p.Ala2_Ser3insTer")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_keeps_unknown_residues_apart_from_the_stop() {
+        assert_eq!(
+            ins_p(b"MEYQ", b"", b"GX*", (3, 2)).as_deref(),
+            Some("p.Glu2_Tyr3insGlyXaaTer")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_before_the_stop_codon_has_no_notation() {
+        // VEP 116 NM_000546.6 c.1179_1180insCTGTAA (`-/L*`): no HGVS p.
+        assert_eq!(ins_p(b"MKD", b"", b"L*", (4, 3)), None);
+    }
+
+    #[test]
+    fn inframe_ins_does_not_shift_onto_the_last_residue_alone() {
+        // `_get_surrounding_peptides` gives no post sequence for the last
+        // residue, so the insertion stays where it is.
+        assert_eq!(
+            ins_p(b"MKAD", b"", b"D", (4, 3)).as_deref(),
+            Some("p.Ala3_Asp4insAsp")
+        );
+    }
+
+    #[test]
+    fn inframe_ins_inside_the_stop_codon() {
+        // VEP 116 NM_000546.6 c.1180_1181insAAG (`*/*G`) and insGGG (`*/WG`).
+        assert_eq!(
+            ins_p(b"MKD", b"*", b"*G", (4, 4)).as_deref(),
+            Some("p.Ter4delinsTer")
+        );
+        assert_eq!(
+            ins_p(b"MKD", b"*", b"WG", (4, 4)).as_deref(),
+            Some("p.Ter4delinsTrpGly")
+        );
+        // The flank reaches the stop codon through the reference peptide.
+        assert_eq!(
+            ins_p(b"MKD", b"*", b"L*", (4, 4)).as_deref(),
+            Some("p.Asp3_Ter4insLeu")
+        );
     }
 
     // -----------------------------------------------------------------------

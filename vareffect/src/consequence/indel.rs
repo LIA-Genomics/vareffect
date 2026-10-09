@@ -2,8 +2,8 @@
 
 use super::helpers::{
     add_splice_spill, build_base_result, compute_cdna_position_exonic,
-    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
-    has_complete_start_codon, is_incomplete_terminal_codon,
+    compute_cdna_position_for_cds, ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon,
+    finalize_consequences, has_complete_start_codon, is_incomplete_terminal_codon,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -1107,16 +1107,282 @@ struct ShiftedCdsInsertion<'a> {
     inserted_bases: &'a [u8],
 }
 
+/// VEP's codon window of an in-frame insertion
+/// (`TranscriptVariationAllele::codon`, release/116).
+///
+/// Between two codons VEP's `translation_end` is the codon before the
+/// insertion and `translation_start` the codon after it, so the reference
+/// codon is empty and the alternate is the inserted bases alone (VEP 116
+/// NM_000059.4 CDS 42/43: `-/TTA`, `-/L`). Inside a codon both are that codon
+/// (NM_000546.6 c.523_524insTTT: `cgc/cTTTgc`, `R/LC`).
+#[derive(Debug)]
+pub(super) struct InsertionCodons {
+    /// Reference codon on the coding strand; empty between two codons.
+    ref_codon: Vec<u8>,
+    /// `ref_codon` with the inserted bases spliced in.
+    alt_codon: Vec<u8>,
+    /// Index in `ref_codon` the bases are inserted at.
+    local: usize,
+    /// 0-based index of the codon holding the insertion, or of the codon
+    /// after it at a codon boundary.
+    codon_index: u32,
+    /// Translations of both codons and VEP's translation coordinates.
+    pub(super) peptides: crate::hgvs_p::InsertionPeptides,
+}
+
+impl InsertionCodons {
+    /// Build the window for `coding_inserted` (coding strand) inserted before
+    /// CDS offset `cds_offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reference codon cannot be read.
+    fn new(
+        cds_offset: u32,
+        coding_inserted: &[u8],
+        chrom: &str,
+        transcript: &TranscriptModel,
+        index: &LocateIndex,
+        fasta: &FastaReader,
+    ) -> Result<Self, VarEffectError> {
+        let codon_index = cds_offset / 3;
+        let local = (cds_offset % 3) as usize;
+        let ref_codon = if local == 0 {
+            Vec::new()
+        } else {
+            fetch_cds_sequence(
+                codon_index * 3,
+                codon_index * 3 + 3,
+                chrom,
+                transcript,
+                index,
+                fasta,
+            )?
+        };
+        Self::from_codon(
+            ref_codon,
+            coding_inserted,
+            local,
+            codon_index,
+            transcript.chrom == "chrM",
+        )
+    }
+
+    /// Build the window from the reference codon (empty between two codons).
+    ///
+    /// # Arguments
+    ///
+    /// * `ref_codon` -- coding-strand reference codon, empty when `local` is 0
+    /// * `coding_inserted` -- inserted bases on the coding strand
+    /// * `local` -- index in `ref_codon` the bases go before
+    /// * `codon_index` -- 0-based codon holding the insertion, or after it
+    /// * `is_mito` -- translate with NCBI table 2
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a codon is not a whole number of bases.
+    pub(super) fn from_codon(
+        ref_codon: Vec<u8>,
+        coding_inserted: &[u8],
+        local: usize,
+        codon_index: u32,
+        is_mito: bool,
+    ) -> Result<Self, VarEffectError> {
+        let mut alt_codon = Vec::with_capacity(ref_codon.len() + coding_inserted.len());
+        alt_codon.extend_from_slice(&ref_codon[..local]);
+        alt_codon.extend_from_slice(coding_inserted);
+        alt_codon.extend_from_slice(&ref_codon[local..]);
+        let peptides = crate::hgvs_p::InsertionPeptides {
+            ref_aas: translate_sequence(&ref_codon, is_mito)?,
+            alt_aas: translate_sequence(&alt_codon, is_mito)?,
+            tl_start: codon_index + 1,
+            tl_end: if local == 0 {
+                codon_index
+            } else {
+                codon_index + 1
+            },
+        };
+        Ok(Self {
+            ref_codon,
+            alt_codon,
+            local,
+            codon_index,
+            peptides,
+        })
+    }
+}
+
+/// The reference protein of a transcript, translated from the genome on
+/// demand.
+pub(super) struct CdsProtein<'a> {
+    chrom: &'a str,
+    transcript: &'a TranscriptModel,
+    index: &'a LocateIndex,
+    fasta: &'a FastaReader,
+    residue_count: u32,
+}
+
+impl<'a> CdsProtein<'a> {
+    /// Reader for `transcript`'s protein; the residue count excludes a
+    /// terminal stop codon, as VEP's `_peptide` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the last codon cannot be read.
+    pub(super) fn new(
+        chrom: &'a str,
+        transcript: &'a TranscriptModel,
+        index: &'a LocateIndex,
+        fasta: &'a FastaReader,
+    ) -> Result<Self, VarEffectError> {
+        let codons = index.total_cds_length() / 3;
+        let residue_count = if ends_in_stop_codon(chrom, transcript, index, fasta)? {
+            codons - 1
+        } else {
+            codons
+        };
+        Ok(Self {
+            chrom,
+            transcript,
+            index,
+            fasta,
+            residue_count,
+        })
+    }
+}
+
+impl crate::hgvs_p::ReferenceProtein for CdsProtein<'_> {
+    fn residue_count(&self) -> u32 {
+        self.residue_count
+    }
+
+    fn residues(&self, start: u32, end: u32) -> Result<Vec<u8>, VarEffectError> {
+        // The genome reader refuses an empty range.
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let seq = fetch_cds_sequence(
+            start * 3,
+            end * 3,
+            self.chrom,
+            self.transcript,
+            self.index,
+            self.fasta,
+        )?;
+        translate_sequence(&seq, self.transcript.chrom == "chrM")
+    }
+}
+
+/// VEP 116 consequence terms of an in-frame CDS insertion
+/// (`VariationEffect.pm`, release/116), without `splice_region_variant`.
+///
+/// - `inframe_insertion`: the alternate peptide, cut after its first stop,
+///   starts or ends with the reference peptide (always between codons).
+/// - `protein_altering_variant`: the uncut alternate peptide neither starts
+///   nor ends with the reference peptide, and neither starts with a stop
+///   (NM_000546.6 c.523_524insTTT, `R/LC`).
+/// - `stop_retained_variant` (`ref_eq_alt_sequence`): the protein with the
+///   alternate peptide spliced in is the reference followed by a stop
+///   (NM_003036.4 c.2152_*3dup), or the stop stays at the same index of
+///   both peptides (NM_000546.6 c.1180_1181insAAG, `*/*G`).
+/// - `stop_gained` / `stop_lost`: a stop only in the alternate / reference
+///   peptide, unless the stop is retained.
+/// - Codon 1 (`start_lost`, `start_retained_variant`): VEP edits the 5'UTR
+///   plus CDS; `_inv_start_altered` calls `start_lost` whenever a transcript
+///   with a 5'UTR no longer has `ATG` at the start codon position
+///   (NM_000546.6 c.1_2insCGA: `start_lost,start_retained_variant`;
+///   c.2_3insGAT: `start_retained_variant` alone).
+///
+/// An inserted `N` (amino acid `X`) takes VEP's sequence-based stop checks,
+/// which are not ported; no stop term is given then.
+///
+/// # Arguments
+///
+/// * `codons` -- VEP's codon window at the (unshifted) insertion point
+/// * `inserted_len` -- number of inserted bases
+/// * `complete_start` -- codon 1 is a complete start codon (no `cds_start_NF`)
+/// * `has_utr5` -- the transcript has 5'UTR exonic bases
+/// * `protein` -- reference protein of the transcript
+///
+/// # Errors
+///
+/// Returns an error if reference residues cannot be read.
+pub(super) fn inframe_insertion_terms(
+    codons: &InsertionCodons,
+    inserted_len: usize,
+    complete_start: bool,
+    has_utr5: bool,
+    protein: &impl crate::hgvs_p::ReferenceProtein,
+) -> Result<Vec<Consequence>, VarEffectError> {
+    let ref_aas = codons.peptides.ref_aas.as_slice();
+    let alt_aas = codons.peptides.alt_aas.as_slice();
+
+    // Only an insertion inside codon 1 overlaps the start codon.
+    let overlaps_start = codons.codon_index == 0 && codons.local != 0 && complete_start;
+    let start_is_atg = codons.alt_codon[..3].eq_ignore_ascii_case(b"ATG");
+    let start_altered = overlaps_start
+        && !(has_utr5 && start_is_atg)
+        && codons.alt_codon[inserted_len..] != codons.ref_codon[..];
+    let start_retained = overlaps_start && !start_altered;
+
+    let alt_to_stop = match alt_aas.iter().position(|&aa| aa == b'*') {
+        Some(stop) => &alt_aas[..=stop],
+        None => alt_aas,
+    };
+    let inframe = !(start_retained && alt_aas.ends_with(ref_aas))
+        && (alt_to_stop.starts_with(ref_aas) || alt_to_stop.ends_with(ref_aas));
+    let start_lost = overlaps_start
+        && ((start_altered && !inframe)
+            || (has_utr5 && !start_is_atg)
+            || (!ref_aas.is_empty()
+                && !alt_aas.is_empty()
+                && alt_aas != b"X"
+                && !alt_aas.starts_with(ref_aas)
+                && !alt_aas.ends_with(ref_aas)));
+
+    let alt_unknown = alt_aas.contains(&b'X');
+    let ref_stop = ref_aas.iter().position(|&aa| aa == b'*');
+    let alt_stop = alt_aas.iter().position(|&aa| aa == b'*');
+    let stop_lost = !alt_unknown && ref_stop.is_some() && alt_stop.is_none();
+    let stop_retained = !stop_lost && !alt_aas.is_empty() && !alt_unknown && {
+        // The spliced protein matches the reference for its first
+        // `residue_count` residues and has a stop next: the stop must come
+        // from the alternate peptide at index `k`.
+        let first = codons.peptides.tl_start - 1;
+        let k = protein.residue_count().saturating_sub(first) as usize;
+        let elongated = alt_aas.get(k) == Some(&b'*')
+            && alt_aas[..k] == protein.residues(first, first + k as u32)?[..];
+        elongated || (ref_stop.is_some() && ref_stop == alt_stop)
+    };
+    let stop_gained = !stop_retained && !stop_lost && alt_stop.is_some() && ref_stop.is_none();
+    let protein_altering = !start_lost
+        && ref_aas.len() != alt_aas.len()
+        && ref_aas.first() != Some(&b'*')
+        && alt_aas.first() != Some(&b'*')
+        && !alt_aas.starts_with(ref_aas)
+        && !alt_aas.ends_with(ref_aas);
+
+    Ok([
+        (start_lost, Consequence::StartLost),
+        (start_retained, Consequence::StartRetainedVariant),
+        (stop_gained, Consequence::StopGained),
+        (stop_lost, Consequence::StopLost),
+        (stop_retained, Consequence::StopRetainedVariant),
+        (inframe && !start_lost, Consequence::InframeInsertion),
+        (protein_altering, Consequence::ProteinAlteringVariant),
+    ]
+    .into_iter()
+    .filter_map(|(hit, term)| hit.then_some(term))
+    .collect())
+}
+
 /// Build the result for an inframe CDS insertion.
 ///
-/// Expands the insertion-point codon, splices in inserted bases
-/// (reverse-complemented for minus-strand), retranslates, and compares.
-///
-/// `shifted` is the insertion after HGVS 3' normalization when that moved it
-/// to another CDS point: the HGVS p. notation is computed there, with the
-/// rotated bases, so protein-level dup detection works at the shifted
-/// position (VEP `hgvs_protein`). All other result fields remain at the
-/// original `cds_offset`.
+/// Consequences, codons, amino acids and positions come from VEP's codon
+/// window ([`InsertionCodons`]) at the original insertion point; HGVS p.
+/// from the window at `shifted`, the insertion after HGVS 3' normalization,
+/// when that moved it to another CDS point (VEP `hgvs_protein` translates the
+/// shifted allele), placed against the whole protein.
 #[allow(clippy::too_many_arguments)]
 fn annotate_cds_inframe_insertion(
     chrom: &str,
@@ -1129,65 +1395,48 @@ fn annotate_cds_inframe_insertion(
     is_splice_region: bool,
     shifted: Option<ShiftedCdsInsertion<'_>>,
 ) -> Result<ConsequenceResult, VarEffectError> {
-    let is_mito = transcript.chrom == "chrM";
-
-    // Expand the codon window to include the preceding codon when the
-    // insertion is at a codon boundary (cds_offset % 3 == 0). VEP uses
-    // both flanking codons for the HGVS p. insertion notation; without
-    // this expansion, the left flanking AA would be off by one position.
-    let at_codon_boundary = cds_offset.is_multiple_of(3) && cds_offset >= 3;
-    let codon_start = if at_codon_boundary {
-        (cds_offset / 3 - 1) * 3
-    } else {
-        (cds_offset / 3) * 3
+    let coding = |bases: &[u8]| match transcript.strand {
+        Strand::Plus => bases.to_vec(),
+        Strand::Minus => reverse_complement(bases),
     };
-    let codon_end = codon_start + if at_codon_boundary { 6 } else { 3 };
-    let codon_end = codon_end.min(index.total_cds_length());
+    let coding_inserted = coding(inserted_bases);
+    let codons = InsertionCodons::new(
+        cds_offset,
+        &coding_inserted,
+        chrom,
+        transcript,
+        index,
+        fasta,
+    )?;
+    let protein = CdsProtein::new(chrom, transcript, index, fasta)?;
 
-    let ref_seq = fetch_cds_sequence(codon_start, codon_end, chrom, transcript, index, fasta)?;
-
-    let local_ins_pos = (cds_offset - codon_start) as usize;
-    let coding_inserted = match transcript.strand {
-        Strand::Plus => inserted_bases.to_vec(),
-        Strand::Minus => reverse_complement(inserted_bases),
-    };
-    let mut alt_seq = Vec::with_capacity(ref_seq.len() + coding_inserted.len());
-    alt_seq.extend_from_slice(&ref_seq[..local_ins_pos]);
-    alt_seq.extend_from_slice(&coding_inserted);
-    alt_seq.extend_from_slice(&ref_seq[local_ins_pos..]);
-
-    let ref_aas = translate_sequence(&ref_seq, is_mito)?;
-    let alt_aas = translate_sequence(&alt_seq, is_mito)?;
-
-    let first_codon = codon_start / 3;
-    let mut consequences = Vec::new();
-
-    if first_codon == 0 && has_complete_start_codon(index) && alt_aas.first() != Some(&b'M') {
-        consequences.push(Consequence::StartLost);
-    }
-
-    // Premature stop in alt (only if ref had no stop)
-    if alt_aas.contains(&b'*') && !ref_aas.contains(&b'*') {
-        consequences.push(Consequence::StopGained);
-    }
-
-    if ref_aas.contains(&b'*') && !alt_aas.contains(&b'*') {
-        consequences.push(Consequence::StopLost);
-    }
-
-    if !consequences
+    // VEP 116 gives an allele with a non-ACGT base no peptide: inside codon 1
+    // it is `start_retained_variant` (its start checks skip ambiguous
+    // sequence), elsewhere `coding_unknown` (`coding_sequence_variant`), with
+    // no amino acids and no HGVS p. (every N-containing in-frame insertion in
+    // the ClinVar sample checked against VEP REST). VEP's strand-dependent
+    // stop-codon overlap for such alleles is not ported (VEP_DIVERGENCES.md).
+    let unambiguous = coding_inserted
         .iter()
-        .any(|c| matches!(c, Consequence::StartLost))
-    {
-        consequences.push(Consequence::InframeInsertion);
-    }
-
+        .all(|base| matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'));
+    let mut consequences = if unambiguous {
+        inframe_insertion_terms(
+            &codons,
+            coding_inserted.len(),
+            has_complete_start_codon(index),
+            index.utr5_exonic_len() > 0,
+            &protein,
+        )?
+    } else if codons.codon_index == 0 && codons.local != 0 && has_complete_start_codon(index) {
+        vec![Consequence::StartRetainedVariant]
+    } else {
+        vec![Consequence::CodingSequenceVariant]
+    };
     if is_splice_region {
         consequences.push(Consequence::SpliceRegionVariant);
     }
-
     let impact = finalize_consequences(&mut consequences);
-    let protein_pos = first_codon + 1;
+
     // VEP reports flanking positions for insertions
     let cdna_after = compute_cdna_position_for_cds(cds_offset, index);
     let cdna_before = if cds_offset > 0 {
@@ -1196,72 +1445,37 @@ fn annotate_cds_inframe_insertion(
         cdna_after
     };
 
-    // HGVS 3' normalization: when the insertion shifted to another CDS
-    // point, recompute the codon window there with the rotated bases so
-    // protein-level dup detection sees the shifted flanking amino acids. All
-    // non-HGVS fields (consequences, protein_start, codons, amino_acids,
-    // etc.) stay at the original position.
-    //
-    // The codon window must extend far enough upstream to include the
-    // preceding amino acids that the dup detection compares against. For
-    // an insertion of N amino acids, we need at least N preceding codons
-    // (= 3*N CDS bases) before the shifted insertion point.
-    //
-    // A shift that leaves the CDS (into the 3' UTR, e.g. SKI
-    // NM_003036.4:c.2152_*3dup, or an intron) has no HGVS p. in VEP; the
-    // caller clears it, and the unshifted formatter only fills the field
-    // meanwhile.
-    let ins_aa_count = (coding_inserted.len() / 3) as u32;
-    // HGVS p. at an insertion point, from a window reaching `ins_aa_count + 1`
-    // codons upstream, so the residue before the insertion and any duplicated
-    // residues are inside it. A window starting at a split codon would leave
-    // the left flank out (VEP 116 NM_006231.4 c.2465_2467dup:
-    // p.Lys822_Gly823insGlu).
-    let format_at = |offset: u32, inserted: &[u8]| -> Result<Option<String>, VarEffectError> {
-        let total = index.total_cds_length();
-        let w_start = (offset / 3).saturating_sub(ins_aa_count + 1) * 3;
-        let w_end = ((offset / 3 + 1) * 3).min(total);
-        let w_ref = fetch_cds_sequence(w_start, w_end, chrom, transcript, index, fasta)?;
-        let w_local = (offset - w_start) as usize;
-        let mut w_alt = Vec::with_capacity(w_ref.len() + inserted.len());
-        w_alt.extend_from_slice(&w_ref[..w_local]);
-        w_alt.extend_from_slice(inserted);
-        w_alt.extend_from_slice(&w_ref[w_local..]);
-        let w_right_flank = if w_end < total {
-            let next = fetch_ref_codon(w_end, chrom, transcript, index, fasta)?;
-            translate_codon_for_transcript(&next, is_mito)
-        } else {
-            b'*'
-        };
-        Ok(crate::hgvs_p::format_hgvs_p_inframe_ins(
-            &translate_sequence(&w_ref, is_mito)?,
-            &translate_sequence(&w_alt, is_mito)?,
-            w_start / 3 + 1,
-            &consequences,
-            w_right_flank,
-        ))
-    };
-    let hgvs_p = if let Some(shifted) = shifted {
-        let shifted_coding = match transcript.strand {
-            Strand::Plus => shifted.inserted_bases.to_vec(),
-            Strand::Minus => reverse_complement(shifted.inserted_bases),
-        };
-        format_at(shifted.cds_offset, &shifted_coding)?
+    let hgvs_p = if !unambiguous {
+        None
+    } else if consequences.contains(&Consequence::StartLost) {
+        Some("p.Met1?".to_string())
     } else {
-        // Without a DNA-level shift the insertion may still be a
-        // protein-level duplication (codon degeneracy can produce identical
-        // amino acids from different codons): probe the next codon boundary
-        // and keep that result only when it is a duplication; otherwise the
-        // insertion point keeps the mid-codon amino acid identity.
-        let aligned_cds = (cds_offset.div_ceil(3) * 3).min(index.total_cds_length());
-        let aligned_dup = if aligned_cds != cds_offset {
-            format_at(aligned_cds, &coding_inserted)?.filter(|p| p.contains("dup"))
-        } else {
-            None
+        let at_hgvs_point = match shifted {
+            // A shift into the incomplete terminal codon leaves no whole codon
+            // to translate; VEP's partial-codon peptide is not ported, so no
+            // HGVS p. is written there.
+            Some(shifted)
+                if partial_codon_insertion_site(shifted.cds_offset, index)
+                    == Some(PartialCodonInsertion::Inside) =>
+            {
+                None
+            }
+            Some(shifted) => Some(
+                InsertionCodons::new(
+                    shifted.cds_offset,
+                    &coding(shifted.inserted_bases),
+                    chrom,
+                    transcript,
+                    index,
+                    fasta,
+                )?
+                .peptides,
+            ),
+            None => Some(codons.peptides.clone()),
         };
-        match aligned_dup {
-            Some(dup) => Some(dup),
-            None => format_at(cds_offset, &coding_inserted)?,
+        match at_hgvs_point {
+            Some(peptides) => crate::hgvs_p::format_hgvs_p_inframe_ins(&peptides, &protein)?,
+            None => None,
         }
     };
 
@@ -1270,11 +1484,12 @@ fn annotate_cds_inframe_insertion(
 
     // An in-frame insertion can carry its own stop codon, so the termination
     // codon may lie inside the inserted sequence rather than at the variant.
+    let peptides = &codons.peptides;
     let ptc = super::nmd::ptc_for_window(
         &consequences,
-        &alt_aas,
-        &ref_aas,
-        first_codon,
+        &peptides.alt_aas,
+        &peptides.ref_aas,
+        codons.codon_index,
         &crate::hgvs_p::CdsEdit {
             start: cds_offset,
             del_len: 0,
@@ -1289,15 +1504,17 @@ fn annotate_cds_inframe_insertion(
         protein_accession: transcript.protein_accession.clone(),
         consequences,
         impact,
-        protein_start: Some(protein_pos),
-        protein_end: Some(protein_pos),
+        // Between two codons VEP reports both flanking residues.
+        protein_start: Some(peptides.tl_end.min(peptides.tl_start)),
+        protein_end: Some(peptides.tl_start),
         codons: Some(format_codons_indel(
-            &ref_seq,
-            &alt_seq,
-            local_ins_pos,
-            local_ins_pos,
+            &codons.ref_codon,
+            &codons.alt_codon,
+            codons.local,
+            codons.local,
         )),
-        amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
+        amino_acids: unambiguous
+            .then(|| format_amino_acids_indel(&peptides.ref_aas, &peptides.alt_aas)),
         exon: Some(format_exon_number(exon_index, transcript.exon_count)),
         intron: None,
         cds_position: Some(cds_offset),
