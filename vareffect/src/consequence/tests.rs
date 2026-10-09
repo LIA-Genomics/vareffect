@@ -2043,23 +2043,48 @@ mod incomplete_cds {
     }
 
     #[test]
-    fn gapped_cds_alignment_drops_hgvs() {
+    fn gapped_cds_alignment_drops_transcript_numbering() {
         let (_tmp, fasta) = write_test_fasta();
         let mut tx = plus_strand_coding();
         tx.cds_alignment_gap = true;
         let index = LocateIndex::build(&tx).unwrap();
         let snv = annotate_snv("chr1", 1503, b'C', b'A', &tx, &index, &fasta).unwrap();
         assert!(!snv.consequences.is_empty());
-        assert_eq!((snv.hgvs_c, snv.hgvs_p), (None, None));
+        let unnumbered = |r: &ConsequenceResult| {
+            r.hgvs_c.is_none()
+                && r.hgvs_p.is_none()
+                && r.cdna_position.is_none()
+                && r.cdna_position_end.is_none()
+                && r.cds_position.is_none()
+                && r.cds_position_end.is_none()
+                && r.protein_start.is_none()
+                && r.protein_end.is_none()
+                && r.codons.is_none()
+                && r.amino_acids.is_none()
+                && !r.predicts_nmd
+                && matches!(r.ptc, PtcStatus::NotApplicable | PtcStatus::Indeterminate)
+                && r.exon.is_some()
+        };
+        assert!(unnumbered(&snv), "{snv:?}");
+        // A one-base deletion is a frameshift: its termination codon is
+        // undetermined, not located.
         let deletion = annotate_deletion("chr1", 1503, 1504, b"C", &tx, &index, &fasta).unwrap();
-        assert_eq!((deletion.hgvs_c, deletion.hgvs_p), (None, None));
+        assert!(unnumbered(&deletion), "{deletion:?}");
+        assert_eq!(deletion.ptc, PtcStatus::Indeterminate);
         let insertion = annotate_insertion("chr1", 1504, b"T", &tx, &index, &fasta).unwrap();
-        assert_eq!((insertion.hgvs_c, insertion.hgvs_p), (None, None));
+        assert!(unnumbered(&insertion), "{insertion:?}");
+        // The dispatcher's MNV and delins paths.
+        let store = crate::TranscriptStore::from_transcripts(vec![tx.clone()]);
+        for (reference, alternate) in [(&b"CG"[..], &b"TA"[..]), (&b"CGTC"[..], &b"TG"[..])] {
+            let results = annotate("chr1", 1503, reference, alternate, &store, &fasta).unwrap();
+            assert!(!results.is_empty());
+            assert!(results.iter().all(unnumbered), "{results:?}");
+        }
 
         tx.cds_alignment_gap = false;
         let index = LocateIndex::build(&tx).unwrap();
         let snv = annotate_snv("chr1", 1503, b'C', b'A', &tx, &index, &fasta).unwrap();
-        assert!(snv.hgvs_c.is_some());
+        assert!(snv.hgvs_c.is_some() && snv.cds_position.is_some() && snv.codons.is_some());
     }
 
     #[test]

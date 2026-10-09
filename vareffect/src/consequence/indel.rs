@@ -4,7 +4,7 @@ use super::helpers::{
     add_splice_spill, build_base_result, compute_cdna_position_exonic,
     compute_cdna_position_for_cds, ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon,
     finalize_consequences, has_complete_start_codon, is_incomplete_terminal_codon,
-    without_gapped_hgvs,
+    without_gapped_numbering,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -56,7 +56,7 @@ pub fn annotate_deletion(
         &mut result,
         exonic_splice_spill(start, end, transcript, locate_index),
     );
-    Ok(without_gapped_hgvs(transcript, result))
+    Ok(without_gapped_numbering(transcript, result))
 }
 
 /// [`annotate_deletion`] without the splice terms a one-base frameshift intron spills
@@ -601,7 +601,7 @@ pub fn annotate_insertion(
             locate_index,
         );
         result.hgvs_c = hgvs;
-        return Ok(without_gapped_hgvs(transcript, result));
+        return Ok(without_gapped_numbering(transcript, result));
     }
 
     let mut result = match &location.region {
@@ -715,7 +715,7 @@ pub fn annotate_insertion(
         result.exon = None;
     }
     result.hgvs_c = hgvs;
-    Ok(without_gapped_hgvs(transcript, result))
+    Ok(without_gapped_numbering(transcript, result))
 }
 
 /// Build the result for a CDS frameshift (shared by deletion, insertion,

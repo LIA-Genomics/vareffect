@@ -163,19 +163,22 @@ where a `D` gap lies inside an exon rather than at an exon split (RefSeq
 RS_2025_08: NM_001193335.3, NM_017680.6, NM_030582.4, NM_130444.3): the
 model keeps genomic bases the transcript lacks. Those
 models carry `TranscriptModel::cds_alignment_gap`, and `vareffect` reports
-no HGVS c. or p. for them and refuses to resolve HGVS c. on them
-(`CdsNumberingUnavailable`). Consequence terms, cDNA/CDS/protein positions,
-codons and amino acids are still computed from the genome, in the
-genome-built numbering. VEP 116 writes HGVS in the transcript's numbering
-(NM_002111.8, HTT, `I` gap in exon 1: `c.311A>G`, `p.His104Arg`); the
-consequence term matches, as it does for SHANK3 and NBPF1 past their
-coverage breaks. RefSeq RS_2025_08 has 60 flagged coding transcripts. Of the
+no HGVS c. or p., no cDNA/CDS/protein positions and no codons or amino acids
+for them, and refuses to resolve HGVS c. on them (`CdsNumberingUnavailable`).
+A truncating variant's termination codon is `PtcStatus::Indeterminate` and
+`predicts_nmd` is false: the 50-nucleotide distances would be measured in the
+wrong frame. Consequence terms, impact and exon/intron numbers are reported.
+VEP 116 writes all of these in the transcript's numbering (NM_002111.8, HTT,
+`I` gap in exon 1: `c.311A>G`, `p.His104Arg`, CDS position 311); the
+consequence term matches, as it does for SHANK3 and NBPF1 past their coverage
+breaks. RefSeq RS_2025_08 has 60 flagged coding transcripts. Of the
 53 with an in-row gap inside the CDS span, 38 are flagged (31 `I` only, 3 `I`
 and an in-exon `D`, 4 in-exon `D` only) and the 15 with only exon-split `D`
 gaps are not; coverage breaks add 22. An interior range is not an open CDS
 end: the start and stop stay complete (VEP 116 calls `start_lost` on SHANK3).
-Accepted by maintainer decision (issue 13): a missing HGVS string is safer
-than one that names the wrong residue. MANE 1.5 has no such transcript.
+Accepted by maintainer decisions (issue 13, GAP-1): a missing HGVS string,
+position or codon is safer than one that names the wrong base or residue.
+MANE 1.5 has no such transcript.
 
 ## 4. NMD
 

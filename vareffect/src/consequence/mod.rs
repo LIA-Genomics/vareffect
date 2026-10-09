@@ -410,6 +410,13 @@ impl PtcStatus {
 /// `hgvs_c` and `hgvs_p` are `None` when the variant does not affect
 /// the transcript or protein (UTR, intron, splice-region).
 ///
+/// On a transcript flagged
+/// [`TranscriptModel::cds_alignment_gap`](crate::TranscriptModel::cds_alignment_gap)
+/// every field numbered along the transcript is `None` (HGVS, cDNA / CDS /
+/// protein positions, codons, amino acids), `ptc` is
+/// [`PtcStatus::Indeterminate`] for a truncating variant and `predicts_nmd`
+/// is `false`: the genome-built numbering is not the transcript's own.
+///
 /// `#[non_exhaustive]` so future annotation fields can be added without a
 /// SemVer break for downstream construction sites.
 #[derive(Debug, Clone, PartialEq)]
@@ -616,7 +623,7 @@ pub(crate) fn annotate(
             for (tx, idx) in overlaps {
                 // REF already verified above; use the unchecked path to
                 // avoid a redundant FASTA seek per transcript.
-                results.push(helpers::without_gapped_hgvs(
+                results.push(helpers::without_gapped_numbering(
                     tx,
                     snv::annotate_snv_verified(
                         chrom,
@@ -676,7 +683,7 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(helpers::without_gapped_hgvs(
+                results.push(helpers::without_gapped_numbering(
                     tx,
                     complex::annotate_mnv(
                         chrom,
@@ -698,7 +705,7 @@ pub(crate) fn annotate(
             let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
-                results.push(helpers::without_gapped_hgvs(
+                results.push(helpers::without_gapped_numbering(
                     tx,
                     complex::annotate_complex_delins(
                         chrom,

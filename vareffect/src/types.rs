@@ -380,11 +380,13 @@ pub struct TranscriptModel {
     /// `cDNA_match` `I` gap, or transcript bases aligned nowhere between two
     /// blocks or at an interior CDS `start_range` / `end_range`), or the
     /// genome has bases inside an exon that the transcript lacks (a `D` gap
-    /// that is not an exon split). No HGVS c. or p. is then reported
-    /// for it and HGVS c. is not resolved on it. Consequence terms, positions,
-    /// codons and amino acids keep the genome-built numbering. A `D` gap where
-    /// RefSeq splits the exon (a frameshift intron) does not set it: the
-    /// numbering stays the transcript's.
+    /// that is not an exon split). No HGVS c. or p., cDNA / CDS / protein
+    /// position, codons, amino acids or termination-codon / NMD verdict are
+    /// then reported for it, and HGVS c. is not resolved on it; consequence
+    /// terms, impact and exon / intron numbers are (see
+    /// [`crate::ConsequenceResult`]). A `D` gap where RefSeq
+    /// splits the exon (a frameshift intron) does not set it: the numbering
+    /// stays the transcript's.
     pub cds_alignment_gap: bool,
     /// 0-based genomic start of each selenocysteine codon (the lowest base of
     /// the codon on either strand), in ascending order. Empty when the
