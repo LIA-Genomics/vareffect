@@ -3430,3 +3430,106 @@ fn frameshift_at_the_start_codon_follows_vep_start_rules() {
         Consequence::StartLost | Consequence::StartRetainedVariant
     )));
 }
+
+// -- Deletion HGVS 3' shift across exon/intron junctions (VEP 116) ---------
+
+/// Plus-strand `NM_SHIFT.1` on `chrU`: exon 1 `[10, 40)` = `ATG` + `GCA`x9
+/// (CDS c.1-30), intron `[40, 60)` = `AG` + `T`x16 + `AG`, exon 2 `[60, 90)`
+/// = `AGC`x9 + `TAA` (CDS c.31-60).
+fn junction_shift_fixture() -> (TempDir, FastaReader, TranscriptModel) {
+    let tmp = TempDir::new().unwrap();
+    let mut chru = vec![b'C'; 100];
+    let exon1: Vec<u8> = b"ATG"
+        .iter()
+        .chain(b"GCA".repeat(9).iter())
+        .copied()
+        .collect();
+    chru[10..40].copy_from_slice(&exon1);
+    let intron: Vec<u8> = b"AG"
+        .iter()
+        .chain(b"T".repeat(16).iter())
+        .chain(b"AG")
+        .copied()
+        .collect();
+    chru[40..60].copy_from_slice(&intron);
+    let exon2: Vec<u8> = b"AGC".repeat(9).iter().chain(b"TAA").copied().collect();
+    chru[60..90].copy_from_slice(&exon2);
+    let contigs: Vec<(&str, &[u8])> = vec![("chrU", &chru)];
+    let bin_path = tmp.path().join("u.bin");
+    let idx_path = tmp.path().join("u.bin.idx");
+    write_genome_binary(&contigs, "u", &bin_path, &idx_path).unwrap();
+    let fasta = FastaReader::open(&bin_path).unwrap();
+    let exon = |n, s, e| Exon {
+        exon_number: n,
+        genomic_start: s,
+        genomic_end: e,
+    };
+    let tx = TranscriptModel::new(
+        "NM_SHIFT.1",
+        "SHIFT",
+        "chrU",
+        Strand::Plus,
+        vec![exon(1, 10, 40), exon(2, 60, 90)],
+    )
+    .with_cds_segments(vec![
+        CdsSegment {
+            exon_index: 0,
+            genomic_start: 10,
+            genomic_end: 40,
+            phase: 0,
+        },
+        CdsSegment {
+            exon_index: 1,
+            genomic_start: 60,
+            genomic_end: 90,
+            phase: 0,
+        },
+    ])
+    .with_protein_accession(Some("NP_SHIFT.1".to_string()))
+    .with_biotype(Biotype::ProteinCoding);
+    (tmp, fasta, tx)
+}
+
+#[test]
+fn deletion_shifted_into_the_intron_has_no_hgvs_p() {
+    // The last exon base `A` equals the first intron base: VEP 116 writes
+    // `c.30+1del` and no HGVS p. (NM_000632.4 c.1497+1del).
+    let (_tmp, fasta, tx) = junction_shift_fixture();
+    let index = LocateIndex::build(&tx).unwrap();
+    let result = annotate_deletion("chrU", 39, 40, b"A", &tx, &index, &fasta).unwrap();
+    assert!(
+        result
+            .consequences
+            .contains(&Consequence::FrameshiftVariant)
+    );
+    assert_eq!(result.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.30+1del"));
+    assert_eq!(result.hgvs_p, None);
+}
+
+#[test]
+fn deletion_from_the_intron_shifted_into_the_cds_takes_its_hgvs_p() {
+    let (_tmp, fasta, tx) = junction_shift_fixture();
+    let index = LocateIndex::build(&tx).unwrap();
+    // `G|A` across the acceptor shifts to c.31_32 (`AG`): VEP 116 writes the
+    // shifted deletion's HGVS p. (NM_000540.3 c.958_960del `p.Glu320del`).
+    let spanning = annotate_deletion("chrU", 59, 61, b"GA", &tx, &index, &fasta).unwrap();
+    assert!(
+        spanning
+            .consequences
+            .contains(&Consequence::CodingSequenceVariant),
+        "{spanning:?}"
+    );
+    assert_eq!(spanning.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.31_32del"));
+    assert!(
+        spanning
+            .hgvs_p
+            .as_deref()
+            .is_some_and(|p| p.contains("p.Ser11")),
+        "{spanning:?}"
+    );
+    // A purely intronic `AG` shifted onto c.31_32 has none (`c.410-1del`
+    // written `c.410del` in VEP 116 without HGVS p.).
+    let intronic = annotate_deletion("chrU", 58, 60, b"AG", &tx, &index, &fasta).unwrap();
+    assert_eq!(intronic.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.31_32del"));
+    assert_eq!(intronic.hgvs_p, None, "{intronic:?}");
+}

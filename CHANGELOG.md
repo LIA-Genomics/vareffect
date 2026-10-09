@@ -179,6 +179,17 @@ For releases before `0.5.0`, see the git history.
 
 ### Fixed
 
+- Deletion HGVS follows VEP 116's 3' shift on the genome, as insertion HGVS
+  already did: it crosses exon/intron junctions (NM_000632.4 `c.1497+1del`,
+  was `c.1497del`; `c.410-1del` is written `c.410del`), deletions across a
+  junction shift too, and the shift reads at most 1000 bases. HGVS p. is
+  written from the shifted deletion: none when a coding deletion shifts out
+  of the CDS (into the intron or past the stop codon), and the shifted
+  deletion's when one reaching from an intron into the CDS shifts wholly into
+  it (NM_000540.3 `c.958_960del` `p.Glu320del`, was none). Consequences, NMD
+  and PTC stay on the unshifted deletion. Over GRCh38 ClinVar on MANE 1.5,
+  4,281 transcript entries move, all deletions: HGVS c. on 4,251, HGVS p.
+  dropped on 877 and added on 291; no consequence term moves.
 - Frameshifts follow VEP 116's codon window (`TranscriptVariationAllele`
   `codon` / `peptide`): an insertion inside a codon shows that codon and its
   peptide (`gat/gaTt`, `D/DX`), one between codons shows no reference codon
