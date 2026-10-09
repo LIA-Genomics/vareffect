@@ -89,6 +89,24 @@ For releases before `0.5.0`, see the git history.
   `source`, `counts`, `skipped_rows`, `anomalies`, `excluded_file` and
   `excluded_sha256`. The builder loads the encoded store back before
   writing it.
+- `vareffect setup` builds the source chosen by the new
+  `[vareffect.transcripts] source = "mane" | "refseq" | "gencode"` config
+  key (`mane` when absent, so existing configs are unchanged; an unknown
+  value is an error, as is now any unknown key inside `[vareffect]` or its
+  tables, so a misspelled table cannot fall back to MANE). RefSeq and
+  GENCODE come from the new
+  `[vareffect.refseq]` / `[vareffect.gencode]` tables (`url`, `release`,
+  `sha256`), pinned to RefSeq RS_2025_08 and GENCODE 50 in the default
+  config. The cached file is named after source, build and release, and
+  setup refuses it unless its SHA-256, header release and header genome
+  build match the pin and `fasta_build` (patch suffixes such as `.p14`
+  ignored).
+- `vareffect check` validates the configured source's store and fails when
+  the config, the store's manifest and the store disagree on source or
+  release (a manifest that records no source fails: rerun setup).
+- `vareffect annotate` writes `##vareffect_transcripts=<source> <release>`
+  (from the loaded store, `unknown` for a store without provenance) before
+  the CSQ header line, and drops such a line from the input.
 
 ### Changed
 

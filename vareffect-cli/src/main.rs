@@ -13,6 +13,7 @@ mod config;
 mod csq;
 mod init;
 mod setup;
+mod source_file;
 mod vcf;
 
 use std::path::PathBuf;
@@ -22,11 +23,12 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::common::{print_build_header, print_build_summary};
+use crate::config::SourceName;
 
 /// Build tooling for vareffect runtime data.
 ///
 /// Downloads and indexes a GRCh38 reference FASTA, builds transcript model
-/// stores from MANE GFF3 releases, and provisions everything the `vareffect`
+/// stores from MANE, RefSeq or GENCODE GFF3 releases, and provisions everything the `vareffect`
 /// crate needs at runtime under `data/vareffect/`.
 #[derive(Parser)]
 #[command(name = "vareffect", version, about)]
@@ -54,10 +56,14 @@ enum Command {
 
     /// Set up all runtime data for vareffect in one command.
     ///
-    /// Downloads the GRCh38 reference FASTA, decompresses and indexes it
-    /// (produces `GRCh38.fa.gz` + `.fai` + `.gzi`), downloads the NCBI
-    /// assembly report and builds patch-chrom aliases, then downloads the
-    /// MANE GFF3 + summary TSV and builds `transcript_models.bin`.
+    /// Downloads the GRCh38 reference FASTA and converts it to a flat binary
+    /// (`GRCh38.bin` + `.bin.idx`), downloads the NCBI assembly report and
+    /// builds patch-chrom aliases, then builds the store of the transcript
+    /// source selected by `[vareffect.transcripts] source`: MANE (GFF3 +
+    /// summary TSV -> `transcript_models.bin`), RefSeq
+    /// (`transcript_models_refseq.bin`) or GENCODE
+    /// (`transcript_models_gencode.bin`). RefSeq and GENCODE downloads must
+    /// match their pinned SHA-256, release and genome build.
     ///
     /// Idempotent: the reference FASTA is skipped if already present;
     /// transcript models are always rebuilt. Source archives land in
@@ -121,8 +127,8 @@ enum Command {
     /// files automatically.
     BuildTranscripts {
         /// Annotation source of `--input`.
-        #[arg(long, value_enum, default_value_t = SourceArg::Mane)]
-        source: SourceArg,
+        #[arg(long, value_enum, default_value_t = SourceName::Mane)]
+        source: SourceName,
         /// Path to the source GFF3: `MANE.GRCh38.vX.X.refseq_genomic.gff.gz`,
         /// `GCF_000001405.40_GRCh38.p14_genomic.gff.gz` or
         /// `gencode.vNN.annotation.gff3.gz`.
@@ -144,27 +150,6 @@ enum Command {
         #[arg(long)]
         version: String,
     },
-}
-
-/// `--source` values of `build-transcripts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum SourceArg {
-    /// MANE Select and MANE Plus Clinical (NCBI MANE GFF3).
-    Mane,
-    /// Curated RefSeq `NM_` / `NR_` on the primary assembly.
-    Refseq,
-    /// GENCODE comprehensive.
-    Gencode,
-}
-
-impl From<SourceArg> for vareffect::TranscriptSource {
-    fn from(source: SourceArg) -> Self {
-        match source {
-            SourceArg::Mane => Self::Mane,
-            SourceArg::Refseq => Self::RefSeq,
-            SourceArg::Gencode => Self::Gencode,
-        }
-    }
 }
 
 /// Install a compact stderr tracing subscriber.

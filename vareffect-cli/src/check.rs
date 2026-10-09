@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use console::style;
 use vareffect::transcript::TRANSCRIPT_STORE_FORMAT_VERSION;
-use vareffect::{TranscriptStore, VarEffectError};
+use vareffect::{TranscriptSource, TranscriptStore, VarEffectError};
 
-use crate::common::format_size;
+use crate::common::{format_size, store_provenance, store_stem};
 use crate::config;
 
 /// Arguments for the `check` subcommand.
@@ -81,6 +81,74 @@ fn print_result(result: &CheckResult, quiet: bool) {
 fn check_file_readable(path: &Path) -> Result<()> {
     File::open(path).with_context(|| format!("{}", path.display()))?;
     Ok(())
+}
+
+/// Check that the config, the store's manifest and the store itself name
+/// one transcript source and release.
+///
+/// # Arguments
+///
+/// * `cfg` -- The parsed config; selects the expected source and release.
+/// * `store` -- The loaded store of that source.
+/// * `manifest_path` -- The store's `.manifest.json`.
+///
+/// # Returns
+///
+/// A pass when all three agree, otherwise a failure naming the first
+/// disagreement. A manifest without `source` (written before manifests
+/// recorded it) fails: rebuilding with `vareffect setup` writes one.
+fn check_provenance(
+    cfg: &config::VareffectConfig,
+    store: &TranscriptStore,
+    manifest_path: &Path,
+) -> CheckResult {
+    let source = TranscriptSource::from(cfg.source());
+    let release = match cfg.source_release() {
+        Ok(release) => release,
+        Err(error) => return CheckResult::fail(format!("Transcript source: {error}")),
+    };
+    let expected = format!("{source} {release}");
+
+    let found = store_provenance(store);
+    if found != expected {
+        return CheckResult::fail(format!(
+            "Transcript source: the store is {found}, the config selects {expected}. \
+             Run: vareffect setup"
+        ));
+    }
+
+    let manifest: serde_json::Value = match fs::read_to_string(manifest_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| serde_json::from_str(&text).map_err(anyhow::Error::from))
+    {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return CheckResult::fail(format!(
+                "Transcript manifest {}: {error}",
+                manifest_path.display(),
+            ));
+        }
+    };
+    let field = |key: &str| manifest.get(key).and_then(serde_json::Value::as_str);
+    match (field("source"), field("source_version")) {
+        (Some(manifest_source), Some(manifest_release))
+            if manifest_source == source.as_str() && manifest_release == release =>
+        {
+            CheckResult::pass(format!(
+                "Transcript source: {expected} (config, manifest and store agree)"
+            ))
+        }
+        (Some(manifest_source), Some(manifest_release)) => CheckResult::fail(format!(
+            "Transcript source: the manifest {} is {manifest_source} {manifest_release}, the \
+             config and store are {expected}. Run: vareffect setup",
+            manifest_path.display(),
+        )),
+        (None, _) | (_, None) => CheckResult::fail(format!(
+            "Transcript source: the manifest {} records no source and release. \
+             Run: vareffect setup",
+            manifest_path.display(),
+        )),
+    }
 }
 
 /// Run the `vareffect check` subcommand.
@@ -182,31 +250,41 @@ pub fn run(args: &CheckArgs) -> Result<bool> {
             }
         }
 
-        // C5: Transcript DB loads exactly as `annotate` would load it.
-        let transcript_path = output_dir.join("transcript_models.bin");
-        match TranscriptStore::load_from_path(&transcript_path) {
-            Ok(store) => {
-                results.push(CheckResult::pass(format!(
-                    "Transcript DB: {} (format version {TRANSCRIPT_STORE_FORMAT_VERSION}, \
-                     {} transcripts)",
-                    transcript_path.display(),
-                    store.len(),
-                )));
+        // C5: Transcript DB of the configured source loads exactly as
+        // `annotate` would load it.
+        match store_stem(TranscriptSource::from(cfg.source())) {
+            Ok(stem) => {
+                let transcript_path = output_dir.join(format!("{stem}.bin"));
+                match TranscriptStore::load_from_path(&transcript_path) {
+                    Ok(store) => {
+                        results.push(CheckResult::pass(format!(
+                            "Transcript DB: {} (format version \
+                             {TRANSCRIPT_STORE_FORMAT_VERSION}, {} transcripts, {})",
+                            transcript_path.display(),
+                            store.len(),
+                            store_provenance(&store),
+                        )));
+                        // C6: config, manifest and store name one source.
+                        let manifest_path = output_dir.join(format!("{stem}.manifest.json"));
+                        results.push(check_provenance(cfg, &store, &manifest_path));
+                    }
+                    Err(VarEffectError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        results.push(CheckResult::fail(format!(
+                            "Transcript DB not found: {}. Run: vareffect setup",
+                            transcript_path.display(),
+                        )));
+                    }
+                    Err(error) => {
+                        results.push(CheckResult::fail(format!(
+                            "Transcript DB {}: {error}",
+                            transcript_path.display(),
+                        )));
+                    }
+                }
             }
-            Err(VarEffectError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                results.push(CheckResult::fail(format!(
-                    "Transcript DB not found: {}",
-                    transcript_path.display(),
-                )));
-            }
-            Err(error) => {
-                results.push(CheckResult::fail(format!(
-                    "Transcript DB {}: {error}",
-                    transcript_path.display(),
-                )));
-            }
+            Err(error) => results.push(CheckResult::fail(format!("Transcript DB: {error}"))),
         }
     } else {
         // Config failed to load; mark all dependent checks as failed.
@@ -215,6 +293,7 @@ pub fn run(args: &CheckArgs) -> Result<bool> {
             "Genome binary",
             "Genome index",
             "Transcript DB",
+            "Transcript source",
         ];
         for name in &dependent {
             results.push(CheckResult::fail(format!(
@@ -323,6 +402,7 @@ output_dir = "{output_dir}"
         fs::write(data_dir.join("GRCh38.bin"), b"genome").unwrap();
         fs::write(data_dir.join("GRCh38.bin.idx"), b"index").unwrap();
         fs::write(data_dir.join("transcript_models.bin"), versioned_store()).unwrap();
+        write_manifest(&data_dir, "mane", "1.5");
 
         let config_path = write_test_config(tmp.path(), &data_dir.display().to_string());
 
@@ -332,6 +412,84 @@ output_dir = "{output_dir}"
         };
         let result = run(&args).expect("check should not error");
         assert!(result);
+    }
+
+    /// Write a `transcript_models.manifest.json` naming `source` `release`.
+    fn write_manifest(data_dir: &Path, source: &str, release: &str) {
+        let manifest = serde_json::json!({ "source": source, "source_version": release });
+        fs::write(
+            data_dir.join("transcript_models.manifest.json"),
+            manifest.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The config written by [`write_test_config`], parsed.
+    fn parsed_config(dir: &Path) -> config::VareffectConfig {
+        let path = write_test_config(dir, "data");
+        toml::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn load_store(bytes: &[u8]) -> TranscriptStore {
+        TranscriptStore::from_bytes(bytes).expect("load store")
+    }
+
+    #[test]
+    fn provenance_passes_when_config_manifest_and_store_agree() {
+        let tmp = TempDir::new().unwrap();
+        write_manifest(tmp.path(), "mane", "1.5");
+        let result = check_provenance(
+            &parsed_config(tmp.path()),
+            &load_store(&versioned_store()),
+            &tmp.path().join("transcript_models.manifest.json"),
+        );
+        assert_eq!(result.status, CheckStatus::Pass, "{}", result.detail);
+    }
+
+    #[test]
+    fn provenance_fails_on_any_disagreement() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = parsed_config(tmp.path());
+        let manifest_path = tmp.path().join("transcript_models.manifest.json");
+        let store = load_store(&versioned_store());
+
+        // Manifest release differs.
+        write_manifest(tmp.path(), "mane", "1.4");
+        assert_eq!(
+            check_provenance(&cfg, &store, &manifest_path).status,
+            CheckStatus::Fail
+        );
+
+        // Manifest without a source (written before manifests recorded it).
+        fs::write(&manifest_path, r#"{"source_version": "1.5"}"#).unwrap();
+        assert_eq!(
+            check_provenance(&cfg, &store, &manifest_path).status,
+            CheckStatus::Fail
+        );
+
+        // Manifest missing.
+        fs::remove_file(&manifest_path).unwrap();
+        assert_eq!(
+            check_provenance(&cfg, &store, &manifest_path).status,
+            CheckStatus::Fail
+        );
+
+        // Store of another release.
+        write_manifest(tmp.path(), "mane", "1.5");
+        let transcripts = load_store(&versioned_store()).transcripts().to_vec();
+        let other = vareffect::encode_transcript_store(
+            Some(vareffect::TranscriptSource::Mane),
+            Some("1.4"),
+            &transcripts,
+        )
+        .expect("encode");
+        let result = check_provenance(&cfg, &load_store(&other), &manifest_path);
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(
+            result.detail.contains("the store is mane 1.4"),
+            "{}",
+            result.detail
+        );
     }
 
     /// A complete one-transcript store as `vareffect setup` writes it.

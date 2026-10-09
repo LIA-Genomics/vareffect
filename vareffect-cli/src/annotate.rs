@@ -35,6 +35,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use vareffect::{VarEffect, VarEffectError};
 
+use crate::common::store_provenance;
 use crate::csq;
 use crate::vcf;
 
@@ -130,7 +131,7 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     // -- 5. Process headers -----------------------------------------------
     // Drop trailing '\r' so CRLF input doesn't leave it in the spliced output.
     let mut lines = reader.lines().map(|r| r.map(strip_trailing_cr));
-    process_headers(&mut lines, &mut writer)?;
+    process_headers(&mut lines, &mut writer, &store_provenance(ve.transcripts()))?;
 
     // -- 6. Pipelined parallel annotation ---------------------------------
     // A reader thread prefetches chunks while the main thread annotates each
@@ -210,40 +211,68 @@ pub fn run(config: &AnnotateConfig<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Read VCF header lines, inject the CSQ header, and write them to output.
+/// Meta-information key naming the transcript source and release of the
+/// store that produced the CSQ annotations.
+const TRANSCRIPTS_META_KEY: &str = "##vareffect_transcripts=";
+
+/// Read VCF header lines, inject vareffect's header lines, and write them to
+/// output.
 ///
-/// Passes all `##` meta-information lines through verbatim. Inserts
+/// Passes all `##` meta-information lines through verbatim, except an input
+/// `##vareffect_transcripts=` line: it describes an earlier annotation, not
+/// this one. Inserts `##vareffect_transcripts=<transcripts>` and
 /// [`csq::CSQ_HEADER`] immediately before the `#CHROM` column header line,
 /// then writes the `#CHROM` line itself.
+///
+/// # Arguments
+///
+/// * `lines` -- Input lines, consumed up to and including `#CHROM`.
+/// * `writer` -- Output sink.
+/// * `transcripts` -- The store's `<source> <release>` (see
+///   [`store_provenance`]); control characters are written as `_`, so a
+///   release string cannot break the header into extra lines.
+///
+/// # Errors
+///
+/// Returns an error if a line cannot be read or written.
 fn process_headers(
     lines: &mut impl Iterator<Item = std::io::Result<String>>,
     writer: &mut dyn Write,
+    transcripts: &str,
 ) -> Result<()> {
+    let transcripts = transcripts.replace(char::is_control, "_");
+    let write_vareffect_headers = |writer: &mut dyn Write| -> Result<()> {
+        writeln!(writer, "{TRANSCRIPTS_META_KEY}{transcripts}")
+            .context("writing transcripts header")?;
+        writeln!(writer, "{}", csq::CSQ_HEADER).context("writing CSQ header")
+    };
     for line_result in lines {
         let line = line_result.context("reading VCF header")?;
-        if line.starts_with("##") {
+        if line.starts_with(TRANSCRIPTS_META_KEY) {
+            tracing::warn!("replacing the input's header line {line:?}");
+            continue;
+        } else if line.starts_with("##") {
             writeln!(writer, "{line}").context("writing meta header")?;
         } else if line.starts_with("#CHROM") {
-            writeln!(writer, "{}", csq::CSQ_HEADER).context("writing CSQ header")?;
+            write_vareffect_headers(writer)?;
             writeln!(writer, "{line}").context("writing column header")?;
             return Ok(());
         } else {
             // Data line before #CHROM — malformed VCF but don't crash.
-            // Inject CSQ header and then handle this line as data.
+            // Inject the headers and then handle this line as data.
             tracing::warn!("data line encountered before #CHROM header");
-            writeln!(writer, "{}", csq::CSQ_HEADER).context("writing CSQ header")?;
+            write_vareffect_headers(writer)?;
             writeln!(writer, "{line}").context("writing unexpected data line")?;
             return Ok(());
         }
     }
 
-    // No #CHROM found (empty/truncated input): inject CSQ header and warn.
+    // No #CHROM found (empty/truncated input): inject the headers and warn.
     tracing::warn!(
         "no #CHROM line found in input; wrote header only and annotated no variants \
          (is the input a complete, valid VCF?)"
     );
-    writeln!(writer, "{}", csq::CSQ_HEADER).context("writing CSQ header (empty VCF)")?;
-    Ok(())
+    write_vareffect_headers(writer)
 }
 
 /// Drop a single trailing `\r` (`BufRead::lines` strips `\n` but not `\r`).
@@ -436,12 +465,45 @@ mod tests {
         ];
         let mut lines = input.into_iter();
         let mut out: Vec<u8> = Vec::new();
-        process_headers(&mut lines, &mut out).expect("process headers");
+        process_headers(&mut lines, &mut out, "gencode 50").expect("process headers");
 
         let text = String::from_utf8(out).expect("utf8");
         let csq_pos = text.find("ID=CSQ").expect("CSQ header written");
         let chrom_pos = text.find("#CHROM").expect("#CHROM written");
         assert!(csq_pos < chrom_pos, "CSQ header must precede #CHROM");
+    }
+
+    #[test]
+    fn process_headers_writes_transcripts_line_before_csq() {
+        let input: [std::io::Result<String>; 3] = [
+            Ok("##fileformat=VCFv4.2".to_string()),
+            Ok("##vareffect_transcripts=mane 1.4".to_string()),
+            Ok("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO".to_string()),
+        ];
+        let mut lines = input.into_iter();
+        let mut out: Vec<u8> = Vec::new();
+        process_headers(&mut lines, &mut out, "refseq RS_2025_08").expect("process headers");
+
+        let text = String::from_utf8(out).expect("utf8");
+        let written: Vec<&str> = text.lines().collect();
+        assert_eq!(written[0], "##fileformat=VCFv4.2");
+        assert_eq!(written[1], "##vareffect_transcripts=refseq RS_2025_08");
+        assert!(written[2].starts_with("##INFO=<ID=CSQ"), "{}", written[2]);
+        assert!(written[3].starts_with("#CHROM"), "{}", written[3]);
+        assert_eq!(written.len(), 4, "the input's transcripts line is dropped");
+    }
+
+    #[test]
+    fn process_headers_writes_control_characters_as_underscores() {
+        let mut lines = std::iter::empty();
+        let mut out: Vec<u8> = Vec::new();
+        process_headers(&mut lines, &mut out, "mane 1.5\n##x=y").expect("process headers");
+
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(
+            text.starts_with("##vareffect_transcripts=mane 1.5_##x=y\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -452,10 +514,11 @@ mod tests {
         ];
         let mut lines = input.into_iter();
         let mut out: Vec<u8> = Vec::new();
-        process_headers(&mut lines, &mut out).expect("process headers");
+        process_headers(&mut lines, &mut out, "mane 1.5").expect("process headers");
 
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("ID=CSQ"), "CSQ header still injected");
+        assert!(text.contains("##vareffect_transcripts=mane 1.5\n"));
         assert!(
             !text.contains("#CHROM"),
             "no #CHROM line in header-only input"
