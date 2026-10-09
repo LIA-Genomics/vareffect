@@ -255,7 +255,7 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 /// Convert a one-letter amino acid code to its three-letter abbreviation.
 ///
 /// Returns `"Ter"` for stop (`*`) and the standard three-letter code for
-/// the 20 standard amino acids. Any other byte (including the IUPAC `X`
+/// the 20 standard amino acids and selenocysteine (`U`, `"Sec"`). Any other byte (including the IUPAC `X`
 /// placeholder and invalid input) maps to `"Xaa"`, the IUPAC "any / unknown
 /// amino acid" symbol, so this function never panics.
 ///
@@ -265,6 +265,7 @@ pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
 /// use vareffect::codon::aa_three_letter;
 /// assert_eq!(aa_three_letter(b'M'), "Met");
 /// assert_eq!(aa_three_letter(b'*'), "Ter");
+/// assert_eq!(aa_three_letter(b'U'), "Sec");
 /// assert_eq!(aa_three_letter(b'X'), "Xaa");
 /// ```
 pub fn aa_three_letter(one_letter: u8) -> &'static str {
@@ -289,6 +290,7 @@ pub fn aa_three_letter(one_letter: u8) -> &'static str {
         b'V' => "Val",
         b'W' => "Trp",
         b'Y' => "Tyr",
+        b'U' => "Sec",
         b'*' => "Ter",
         // `X` is IUPAC for "any amino acid"; any other byte (including
         // garbage input) falls through to the same sentinel — a public
@@ -401,6 +403,75 @@ pub fn translate_sequence(
     let mut aas = Vec::with_capacity(seq.len() / 3);
     for codon in seq.as_chunks::<3>().0 {
         aas.push(translate_codon_for_transcript(codon, is_mitochondrial));
+    }
+    Ok(aas)
+}
+
+/// Translate a reference codon, reading `TGA` at a selenocysteine codon as
+/// `U`.
+///
+/// Only the reference peptide takes the selenocysteine: VEP 116 applies the
+/// translation's seq edits to the reference allele alone and translates
+/// every alternate allele with the plain table
+/// (`TranscriptVariationAllele.pm::peptide`; NM_000581.4 c.146G>A is
+/// `U/*`, an inserted `TGA` is `-/*`). Alternate sequences therefore use
+/// [`translate_codon_for_transcript`].
+///
+/// # Arguments
+///
+/// * `codon` -- Three uppercase coding-strand bases
+/// * `codon_number` -- 1-based codon number of `codon` in the CDS
+/// * `selenocysteine_codons` -- ascending 1-based selenocysteine codon numbers
+/// * `is_mitochondrial` -- `true` for chrM transcripts (NCBI table 2)
+///
+/// # Returns
+///
+/// The one-letter amino acid, as [`translate_codon_for_transcript`] except
+/// `b'U'` for `TGA` at a selenocysteine codon.
+pub(crate) fn translate_reference_codon(
+    codon: &[u8; 3],
+    codon_number: u32,
+    selenocysteine_codons: &[u32],
+    is_mitochondrial: bool,
+) -> u8 {
+    if codon == b"TGA" && selenocysteine_codons.binary_search(&codon_number).is_ok() {
+        b'U'
+    } else {
+        translate_codon_for_transcript(codon, is_mitochondrial)
+    }
+}
+
+/// [`translate_sequence`] for a reference sequence: `TGA` at a
+/// selenocysteine codon reads as `U` (see [`translate_reference_codon`]).
+///
+/// # Arguments
+///
+/// * `seq` -- Uppercase coding-strand bases, a whole number of codons
+/// * `first_codon_number` -- 1-based codon number of the first codon of `seq`
+/// * `selenocysteine_codons` -- ascending 1-based selenocysteine codon numbers
+/// * `is_mitochondrial` -- `true` for chrM transcripts (NCBI table 2)
+///
+/// # Errors
+///
+/// Returns [`crate::VarEffectError::Malformed`] if `seq.len() % 3 != 0`.
+pub(crate) fn translate_reference_sequence(
+    seq: &[u8],
+    first_codon_number: u32,
+    selenocysteine_codons: &[u32],
+    is_mitochondrial: bool,
+) -> Result<Vec<u8>, crate::VarEffectError> {
+    let mut aas = translate_sequence(seq, is_mitochondrial)?;
+    for &sec in selenocysteine_codons {
+        let Some(i) = sec.checked_sub(first_codon_number) else {
+            continue;
+        };
+        let i = i as usize;
+        if i >= aas.len() {
+            break;
+        }
+        if &seq[i * 3..i * 3 + 3] == b"TGA" {
+            aas[i] = b'U';
+        }
     }
     Ok(aas)
 }
@@ -700,7 +771,25 @@ mod tests {
         assert_eq!(buf, b"TGCA");
     }
 
-    /// Verify all 20 standard amino acids + Ter + Xaa three-letter codes.
+    #[test]
+    fn reference_translation_reads_tga_at_sec_codon_as_u() {
+        let sec = [3, 5];
+        assert_eq!(translate_reference_codon(b"TGA", 3, &sec, false), b'U');
+        assert_eq!(translate_reference_codon(b"TGA", 4, &sec, false), b'*');
+        // A Sec position whose reference codon is not TGA keeps its table.
+        assert_eq!(translate_reference_codon(b"TGG", 3, &sec, false), b'W');
+        assert_eq!(translate_reference_codon(b"TGA", 3, &[], false), b'*');
+
+        // Codons 2..=5: TGA at codon 2 is a stop, at 3 and 5 Sec.
+        let aas = translate_reference_sequence(b"TGATGAAAATGA", 2, &sec, false).expect("whole");
+        assert_eq!(aas, b"*UKU");
+        // Sec codons before and after the window are ignored.
+        let aas = translate_reference_sequence(b"TGA", 4, &sec, false).expect("whole");
+        assert_eq!(aas, b"*");
+        assert!(translate_reference_sequence(b"TG", 3, &sec, false).is_err());
+    }
+
+    /// Verify all 20 standard amino acids + Sec + Ter + Xaa three-letter codes.
     #[test]
     fn aa_three_letter_all_20() {
         let cases: &[(u8, &str)] = &[
@@ -724,6 +813,7 @@ mod tests {
             (b'V', "Val"),
             (b'W', "Trp"),
             (b'Y', "Tyr"),
+            (b'U', "Sec"),
             (b'*', "Ter"),
             (b'X', "Xaa"),
         ];

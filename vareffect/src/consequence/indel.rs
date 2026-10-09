@@ -8,7 +8,8 @@ use super::helpers::{
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
-    format_amino_acids_indel, format_codons_indel, reverse_complement, translate_sequence,
+    format_amino_acids_indel, format_codons_indel, reverse_complement,
+    translate_reference_sequence, translate_sequence,
 };
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
@@ -259,8 +260,29 @@ pub(super) fn translate_with_partial_codon(
     seq: &[u8],
     is_mito: bool,
 ) -> Result<Vec<u8>, VarEffectError> {
+    translate_reference_with_partial_codon(seq, 1, &[], is_mito)
+}
+
+/// [`translate_with_partial_codon`] for a reference sequence starting at
+/// 1-based codon `first_codon_number`, reading `TGA` at a selenocysteine
+/// codon as `U` ([`translate_reference_sequence`]).
+///
+/// # Errors
+///
+/// Never in practice: the complete codons are a whole number of bases.
+pub(super) fn translate_reference_with_partial_codon(
+    seq: &[u8],
+    first_codon_number: u32,
+    selenocysteine_codons: &[u32],
+    is_mito: bool,
+) -> Result<Vec<u8>, VarEffectError> {
     let whole = seq.len() - seq.len() % 3;
-    let mut aas = translate_sequence(&seq[..whole], is_mito)?;
+    let mut aas = translate_reference_sequence(
+        &seq[..whole],
+        first_codon_number,
+        selenocysteine_codons,
+        is_mito,
+    )?;
     if whole < seq.len() && aas != b"*" {
         aas.push(b'X');
     }
@@ -316,7 +338,12 @@ fn deletion_into_partial_codon_result(
     let impact = finalize_consequences(&mut consequences);
 
     let is_mito = transcript.chrom == "chrM";
-    let ref_aas = translate_with_partial_codon(&ref_seq, is_mito)?;
+    let ref_aas = translate_reference_with_partial_codon(
+        &ref_seq,
+        codon_start / 3 + 1,
+        index.selenocysteine_codons(),
+        is_mito,
+    )?;
     let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
     let protein_start = codon_start / 3 + 1;
 
@@ -866,7 +893,12 @@ pub(super) fn annotate_cds_frameshift(
             (ref_codon.to_vec(), alt_seq, local_start)
         };
         let codons = format_codons_indel(&ref_seq, &alt_seq, local_start, local_start);
-        let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+        let ref_aas = translate_reference_sequence(
+            &ref_seq,
+            codon_start / 3 + 1,
+            index.selenocysteine_codons(),
+            is_mito,
+        )?;
         let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
         (Some(codons), ref_aas, alt_aas, codon_number)
     } else {
@@ -891,7 +923,12 @@ pub(super) fn annotate_cds_frameshift(
         }
         alt_seq.extend_from_slice(&ref_seq[local_del_end..]);
 
-        let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+        let ref_aas = translate_reference_sequence(
+            &ref_seq,
+            codon_start / 3 + 1,
+            index.selenocysteine_codons(),
+            is_mito,
+        )?;
         let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
         let codons_str = format_codons_indel(&ref_seq, &alt_seq, local_del_start, local_del_end);
         (Some(codons_str), ref_aas, alt_aas, codon_end / 3)
@@ -1205,7 +1242,12 @@ fn annotate_cds_inframe_deletion(
     alt_seq.extend_from_slice(&ref_seq[..local_del_start]);
     alt_seq.extend_from_slice(&ref_seq[local_del_end..]);
 
-    let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+    let ref_aas = translate_reference_sequence(
+        &ref_seq,
+        codon_start / 3 + 1,
+        index.selenocysteine_codons(),
+        is_mito,
+    )?;
     let alt_aas = translate_sequence(&alt_seq, is_mito)?;
 
     let first_codon = codon_start / 3;
@@ -1251,7 +1293,12 @@ fn annotate_cds_inframe_deletion(
     let (ref_aas_ext, alt_aas_ext) = if ext_codon_end > codon_end {
         let ext_seq =
             fetch_cds_sequence(codon_end, ext_codon_end, chrom, transcript, index, fasta)?;
-        let ext_aas = translate_sequence(&ext_seq, is_mito)?;
+        let ext_aas = translate_reference_sequence(
+            &ext_seq,
+            codon_end / 3 + 1,
+            index.selenocysteine_codons(),
+            is_mito,
+        )?;
         let mut r = ref_aas.clone();
         r.extend_from_slice(&ext_aas);
         let mut a = alt_aas.clone();
@@ -1281,6 +1328,7 @@ fn annotate_cds_inframe_deletion(
             stop_protein_pos,
             chrom,
             transcript,
+            index.has_selenocysteine_before(protein_start),
             fasta,
         )?);
     }
@@ -1402,6 +1450,7 @@ impl InsertionCodons {
             coding_inserted,
             local,
             codon_index,
+            index.selenocysteine_codons(),
             transcript.chrom == "chrM",
         )
     }
@@ -1414,6 +1463,8 @@ impl InsertionCodons {
     /// * `coding_inserted` -- inserted bases on the coding strand
     /// * `local` -- index in `ref_codon` the bases go before
     /// * `codon_index` -- 0-based codon holding the insertion, or after it
+    /// * `selenocysteine_codons` -- 1-based selenocysteine codon numbers,
+    ///   read as `U` in the reference codon only
     /// * `is_mito` -- translate with NCBI table 2
     ///
     /// # Errors
@@ -1424,6 +1475,7 @@ impl InsertionCodons {
         coding_inserted: &[u8],
         local: usize,
         codon_index: u32,
+        selenocysteine_codons: &[u32],
         is_mito: bool,
     ) -> Result<Self, VarEffectError> {
         let mut alt_codon = Vec::with_capacity(ref_codon.len() + coding_inserted.len());
@@ -1431,7 +1483,12 @@ impl InsertionCodons {
         alt_codon.extend_from_slice(coding_inserted);
         alt_codon.extend_from_slice(&ref_codon[local..]);
         let peptides = crate::hgvs_p::InsertionPeptides {
-            ref_aas: translate_sequence(&ref_codon, is_mito)?,
+            ref_aas: translate_reference_sequence(
+                &ref_codon,
+                codon_index + 1,
+                selenocysteine_codons,
+                is_mito,
+            )?,
             alt_aas: translate_sequence(&alt_codon, is_mito)?,
             tl_start: codon_index + 1,
             tl_end: if local == 0 {
@@ -1507,7 +1564,12 @@ impl crate::hgvs_p::ReferenceProtein for CdsProtein<'_> {
             self.index,
             self.fasta,
         )?;
-        translate_sequence(&seq, self.transcript.chrom == "chrM")
+        translate_reference_sequence(
+            &seq,
+            start + 1,
+            self.index.selenocysteine_codons(),
+            self.transcript.chrom == "chrM",
+        )
     }
 }
 

@@ -40,7 +40,11 @@ fn ptc_transcript() -> TranscriptModel {
 /// its shifted frames read `GTC`/`TCG` forever and its 3'UTR is poly-A, so
 /// every frameshift there ends in `fsTer?`.
 fn write_ptc_fasta() -> (TempDir, FastaReader) {
-    let tmp = TempDir::new().unwrap();
+    write_chr4_fasta(&ptc_chr4())
+}
+
+/// The chr4 sequence of [`write_ptc_fasta`].
+fn ptc_chr4() -> Vec<u8> {
     let mut chr4 = vec![b'A'; 6000];
 
     let mut cds = Vec::with_capacity(1500);
@@ -77,8 +81,13 @@ fn write_ptc_fasta() -> (TempDir, FastaReader) {
     // TAA that only the 2-base-deletion frame reads as a codon. The 1-base
     // frame reads it as `ATA`, so it still runs off the end as `fsTer?`.
     chr4[4502..4505].copy_from_slice(b"TAA");
+    chr4
+}
 
-    let contigs: Vec<(&str, &[u8])> = vec![("chr4", &chr4)];
+/// Write `chr4` as a one-contig genome.
+fn write_chr4_fasta(chr4: &[u8]) -> (TempDir, FastaReader) {
+    let tmp = TempDir::new().unwrap();
+    let contigs: Vec<(&str, &[u8])> = vec![("chr4", chr4)];
     let bin_path = tmp.path().join("ptc.bin");
     let idx_path = tmp.path().join("ptc.bin.idx");
     write_genome_binary(&contigs, "ptc", &bin_path, &idx_path).unwrap();
@@ -3033,9 +3042,15 @@ mod inframe_insertion_terms {
         has_utr5: bool,
         protein: &'static [u8],
     ) -> Vec<Consequence> {
-        let codons =
-            InsertionCodons::from_codon(ref_codon.to_vec(), inserted, local, codon_index, false)
-                .expect("whole codons");
+        let codons = InsertionCodons::from_codon(
+            ref_codon.to_vec(),
+            inserted,
+            local,
+            codon_index,
+            &[],
+            false,
+        )
+        .expect("whole codons");
         inframe_insertion_terms(&codons, inserted.len(), true, has_utr5, &Protein(protein))
             .expect("in-memory protein")
     }
@@ -3134,14 +3149,15 @@ mod inframe_insertion_terms {
 
     #[test]
     fn insertion_codons_between_and_inside_codons() {
-        let between = InsertionCodons::from_codon(Vec::new(), b"TTA", 0, 14, false).unwrap();
+        let between = InsertionCodons::from_codon(Vec::new(), b"TTA", 0, 14, &[], false).unwrap();
         assert_eq!(between.peptides.ref_aas, b"");
         assert_eq!(between.peptides.alt_aas, b"L");
         assert_eq!(
             (between.peptides.tl_start, between.peptides.tl_end),
             (15, 14)
         );
-        let inside = InsertionCodons::from_codon(b"CGC".to_vec(), b"TTT", 1, 174, false).unwrap();
+        let inside =
+            InsertionCodons::from_codon(b"CGC".to_vec(), b"TTT", 1, 174, &[], false).unwrap();
         assert_eq!(inside.peptides.alt_aas, b"LC");
         assert_eq!(
             (inside.peptides.tl_start, inside.peptides.tl_end),
@@ -3532,4 +3548,147 @@ fn deletion_from_the_intron_shifted_into_the_cds_takes_its_hgvs_p() {
     let intronic = annotate_deletion("chrU", 58, 60, b"AG", &tx, &index, &fasta).unwrap();
     assert_eq!(intronic.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.31_32del"));
     assert_eq!(intronic.hgvs_p, None, "{intronic:?}");
+}
+
+// -- Selenocysteine ---------------------------------------------------------
+
+/// [`ptc_transcript`] with a selenocysteine codon at codon 101 (CDS offsets
+/// 300..303, genomic 1800..1803), and its genome: [`ptc_chr4`] with `TGA`
+/// there and an in-frame `TAA` as the second 3'UTR codon, so a stop-lost
+/// variant has a stop to count to. `with_sec` false gives the same genome
+/// with no selenocysteine on the model.
+fn sec_fixture(with_sec: bool) -> (TempDir, FastaReader, TranscriptModel, LocateIndex) {
+    let mut chr4 = ptc_chr4();
+    chr4[1800..1803].copy_from_slice(b"TGA");
+    chr4[4503..4506].copy_from_slice(b"TAA");
+    let (tmp, fasta) = write_chr4_fasta(&chr4);
+    let mut tx = ptc_transcript();
+    if with_sec {
+        tx.selenocysteine_codons = vec![1800];
+    }
+    let idx = build_index(&tx);
+    (tmp, fasta, tx, idx)
+}
+
+/// Expected values from VEP 116 REST on NM_000581.4 (GPX1, Sec49), recorded
+/// in `.vareffect-tasks/issue-13/vep_rest_wp5.tsv`: the reference codon is
+/// `U`, the alternate translates with the standard table.
+#[test]
+fn selenocysteine_snvs_follow_vep() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+
+    // TGA>TAA: stop_gained (GPX1 c.146G>A, U/*, p.Sec49Ter).
+    let r = annotate_snv("chr4", 1801, b'G', b'A', &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.consequences, vec![Consequence::StopGained]);
+    assert_eq!(r.amino_acids.as_deref(), Some("U/*"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101Ter"));
+    assert!(r.ptc.protein_position().is_some());
+
+    // TGA>TGG: missense (GPX1 c.147A>G, U/W, p.Sec49Trp).
+    let r = annotate_snv("chr4", 1802, b'A', b'G', &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.consequences, vec![Consequence::MissenseVariant]);
+    assert_eq!(r.amino_acids.as_deref(), Some("U/W"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101Trp"));
+
+    // The same codon without a selenocysteine on the model is a stop.
+    let (_tmp, fasta, tx, idx) = sec_fixture(false);
+    let r = annotate_snv("chr4", 1801, b'G', b'A', &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.consequences, vec![Consequence::StopRetainedVariant]);
+}
+
+#[test]
+fn selenocysteine_codon_deletion_is_inframe() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+    // GPX1 c.145_147del: inframe_deletion, TGA/-, U/-, p.Sec49del.
+    let r = annotate_deletion("chr4", 1800, 1803, b"TGA", &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.consequences, vec![Consequence::InframeDeletion]);
+    assert_eq!(r.amino_acids.as_deref(), Some("U/-"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101del"));
+}
+
+#[test]
+fn selenocysteine_inserted_tga_is_a_stop() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+    // GPX1 insertion of TGA before or after Sec49: stop_gained +
+    // inframe_insertion, -/TGA, -/*, p.Sec49_Gly50insTer.
+    let r = annotate_insertion("chr4", 1803, b"TGA", &tx, &idx, &fasta).unwrap();
+    assert!(r.consequences.contains(&Consequence::StopGained), "{r:?}");
+    assert_eq!(r.amino_acids.as_deref(), Some("-/*"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101_Arg102insTer"));
+}
+
+/// VEP 116 counts a frameshift's new stop from the start of the whole
+/// alternate translation, where an upstream selenocysteine `TGA` is the
+/// first stop: `fsTer?` (GPX1 c.149del, p.Gly50AlafsTer?). A frameshift
+/// upstream of the selenocysteine keeps its count (c.100del,
+/// p.Ser34ProfsTer26). The PTC is the real termination codon either way.
+#[test]
+fn selenocysteine_frameshift_ter_count_follows_vep() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+    // 1-base deletion at CDS offset 600 (genomic 3100): first stop at CDS
+    // 1150, alternate residue 384 (see ptc_frameshift tests).
+    let downstream = annotate_deletion("chr4", 3100, 3101, b"C", &tx, &idx, &fasta).unwrap();
+    let hgvs_p = downstream.hgvs_p.as_deref().expect("frameshift HGVS p.");
+    assert!(hgvs_p.ends_with("fsTer?"), "{hgvs_p}");
+    assert_eq!(downstream.ptc.protein_position(), Some(384));
+
+    let upstream = annotate_deletion("chr4", 1600, 1601, b"G", &tx, &idx, &fasta).unwrap();
+    let hgvs_p = upstream.hgvs_p.as_deref().expect("frameshift HGVS p.");
+    assert!(!hgvs_p.ends_with("fsTer?"), "{hgvs_p}");
+
+    let (_tmp, fasta, tx, idx) = sec_fixture(false);
+    let control = annotate_deletion("chr4", 3100, 3101, b"C", &tx, &idx, &fasta).unwrap();
+    assert!(!control.hgvs_p.as_deref().unwrap().ends_with("fsTer?"));
+}
+
+/// VEP 116 writes `extTer?` for every stop-lost on a selenoprotein
+/// (GPX1 c.610T>C, p.Ter204GlnextTer?; c.610_612del, p.Ter204delextTer?).
+#[test]
+fn selenocysteine_stop_lost_extension_is_unknown() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+    let snv = annotate_snv("chr4", 4497, b'T', b'C', &tx, &idx, &fasta).unwrap();
+    assert_eq!(snv.hgvs_p.as_deref(), Some("p.Ter500GlnextTer?"));
+    let del = annotate_deletion("chr4", 4497, 4500, b"TAA", &tx, &idx, &fasta).unwrap();
+    assert_eq!(del.hgvs_p.as_deref(), Some("p.Ter500delextTer?"));
+
+    let (_tmp, fasta, tx, idx) = sec_fixture(false);
+    let snv = annotate_snv("chr4", 4497, b'T', b'C', &tx, &idx, &fasta).unwrap();
+    assert_eq!(snv.hgvs_p.as_deref(), Some("p.Ter500GlnextTer2"));
+    let del = annotate_deletion("chr4", 4497, 4500, b"TAA", &tx, &idx, &fasta).unwrap();
+    assert_eq!(del.hgvs_p.as_deref(), Some("p.Ter500delextTer1"));
+}
+
+/// VEP 116 writes `delextTer?` only while a selenocysteine `TGA` stays
+/// upstream of the deletion; deleting it too gives a count (NM_001093771.3
+/// c.1948_1950del `p.Ter650delextTer?`, c.1942_1950del
+/// `p.Sec648_Ter650delextTer53`).
+#[test]
+fn selenocysteine_deleted_with_the_stop_gives_a_count() {
+    let mut chr4 = ptc_chr4();
+    chr4[4494..4497].copy_from_slice(b"TGA");
+    chr4[4503..4506].copy_from_slice(b"TAA");
+    let (_tmp, fasta) = write_chr4_fasta(&chr4);
+    let mut tx = ptc_transcript();
+    tx.selenocysteine_codons = vec![4494];
+    let idx = build_index(&tx);
+
+    let stop_only = annotate_deletion("chr4", 4497, 4500, b"TAA", &tx, &idx, &fasta).unwrap();
+    assert_eq!(stop_only.hgvs_p.as_deref(), Some("p.Ter500delextTer?"));
+    let with_sec = annotate_deletion("chr4", 4494, 4500, b"TGATAA", &tx, &idx, &fasta).unwrap();
+    let hgvs_p = with_sec.hgvs_p.as_deref().expect("stop-lost HGVS p.");
+    assert!(!hgvs_p.ends_with('?'), "{hgvs_p}");
+}
+
+/// An MNV that leaves the selenocysteine `TGA` intact reads it as a stop in
+/// the alternate window, as VEP 116 does (NM_000581.4
+/// c.144_150delinsATGAGGT, two synonymous changes: `stop_gained`, `LUG/L*G`,
+/// `p.Sec49Ter`).
+#[test]
+fn selenocysteine_kept_by_an_mnv_is_a_stop_in_the_alternate() {
+    let (_tmp, fasta, tx, idx) = sec_fixture(true);
+    // CGT TGA CGT -> CGC TGA CGC at genomic 1797..1806.
+    let r = annotate_mnv("chr4", 1799, b"TTGACGT", b"CTGACGC", &tx, &idx, &fasta).unwrap();
+    assert!(r.consequences.contains(&Consequence::StopGained), "{r:?}");
+    assert_eq!(r.amino_acids.as_deref(), Some("RUR/R*R"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101Ter"));
 }

@@ -8,8 +8,8 @@ use super::helpers::{
 use super::indel::{annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result};
 use super::{Consequence, ConsequenceResult, Impact, PtcStatus};
 use crate::codon::{
-    format_amino_acids_indel, format_codons_indel, reverse_complement,
-    translate_codon_for_transcript, translate_sequence,
+    format_amino_acids_indel, format_codons_indel, reverse_complement, translate_reference_codon,
+    translate_reference_sequence, translate_sequence,
 };
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
@@ -495,7 +495,12 @@ pub(super) fn annotate_boundary_spanning_deletion(
         let ref_aa = if codon_start_offset + 3 <= total_cds {
             let ref_codon =
                 fetch_ref_codon(codon_start_offset, chrom, transcript, locate_index, fasta)?;
-            translate_codon_for_transcript(&ref_codon, is_mito)
+            translate_reference_codon(
+                &ref_codon,
+                first_codon + 1,
+                locate_index.selenocysteine_codons(),
+                is_mito,
+            )
         } else {
             b'X'
         };
@@ -537,7 +542,12 @@ pub(super) fn annotate_boundary_spanning_deletion(
         let mut alt_window = ref_window[..local_del_start].to_vec();
         alt_window.extend_from_slice(&ref_window[local_del_end..]);
         let ref_window_aas = if ref_window.len().is_multiple_of(3) {
-            translate_sequence(&ref_window, is_mito)?
+            translate_reference_sequence(
+                &ref_window,
+                first_codon + 1,
+                locate_index.selenocysteine_codons(),
+                is_mito,
+            )?
         } else {
             vec![ref_aa]
         };
@@ -596,7 +606,12 @@ pub(super) fn annotate_boundary_spanning_deletion(
     alt_seq.extend_from_slice(&ref_seq[..local_del_start]);
     alt_seq.extend_from_slice(&ref_seq[local_del_end..]);
 
-    let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+    let ref_aas = translate_reference_sequence(
+        &ref_seq,
+        codon_start / 3 + 1,
+        locate_index.selenocysteine_codons(),
+        is_mito,
+    )?;
     let alt_aas = if alt_seq.is_empty() || !alt_seq.len().is_multiple_of(3) {
         Vec::new()
     } else {
@@ -642,7 +657,12 @@ pub(super) fn annotate_boundary_spanning_deletion(
             locate_index,
             fasta,
         )?;
-        let ext_aas = translate_sequence(&ext_seq, is_mito)?;
+        let ext_aas = translate_reference_sequence(
+            &ext_seq,
+            codon_end / 3 + 1,
+            locate_index.selenocysteine_codons(),
+            is_mito,
+        )?;
         let mut r = ref_aas.clone();
         r.extend_from_slice(&ext_aas);
         let mut a = alt_aas.clone();
@@ -670,6 +690,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
             stop_protein_pos,
             chrom,
             transcript,
+            locate_index.has_selenocysteine_before(protein_start),
             fasta,
         )?);
     }
@@ -888,7 +909,12 @@ fn annotate_complex_delins_core(
                 alt_seq.extend_from_slice(&coding_alt);
                 alt_seq.extend_from_slice(&ref_seq[local_del_end..]);
 
-                let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+                let ref_aas = translate_reference_sequence(
+                    &ref_seq,
+                    codon_start / 3 + 1,
+                    locate_index.selenocysteine_codons(),
+                    is_mito,
+                )?;
                 let alt_aas = if alt_seq.len().is_multiple_of(3) {
                     translate_sequence(&alt_seq, is_mito)?
                 } else {
@@ -1141,7 +1167,12 @@ fn annotate_mnv_core(
                 alt_seq[local_pos] = coding_alt[i as usize];
             }
 
-            let ref_aas = translate_sequence(&ref_seq, is_mito)?;
+            let ref_aas = translate_reference_sequence(
+                &ref_seq,
+                codon_start / 3 + 1,
+                locate_index.selenocysteine_codons(),
+                is_mito,
+            )?;
             let alt_aas = translate_sequence(&alt_seq, is_mito)?;
 
             let first_codon = codon_start / 3;

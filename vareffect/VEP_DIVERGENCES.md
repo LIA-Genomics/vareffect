@@ -395,6 +395,27 @@ for exon numbers) next to it.
     1 and returns 0 for ambiguous sequence, so the start predicates disagree
     by call order; NM_000546.6 `aTg/aNg`, `ATg/NNg`). `vareffect` reports
     `coding_sequence_variant`.
+- **Selenocysteine.** A codon listed in `selenocysteine_codons` (MANE and
+  RefSeq `transl_except` `aa:Sec`, GENCODE
+  `stop_codon_redefined_as_selenocysteine`) reads `TGA` as `U` (`Sec`) in
+  the reference peptide only; alternate alleles translate with the standard
+  table, as VEP 116 applies the translation's seq edits to the reference
+  allele alone (`TranscriptVariationAllele.pm::peptide`). VEP counts a new
+  stop from the start of the whole alternate translation
+  (`_stop_loss_extra_AA`), where a selenocysteine `TGA` the variant leaves
+  upstream is the first stop, so it writes `extTer?` for a stop-lost and
+  `fsTer?` for a frameshift after a selenocysteine (NM_000581.4 c.610T>C
+  `p.Ter204GlnextTer?`, c.149del `p.Gly50AlafsTer?`; a deletion that also
+  removes the selenocysteine gets a count, NM_001093771.3 c.1942_1950del).
+  `vareffect` writes the same; its `ptc` field keeps the located termination
+  codon. Likewise an MNV or delins whose codon window keeps a selenocysteine
+  `TGA` reads it as a stop in the alternate: NM_000581.4 c.144_150delinsATGAGGT
+  (two synonymous changes) is `stop_gained` `LUG/L*G` `p.Sec49Ter` in both,
+  so a protein-silent change gets a termination codon and NMD verdict. One
+  difference: VEP writes `U` at a listed position whatever the genome codon;
+  `vareffect` only for `TGA` (every selenocysteine codon in MANE 1.5, RefSeq
+  RS_2025_08 and GENCODE 50 reads `TGA` on GRCh38, so no output differs).
+  VEP 116 REST rows: `.vareffect-tasks/issue-13/vep_rest_wp5.tsv`.
 - **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
   resolve to `chrM` through the reader's alias table. VEP's in-frame
   insertion duplication check (`_check_for_peptide_duplication`) translates

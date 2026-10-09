@@ -8,7 +8,7 @@ use super::helpers::{
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
     complement, format_amino_acids, format_codon_bases, format_codons,
-    translate_codon_for_transcript,
+    translate_codon_for_transcript, translate_reference_codon,
 };
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
@@ -333,7 +333,12 @@ fn annotate_cds_snv(
     let alt_codon = build_alt_codon(&ref_codon, codon_position, coding_alt);
 
     let is_mito = transcript.chrom == "chrM";
-    let ref_aa = translate_codon_for_transcript(&ref_codon, is_mito);
+    let ref_aa = translate_reference_codon(
+        &ref_codon,
+        codon_number,
+        index.selenocysteine_codons(),
+        is_mito,
+    );
     let alt_aa = translate_codon_for_transcript(&alt_codon, is_mito);
 
     // Ambiguous codons (ref contains N)
