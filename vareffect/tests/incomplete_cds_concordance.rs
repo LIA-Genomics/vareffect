@@ -66,13 +66,7 @@
 //!    and gives `splice_region_variant` where VEP gives none (deletions 9 and
 //!    14 bases before it). The donor window spills as VEP's does
 //!    (`c.233_235del`).
-//! 10. Known pre-existing defect, not part of this suite's subject: on the
-//!     minus strand a frameshift insertion is placed one coding base early
-//!     (TP53 NM_000546.6 c.523_524insT: vareffect CDS 522 and
-//!     p.Arg175SerfsTer6, VEP 116 CDS 523 and p.Arg175LeufsTer6). HGVS p. and
-//!     CDS/cDNA positions are not compared for minus-strand frameshift
-//!     insertions (`MINUS_STRAND_INSERTION_ROWS`).
-//! 11. Known pre-existing defect, not part of this suite's subject: a
+//! 10. Known pre-existing defect, not part of this suite's subject: a
 //!     non-duplication insertion that HGVS shifts 3' keeps its inserted
 //!     bases unrotated (NM_001424184.1 insTGA after c.657: vareffect
 //!     `c.658_659insTGA`, VEP 116 `c.658_659insGAT`). HGVS c. is not compared
@@ -91,16 +85,12 @@ const HGVS_NOT_COMPARED: &[&str] = &[
     "minus_partial3_del2",
 ];
 
-/// Rows hit by the pre-existing unrotated HGVS insertion (normalization 11).
+/// Rows hit by the pre-existing unrotated HGVS insertion (normalization 10).
 const INSERTION_ROTATION_ROWS: &[&str] = &[
     "partial3_ins_5p_edge_tga",
     "partial3_ins_5p_edge_tgag",
     "partial3_ins_5p_edge_stop_then_codon",
 ];
-
-/// Rows hit by the pre-existing minus-strand insertion offset (normalization
-/// 10).
-const MINUS_STRAND_INSERTION_ROWS: &[&str] = &["ins_2bp_gap_edge_5p", "ins_2bp_gap_edge_3p"];
 
 /// Rows where vareffect deliberately differs from VEP (normalization 9):
 /// label, expected terms, expected impact.
@@ -388,7 +378,6 @@ fn incomplete_cds_and_frameshift_introns_match_vep_116() {
             check("impact", got.impact.to_string(), impact);
         }
         let hgvs_compared = !HGVS_NOT_COMPARED.contains(&row.label.as_str());
-        let positions_compared = !MINUS_STRAND_INSERTION_ROWS.contains(&row.label.as_str());
         if hgvs_compared && !INSERTION_ROTATION_ROWS.contains(&row.label.as_str()) {
             check(
                 "hgvs_c",
@@ -396,25 +385,23 @@ fn incomplete_cds_and_frameshift_introns_match_vep_116() {
                 format!("{:?}", expected_hgvsc(row)),
             );
         }
-        if hgvs_compared && positions_compared {
+        if hgvs_compared {
             check(
                 "hgvs_p",
                 format!("{:?}", strip_accession(got.hgvs_p.as_deref())),
                 format!("{:?}", expected_hgvsp(row)),
             );
         }
-        if positions_compared {
-            check(
-                "cdna_start",
-                format!("{:?}", got.cdna_position),
-                format!("{:?}", row.cdna_start),
-            );
-            check(
-                "cds_start",
-                format!("{:?}", got.cds_position),
-                format!("{:?}", row.cds_start),
-            );
-        }
+        check(
+            "cdna_start",
+            format!("{:?}", got.cdna_position),
+            format!("{:?}", row.cdna_start),
+        );
+        check(
+            "cds_start",
+            format!("{:?}", got.cds_position),
+            format!("{:?}", row.cds_start),
+        );
         check(
             "protein_start",
             format!("{:?}", got.protein_start),

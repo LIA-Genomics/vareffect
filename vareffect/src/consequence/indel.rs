@@ -14,8 +14,7 @@ use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::hgvs_c;
 use crate::locate::helpers::{
-    exonic_splice_spill, frameshift_intron_endpoint, frameshift_junction_insertion_point,
-    is_frameshift_junction_insertion,
+    exonic_splice_spill, frameshift_intron_endpoint, insertion_intron_effects,
 };
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
@@ -323,15 +322,8 @@ fn partial_terminal_codon_indel_result(
     let codon_start = total - total % 3;
     let ref_bases = fetch_cds_sequence(codon_start, total, chrom, transcript, index, fasta)?;
     let is_insertion = cds_offset_end == cds_offset_start;
-    // An insertion is classified by the CDS offset of genomic base `pos`. On
-    // the minus strand that base precedes the insertion point in coding
-    // order, so the bases go in after it (VEP 116 ENST00000518351.2
-    // c.544_545insG).
-    let edit_start = if is_insertion && matches!(transcript.strand, Strand::Minus) {
-        cds_offset_start + 1
-    } else {
-        cds_offset_start
-    };
+    // An insertion goes before `cds_offset_start` on both strands.
+    let edit_start = cds_offset_start;
     let edit_end = if is_insertion {
         edit_start
     } else {
@@ -439,20 +431,15 @@ pub(super) enum PartialCodonInsertion {
     /// Between the last complete codon and the partial codon, at this
     /// padded CDS offset (the insertion goes before it).
     FivePrimeEdge(u32),
-    /// After the last CDS base, which only the minus strand classifies as a
-    /// CDS insertion.
-    AfterCds,
 }
 
 /// Classify a CDS insertion against the incomplete terminal codon.
 ///
-/// An insertion is classified by the CDS offset of genomic base `pos`; on
-/// the minus strand that base precedes the insertion point in coding order,
-/// so the coding insertion point is one later. `None` when the CDS has no
+/// `insert_before` is the CDS offset the insertion goes before
+/// ([`IndelRegion::Cds`] for an insertion). `None` when the CDS has no
 /// partial codon or the insertion is elsewhere.
 pub(super) fn partial_codon_insertion_site(
-    classified_offset: u32,
-    transcript: &TranscriptModel,
+    insert_before: u32,
     index: &LocateIndex,
 ) -> Option<PartialCodonInsertion> {
     let total = index.total_cds_length();
@@ -460,13 +447,7 @@ pub(super) fn partial_codon_insertion_site(
         return None;
     }
     let partial_start = total - total % 3;
-    let insert_before = match transcript.strand {
-        Strand::Plus => classified_offset,
-        Strand::Minus => classified_offset + 1,
-    };
-    if insert_before >= total {
-        Some(PartialCodonInsertion::AfterCds)
-    } else if insert_before == partial_start && partial_start > 0 {
+    if insert_before == partial_start && partial_start > 0 {
         // With no complete codon before it (a CDS shorter than three bases)
         // there is no edge; the insertion is inside the only codon.
         Some(PartialCodonInsertion::FivePrimeEdge(insert_before))
@@ -557,6 +538,13 @@ fn partial_codon_edge_insertion_result(
 /// `pos` is the 0-based insertion point (post-trimming). The insertion
 /// occurs between positions `pos - 1` and `pos`. `inserted_bases` is the
 /// plus-strand sequence of inserted bases (trimmed ALT).
+///
+/// The region comes from [`locate_indel`] (classified at the insertion
+/// point, both strands), the splice and intron terms from VEP's intron
+/// predicates for an insertion: a canonical-site insertion is the canonical
+/// term alone (VEP 116 NM_000546.6 `c.782+1_782+2insC`:
+/// `splice_donor_variant`), and an insertion at an exon/intron junction is
+/// the coding change plus `splice_region_variant` (`c.782_782+1insT`).
 pub fn annotate_insertion(
     chrom: &str,
     pos: u64,
@@ -565,58 +553,21 @@ pub fn annotate_insertion(
     locate_index: &LocateIndex,
     fasta: &FastaReader,
 ) -> Result<ConsequenceResult, VarEffectError> {
-    let mut result =
-        annotate_insertion_core(chrom, pos, inserted_bases, transcript, locate_index, fasta)?;
-    add_splice_spill(
-        &mut result,
-        exonic_splice_spill(pos, pos, transcript, locate_index),
-    );
-    // An insertion at the edge of a frameshift intron whose canonical windows
-    // do not spill (gaps of 2 to 13 bases) also sits next to the gap's
-    // intronic bases: VEP 116 ENST00000436261.7 c.1475_1475+1insT is
-    // frameshift_variant + splice_region_variant + intron_variant.
-    if is_frameshift_junction_insertion(pos, transcript, locate_index)
-        && exonic_splice_spill(pos, pos, transcript, locate_index).is_none()
-    {
-        for term in [Consequence::SpliceRegionVariant, Consequence::IntronVariant] {
-            if !result.consequences.contains(&term) {
-                result.consequences.push(term);
-            }
-        }
-        result.impact = finalize_consequences(&mut result.consequences);
-    }
-    Ok(result)
-}
-
-/// [`annotate_insertion`] without the splice terms a one-base frameshift intron spills
-/// onto exon bases.
-fn annotate_insertion_core(
-    chrom: &str,
-    pos: u64,
-    inserted_bases: &[u8],
-    transcript: &TranscriptModel,
-    locate_index: &LocateIndex,
-    fasta: &FastaReader,
-) -> Result<ConsequenceResult, VarEffectError> {
-    let location_pos = frameshift_junction_insertion_point(pos, transcript, locate_index);
-    let location = locate_indel(chrom, location_pos, location_pos, transcript, locate_index)?;
+    let location = locate_indel(chrom, pos, pos, transcript, locate_index)?;
+    let effects = insertion_intron_effects(pos, transcript)?;
 
     // HGVS 3' normalization: shift insertion to the most 3' equivalent
     // position on the coding strand for HGVS notation. At the shifted
     // position, is_duplication() in format_insertion_hgvs naturally re-checks
     // the 5' flanking — if the shift moved the insertion point to a repeat
     // boundary, dup is detected.
-    let shift = if !location.crosses_exon_boundary {
-        crate::normalize::compute_3prime_shift_insertion(
-            chrom,
-            pos,
-            inserted_bases,
-            transcript,
-            fasta,
-        )?
-    } else {
-        0
-    };
+    let shift = crate::normalize::compute_3prime_shift_insertion(
+        chrom,
+        pos,
+        inserted_bases,
+        transcript,
+        fasta,
+    )?;
     let shifted_pos = match transcript.strand {
         Strand::Plus => pos + shift,
         Strand::Minus => pos - shift,
@@ -643,41 +594,25 @@ fn annotate_insertion_core(
         return Ok(result);
     }
 
-    if location.overlaps_splice_canonical
-        && exonic_splice_spill(pos, pos, transcript, locate_index).is_none()
-    {
-        let mut result = build_splice_indel_result(transcript, &location, pos, pos)?;
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
-
-    // Boundary crossing: insertions at exact exon/intron junctions are rare.
-    if location.crosses_exon_boundary {
-        let mut consequences = vec![Consequence::IntronVariant];
-        if location.overlaps_splice_region {
-            consequences.push(Consequence::SpliceRegionVariant);
-        }
-        let impact = finalize_consequences(&mut consequences);
-        let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
-        if let Some(intron_idx) = location.intron_index {
-            result.intron = Some(format_intron_number(intron_idx, transcript.exon_count));
-        }
-        if let Some(exon_idx) = location.exon_index {
-            result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
-        }
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
-
     let mut result = match &location.region {
+        // The intron terms are added below from VEP's predicates: a
+        // canonical-site insertion is not `intronic`.
+        IndelRegion::Intron => {
+            let mut result = build_base_result(transcript, Vec::new());
+            result.intron = location
+                .intron_index
+                .map(|idx| format_intron_number(idx, transcript.exon_count));
+            Ok(result)
+        }
         IndelRegion::Cds {
             cds_offset_start, ..
         } => {
             let ins_len = inserted_bases.len() as u32;
+            // A junction insertion has no exon number; the placeholder is
+            // cleared below.
             let exon_index = location.exon_index.unwrap_or(0);
 
-            match partial_codon_insertion_site(*cds_offset_start, transcript, locate_index) {
+            match partial_codon_insertion_site(*cds_offset_start, locate_index) {
                 Some(PartialCodonInsertion::Inside) => partial_terminal_codon_indel_result(
                     chrom,
                     *cds_offset_start,
@@ -697,26 +632,6 @@ fn annotate_insertion_core(
                         exon_index,
                     )
                 }
-                Some(PartialCodonInsertion::AfterCds) => {
-                    // Only the minus strand gets here, where the 3'UTR lies
-                    // below the CDS. Without one the insertion is past the
-                    // transcript end, as on the plus strand (VEP 116
-                    // ENST00000518351.2: `downstream_gene_variant`; with a
-                    // 3'UTR, ENST00000654733.1 c.*1dup:
-                    // `3_prime_UTR_variant`).
-                    let has_utr3 = transcript
-                        .cds_genomic_start
-                        .is_some_and(|cds_start| transcript.tx_start < cds_start);
-                    if !has_utr3 {
-                        return Ok(build_base_result(
-                            transcript,
-                            vec![Consequence::DownstreamGeneVariant],
-                        ));
-                    }
-                    let mut utr_location = location.clone();
-                    utr_location.region = IndelRegion::ThreePrimeUtr;
-                    build_noncds_indel_result(transcript, &utr_location, pos, pos)
-                }
                 None if !ins_len.is_multiple_of(3) => annotate_cds_frameshift(
                     chrom,
                     *cds_offset_start,
@@ -724,7 +639,7 @@ fn annotate_insertion_core(
                     locate_index,
                     fasta,
                     exon_index,
-                    location.overlaps_splice_region,
+                    false,
                     *cds_offset_start,
                     Some(inserted_bases),
                     None,
@@ -743,7 +658,7 @@ fn annotate_insertion_core(
                     locate_index,
                     fasta,
                     exon_index,
-                    location.overlaps_splice_region,
+                    false,
                     shift as u32,
                 ),
             }
@@ -751,9 +666,21 @@ fn annotate_insertion_core(
         _ => build_noncds_indel_result(transcript, &location, pos, pos),
     }?;
 
-    // An insertion between an exon and a frameshift intron has no exon
-    // number in VEP 116 (ENST00000400999.7 c.228_228+1insA).
-    if is_frameshift_junction_insertion(pos, transcript, locate_index) {
+    for (hit, term) in [
+        (effects.donor.is_some(), Consequence::SpliceDonorVariant),
+        (
+            effects.acceptor.is_some(),
+            Consequence::SpliceAcceptorVariant,
+        ),
+        (effects.splice_region, Consequence::SpliceRegionVariant),
+        (effects.intronic.is_some(), Consequence::IntronVariant),
+    ] {
+        if hit && !result.consequences.contains(&term) {
+            result.consequences.push(term);
+        }
+    }
+    result.impact = finalize_consequences(&mut result.consequences);
+    if location.exon_index.is_none() {
         result.exon = None;
     }
     result.hgvs_c = hgvs;
@@ -1229,14 +1156,6 @@ fn annotate_cds_inframe_insertion(
         cdna_after
     };
 
-    // Fetch the right flanking AA (next codon) for HGVS insertion notation.
-    let right_flanking_aa = if codon_end < index.total_cds_length() {
-        let next_codon = fetch_ref_codon(codon_end, chrom, transcript, index, fasta)?;
-        translate_codon_for_transcript(&next_codon, is_mito)
-    } else {
-        b'*' // insertion before stop codon
-    };
-
     // HGVS 3' normalization: when the DNA-level shift is non-zero and the
     // shifted CDS offset stays strictly within the CDS, recompute the codon
     // window at the shifted CDS offset so protein-level dup detection sees
@@ -1259,98 +1178,53 @@ fn annotate_cds_inframe_insertion(
     // notation via the outer `shifted_pos`). `saturating_add` guards
     // against a pathological u32 overflow before the bounds check runs.
     let shifted_cds = cds_offset.saturating_add(dna_shift);
-    let hgvs_p = if dna_shift > 0 && shifted_cds < index.total_cds_length() {
-        // Extend the codon window upstream by the inserted AA count so
-        // format_hgvs_p_inframe_ins can detect duplications at the
-        // shifted position.
-        let ins_aa_count = (coding_inserted.len() / 3) as u32;
-        let upstream_codons = ins_aa_count + 1; // +1 for the boundary codon
-        let s_codon_start = (shifted_cds / 3).saturating_sub(upstream_codons) * 3;
-        let s_codon_end = ((shifted_cds / 3 + 1) * 3).min(index.total_cds_length());
-        let s_ref =
-            fetch_cds_sequence(s_codon_start, s_codon_end, chrom, transcript, index, fasta)?;
-        let s_local = (shifted_cds - s_codon_start) as usize;
-        let mut s_alt = Vec::with_capacity(s_ref.len() + coding_inserted.len());
-        s_alt.extend_from_slice(&s_ref[..s_local]);
-        s_alt.extend_from_slice(&coding_inserted);
-        s_alt.extend_from_slice(&s_ref[s_local..]);
-        let s_ref_aas = translate_sequence(&s_ref, is_mito)?;
-        let s_alt_aas = translate_sequence(&s_alt, is_mito)?;
-        let s_protein_pos = s_codon_start / 3 + 1;
-        let s_right_flank = if s_codon_end < index.total_cds_length() {
-            let nc = fetch_ref_codon(s_codon_end, chrom, transcript, index, fasta)?;
-            translate_codon_for_transcript(&nc, is_mito)
+    let ins_aa_count = (coding_inserted.len() / 3) as u32;
+    // HGVS p. at an insertion point, from a window reaching `ins_aa_count + 1`
+    // codons upstream, so the residue before the insertion and any duplicated
+    // residues are inside it. A window starting at a split codon would leave
+    // the left flank out (VEP 116 NM_006231.4 c.2465_2467dup:
+    // p.Lys822_Gly823insGlu).
+    let format_at = |offset: u32| -> Result<Option<String>, VarEffectError> {
+        let total = index.total_cds_length();
+        let w_start = (offset / 3).saturating_sub(ins_aa_count + 1) * 3;
+        let w_end = ((offset / 3 + 1) * 3).min(total);
+        let w_ref = fetch_cds_sequence(w_start, w_end, chrom, transcript, index, fasta)?;
+        let w_local = (offset - w_start) as usize;
+        let mut w_alt = Vec::with_capacity(w_ref.len() + coding_inserted.len());
+        w_alt.extend_from_slice(&w_ref[..w_local]);
+        w_alt.extend_from_slice(&coding_inserted);
+        w_alt.extend_from_slice(&w_ref[w_local..]);
+        let w_right_flank = if w_end < total {
+            let next = fetch_ref_codon(w_end, chrom, transcript, index, fasta)?;
+            translate_codon_for_transcript(&next, is_mito)
         } else {
             b'*'
         };
-        crate::hgvs_p::format_hgvs_p_inframe_ins(
-            &s_ref_aas,
-            &s_alt_aas,
-            s_protein_pos,
+        Ok(crate::hgvs_p::format_hgvs_p_inframe_ins(
+            &translate_sequence(&w_ref, is_mito)?,
+            &translate_sequence(&w_alt, is_mito)?,
+            w_start / 3 + 1,
             &consequences,
-            s_right_flank,
-        )
+            w_right_flank,
+        ))
+    };
+    let hgvs_p = if dna_shift > 0 && shifted_cds < index.total_cds_length() {
+        format_at(shifted_cds)?
     } else {
-        // When DNA-level shift is 0, the insertion may still be a
-        // protein-level duplication (codon degeneracy can produce
-        // identical AAs from different DNA codons). Try dup detection
-        // at the codon-aligned position first; fall back to the
-        // original window for standard insertion notation.
-        let ins_aa_count = (coding_inserted.len() / 3) as u32;
-        let upstream_codons = ins_aa_count + 1;
-
-        // Dup probe: align the insertion to the next codon boundary
-        // so the inserted bases translate cleanly. Only used when the
-        // aligned result is actually a dup; non-dup results must use
-        // the original (unaligned) position to preserve the correct
-        // mid-codon amino acid identity.
-        let aligned_cds = cds_offset.div_ceil(3) * 3;
-        let aligned_cds = aligned_cds.min(index.total_cds_length());
+        // Without a DNA-level shift the insertion may still be a
+        // protein-level duplication (codon degeneracy can produce identical
+        // amino acids from different codons): probe the next codon boundary
+        // and keep that result only when it is a duplication; otherwise the
+        // insertion point keeps the mid-codon amino acid identity.
+        let aligned_cds = (cds_offset.div_ceil(3) * 3).min(index.total_cds_length());
         let aligned_dup = if aligned_cds != cds_offset {
-            let a_start = (aligned_cds / 3).saturating_sub(upstream_codons) * 3;
-            let a_end = ((aligned_cds / 3 + 1) * 3).min(index.total_cds_length());
-            let a_ref = fetch_cds_sequence(a_start, a_end, chrom, transcript, index, fasta)?;
-            let a_local = (aligned_cds - a_start) as usize;
-            let mut a_alt = Vec::with_capacity(a_ref.len() + coding_inserted.len());
-            a_alt.extend_from_slice(&a_ref[..a_local]);
-            a_alt.extend_from_slice(&coding_inserted);
-            a_alt.extend_from_slice(&a_ref[a_local..]);
-            let a_ref_aas = translate_sequence(&a_ref, is_mito)?;
-            let a_alt_aas = translate_sequence(&a_alt, is_mito)?;
-            let a_pos = a_start / 3 + 1;
-            let a_flank = if a_end < index.total_cds_length() {
-                let nc = fetch_ref_codon(a_end, chrom, transcript, index, fasta)?;
-                translate_codon_for_transcript(&nc, is_mito)
-            } else {
-                b'*'
-            };
-            let r = crate::hgvs_p::format_hgvs_p_inframe_ins(
-                &a_ref_aas,
-                &a_alt_aas,
-                a_pos,
-                &consequences,
-                a_flank,
-            );
-            // Only adopt the aligned result when it detected a dup.
-            match &r {
-                Some(s) if s.contains("dup") => Some(r),
-                _ => None,
-            }
+            format_at(aligned_cds)?.filter(|p| p.contains("dup"))
         } else {
             None
         };
-
-        if let Some(dup_result) = aligned_dup {
-            dup_result
-        } else {
-            // No dup detected — use the original window.
-            crate::hgvs_p::format_hgvs_p_inframe_ins(
-                &ref_aas,
-                &alt_aas,
-                protein_pos,
-                &consequences,
-                right_flanking_aa,
-            )
+        match aligned_dup {
+            Some(dup) => Some(dup),
+            None => format_at(cds_offset)?,
         }
     };
 
@@ -1496,6 +1370,36 @@ pub(super) fn build_splice_indel_result(
     Ok(result)
 }
 
+/// cDNA positions of the two bases either side of an exonic insertion
+/// between `pos - 1` and `pos`, lower first.
+///
+/// At an exon/intron junction one flank is intronic; VEP reports the mRNA
+/// point next to the exonic flank (VEP 116 NM_000546.6 `c.-28-1_-28insT`:
+/// cDNA 114-115).
+fn insertion_cdna_positions(pos: u64, transcript: &TranscriptModel) -> (Option<u32>, Option<u32>) {
+    let right = compute_cdna_position_exonic(pos, transcript);
+    let left = pos
+        .checked_sub(1)
+        .and_then(|p| compute_cdna_position_exonic(p, transcript));
+    match (left, right) {
+        (Some(a), Some(b)) => (Some(a.min(b)), Some(a.max(b))),
+        (Some(c), None) | (None, Some(c)) => {
+            // The exonic flank is the 5' one when it is the left base on the
+            // plus strand or the right base on the minus strand.
+            let exonic_is_five_prime = match transcript.strand {
+                Strand::Plus => left.is_some(),
+                Strand::Minus => right.is_some(),
+            };
+            if exonic_is_five_prime {
+                (Some(c), Some(c + 1))
+            } else {
+                (Some(c.saturating_sub(1)), Some(c))
+            }
+        }
+        (None, None) => (None, None),
+    }
+}
+
 /// Build a non-CDS consequence result for an indel.
 pub(super) fn build_noncds_indel_result(
     transcript: &TranscriptModel,
@@ -1503,10 +1407,17 @@ pub(super) fn build_noncds_indel_result(
     start: u64,
     end: u64,
 ) -> Result<ConsequenceResult, VarEffectError> {
+    let is_insertion = end == start;
     let mut consequences = match &location.region {
         IndelRegion::FivePrimeUtr => vec![Consequence::FivePrimeUtrVariant],
         IndelRegion::ThreePrimeUtr => vec![Consequence::ThreePrimeUtrVariant],
         IndelRegion::Intron => vec![Consequence::IntronVariant],
+        // An insertion at an exon junction of a non-coding transcript is in
+        // no exon (VEP 116 ENST00000424518.6 n.197_197+1insT:
+        // `non_coding_transcript_variant`).
+        IndelRegion::NonCodingExon if is_insertion && location.exon_index.is_none() => {
+            vec![Consequence::NonCodingTranscriptVariant]
+        }
         IndelRegion::NonCodingExon => vec![Consequence::NonCodingTranscriptExonVariant],
         IndelRegion::Upstream => vec![Consequence::UpstreamGeneVariant],
         IndelRegion::Downstream => vec![Consequence::DownstreamGeneVariant],
@@ -1518,32 +1429,18 @@ pub(super) fn build_noncds_indel_result(
     let mut result = build_base_result(transcript, consequences);
     if let Some(exon_idx) = location.exon_index {
         result.exon = Some(format_exon_number(exon_idx, transcript.exon_count));
-        let is_insertion = end == start;
-        if is_insertion {
-            // VEP reports flanking cDNA positions for insertions,
-            // always with start <= end regardless of strand.
-            let cdna_at = compute_cdna_position_exonic(start, transcript);
-            let cdna_adj = if start > 0 {
-                compute_cdna_position_exonic(start - 1, transcript)
-            } else {
-                cdna_at
-            };
-            // Both values are Option<u32>; use flatten for min/max.
-            match (cdna_at, cdna_adj) {
-                (Some(a), Some(b)) => {
-                    result.cdna_position = Some(a.min(b));
-                    result.cdna_position_end = Some(a.max(b));
-                }
-                (v @ Some(_), None) | (None, v @ Some(_)) => {
-                    result.cdna_position = v;
-                    result.cdna_position_end = v;
-                }
-                (None, None) => {}
-            }
-        } else {
+        if !is_insertion {
             result.cdna_position = compute_cdna_position_exonic(start, transcript);
             result.cdna_position_end = compute_cdna_position_exonic(end - 1, transcript);
         }
+    }
+    let exonic = matches!(
+        location.region,
+        IndelRegion::FivePrimeUtr | IndelRegion::ThreePrimeUtr | IndelRegion::NonCodingExon
+    );
+    if is_insertion && exonic {
+        (result.cdna_position, result.cdna_position_end) =
+            insertion_cdna_positions(start, transcript);
     }
     if let Some(intron_idx) = location.intron_index {
         result.intron = Some(format_intron_number(intron_idx, transcript.exon_count));

@@ -39,3 +39,14 @@ python3 -I merge_vep_rows.py vep_rest/vep_rest_padded_cds.tsv vep_rest/vep_rest_
   vep_rest/vep_rest_wp1.tsv vep_rest/vep_rest_wp1_review.tsv vep_rest/vep_rest_wp1_r1.tsv vep_rest/vep_rest_wp1_r2.tsv vep_rest/vep_rest_wp1_r3.tsv vep_rest/vep_rest_wp1_r4.tsv vep_rest/vep_rest_wp1_r5.tsv \
   > ../incomplete_cds_vep116.tsv
 ```
+
+## Insertion-point fixture
+
+`../insertion_point_transcripts.jsonl` (MANE 1.5 NM_000546.6, NM_000059.4,
+NM_006231.4, NM_000548.5; GENCODE v50 ENST00000424518.6, ENST00000617316.2,
+ENST00000372299.4, ENST00000336338.10, extracted with `extract_fixture.py`) and
+`../insertion_point_vep116.tsv` back `tests/insertion_point_concordance.rs`:
+
+```bash
+python3 -I vep_insertion_rows.py RAW_DIR < vep_rest/insertion_point_cases.tsv > ../insertion_point_vep116.tsv
+```

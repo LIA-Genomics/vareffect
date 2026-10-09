@@ -1212,3 +1212,208 @@ fn locate_indel_minus_canonical_still_fires() {
     let detail = loc.splice_detail.as_ref().expect("detail populated");
     assert!(detail.overlaps_donor);
 }
+
+// -- Insertions classified at their insertion point (VEP 116) ----------------
+
+mod insertion_point {
+    use super::*;
+    use crate::locate::helpers::{InsertionIntronEffects, insertion_intron_effects};
+
+    /// Effects of an insertion between `pos - 1` and `pos`.
+    fn effects(tx: &TranscriptModel, pos: u64) -> InsertionIntronEffects {
+        insertion_intron_effects(pos, tx).unwrap()
+    }
+
+    fn region_only(intronic: bool) -> InsertionIntronEffects {
+        InsertionIntronEffects {
+            splice_region: true,
+            intronic: intronic.then_some(0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn splice_predicates_around_a_plus_strand_intron() {
+        // `plus_strand_coding` intron 1 is chr1:2000-2999 (+1 = 2000,
+        // -1 = 2999). Pairs and VEP 116 terms (BRCA2 NM_000059.4 rows).
+        let tx = plus_strand_coding();
+        let donor = InsertionIntronEffects {
+            donor: Some(0),
+            ..Default::default()
+        };
+        let acceptor = InsertionIntronEffects {
+            acceptor: Some(0),
+            ..Default::default()
+        };
+        let intron_only = InsertionIntronEffects {
+            intronic: Some(0),
+            ..Default::default()
+        };
+        let none = InsertionIntronEffects::default();
+        for (pos, want, pair) in [
+            (1_997, none, "e-4/e-3"),
+            (1_998, region_only(false), "e-3/e-2"),
+            (2_000, region_only(false), "exon/+1"),
+            (2_001, donor, "+1/+2"),
+            (2_002, region_only(true), "+2/+3"),
+            (2_003, region_only(true), "+3/+4"),
+            (2_008, intron_only, "+8/+9"),
+            (2_982, intron_only, "-19/-18"),
+            (2_983, region_only(true), "-18/-17"),
+            (2_998, region_only(true), "-3/-2"),
+            (2_999, acceptor, "-2/-1"),
+            (3_000, region_only(false), "-1/exon"),
+            (3_003, none, "e3/e4"),
+        ] {
+            assert_eq!(effects(&tx, pos), want, "{pair}");
+        }
+    }
+
+    #[test]
+    fn splice_predicates_around_a_minus_strand_intron() {
+        // `minus_strand_coding` intron 1 is chr17:16000-17999; on the minus
+        // strand +1 is 17999 and -1 is 16000 (TP53 NM_000546.6 rows).
+        let tx = minus_strand_coding();
+        let donor = InsertionIntronEffects {
+            donor: Some(0),
+            ..Default::default()
+        };
+        let acceptor = InsertionIntronEffects {
+            acceptor: Some(0),
+            ..Default::default()
+        };
+        let intron_only = InsertionIntronEffects {
+            intronic: Some(0),
+            ..Default::default()
+        };
+        for (pos, want, pair) in [
+            (18_000, region_only(false), "exon/+1"),
+            (17_999, donor, "+1/+2"),
+            (17_998, region_only(true), "+2/+3"),
+            (17_992, intron_only, "+8/+9"),
+            (16_018, intron_only, "-19/-18"),
+            (16_017, region_only(true), "-18/-17"),
+            (16_002, region_only(true), "-3/-2"),
+            (16_001, acceptor, "-2/-1"),
+            (16_000, region_only(false), "-1/exon"),
+        ] {
+            assert_eq!(effects(&tx, pos), want, "{pair}");
+        }
+    }
+
+    #[test]
+    fn frameshift_gap_junctions_follow_the_gap_bounds() {
+        // A 5-base gap chr1:2000-2004 (VEP 116 ENST00000617316.2): both
+        // junctions are splice_region without intron_variant, an insertion
+        // inside it has no splice term.
+        let mut tx = plus_strand_coding();
+        tx.exons[1].genomic_start = 2_005;
+        assert_eq!(effects(&tx, 2_000), region_only(false));
+        assert_eq!(effects(&tx, 2_005), region_only(false));
+        assert_eq!(effects(&tx, 2_002), InsertionIntronEffects::default());
+        // A one-base gap at chr1:2000: the acceptor window [1999, 2000]
+        // holds the insertion before the gap (VEP 116 ENST00000400999.7
+        // c.228_228+1insA: splice_acceptor_variant beside the frameshift).
+        tx.exons[1].genomic_start = 2_001;
+        assert_eq!(effects(&tx, 2_000).acceptor, Some(0));
+    }
+
+    #[test]
+    fn insertions_at_transcript_ends_have_no_intron_effects() {
+        let tx = plus_strand_coding();
+        assert_eq!(effects(&tx, 1_000), InsertionIntronEffects::default());
+        assert_eq!(effects(&tx, 5_000), InsertionIntronEffects::default());
+    }
+
+    fn cds(offset: u32) -> IndelRegion {
+        IndelRegion::Cds {
+            cds_offset_start: offset,
+            cds_offset_end: offset,
+        }
+    }
+
+    #[test]
+    fn plus_strand_insertions_land_on_the_mrna_point() {
+        let tx = plus_strand_coding();
+        let idx = LocateIndex::build(&tx).unwrap();
+        let at = |pos| locate_indel("chr1", pos, pos, &tx, &idx).unwrap();
+        // Mid-CDS: before CDS offset 100.
+        assert_eq!(at(1_600).region, cds(100));
+        assert_eq!(at(1_600).exon_index, Some(0));
+        // Both sides of the exon 1/2 junction are the same mRNA insertion,
+        // before the first base of exon 2 (offset 500), with no exon or
+        // intron number (VEP 116 BRCA2 c.67_67+1insA, c.68-1_68insC).
+        for pos in [2_000, 3_000] {
+            let loc = at(pos);
+            assert_eq!(loc.region, cds(500), "{pos}");
+            assert_eq!((loc.exon_index, loc.intron_index), (None, None));
+            assert!(loc.overlaps_splice_region && !loc.overlaps_splice_canonical);
+            assert!(!loc.crosses_exon_boundary);
+        }
+        // UTR next to the CDS: c.-1_1ins and c.N_*1ins.
+        assert_eq!(at(1_500).region, IndelRegion::FivePrimeUtr);
+        assert_eq!(at(4_500).region, IndelRegion::ThreePrimeUtr);
+        // +1/+2: intronic, canonical.
+        let canonical = at(2_001);
+        assert_eq!(canonical.region, IndelRegion::Intron);
+        assert_eq!(canonical.intron_index, Some(0));
+        assert!(canonical.overlaps_splice_canonical);
+        assert_eq!(
+            canonical.splice_detail.map(|d| d.donor_intron_indices),
+            Some(vec![0])
+        );
+    }
+
+    #[test]
+    fn minus_strand_insertions_land_on_the_mrna_point() {
+        let tx = minus_strand_coding();
+        let idx = LocateIndex::build(&tx).unwrap();
+        let at = |pos| locate_indel("chr17", pos, pos, &tx, &idx).unwrap();
+        // Between chr17:15000 (offset 2499) and 14999 (offset 2500): the
+        // insertion goes before 2500, as on the plus strand (VEP 116 TP53
+        // c.523_524insT: CDS 523-524).
+        assert_eq!(at(15_000).region, cds(2_500));
+        // Exon 1/2 junction from both sides: before exon 2's first base
+        // (chr17:15999, offset 1500).
+        for pos in [18_000, 16_000] {
+            let loc = at(pos);
+            assert_eq!(loc.region, cds(1_500), "{pos}");
+            assert_eq!((loc.exon_index, loc.intron_index), (None, None));
+        }
+        assert_eq!(at(19_500).region, IndelRegion::FivePrimeUtr);
+        assert_eq!(at(11_000).region, IndelRegion::ThreePrimeUtr);
+        let canonical = at(17_999);
+        assert_eq!(canonical.region, IndelRegion::Intron);
+        assert!(canonical.overlaps_splice_canonical);
+    }
+
+    #[test]
+    fn abutting_exons_and_a_padded_start_keep_the_mrna_point() {
+        // Abutting exons: the insertion between them is in neither exon.
+        let mut tx = plus_strand_coding();
+        tx.exons[1].genomic_start = 2_000;
+        tx.cds_segments[1].genomic_start = 2_000;
+        let idx = LocateIndex::build(&tx).unwrap();
+        let loc = locate_indel("chr1", 2_000, 2_000, &tx, &idx).unwrap();
+        assert_eq!(loc.region, cds(500));
+        assert_eq!(loc.exon_index, None);
+        // Phase 1 on the first CDS row pads two bases: the base after the
+        // first genomic coding base has CDS offset 3.
+        let mut padded = plus_strand_coding();
+        padded.cds_segments[0].phase = 1;
+        let padded_idx = LocateIndex::build(&padded).unwrap();
+        let loc = locate_indel("chr1", 1_501, 1_501, &padded, &padded_idx).unwrap();
+        assert_eq!(loc.region, cds(3));
+    }
+
+    #[test]
+    fn non_coding_junction_has_no_exon() {
+        let tx = noncoding_2_exon();
+        let idx = LocateIndex::build(&tx).unwrap();
+        let loc = locate_indel(&tx.chrom.clone(), 300, 300, &tx, &idx).unwrap();
+        assert_eq!(loc.region, IndelRegion::NonCodingExon);
+        assert_eq!((loc.exon_index, loc.intron_index), (None, None));
+        let inside = locate_indel(&tx.chrom.clone(), 200, 200, &tx, &idx).unwrap();
+        assert_eq!(inside.exon_index, Some(0));
+    }
+}
