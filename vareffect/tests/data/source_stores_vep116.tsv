@@ -1,0 +1,24 @@
+# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-07 and 2026-10-09 (dates per record in vep_rest/); one row per (variant, transcript).
+# pos is 1-based; ref/alt as VEP's allele_string (`-` = empty). `-` in any other column = field absent in VEP's JSON;
+# `?` in exon/intron = not requested (rows queried without numbers=1).
+# Built by tools/merge_vep_rows.py (next to this file) from the per-query REST records; see tools/README.md.
+label	chrom	pos	ref	alt	transcript	consequences	impact	hgvsc	hgvsp	cdna_start	cds_start	protein_start	codons	amino_acids	exon	intron
+split_stop_plus_c1	chr8	24507534	T	C	ENST00000175238.10	stop_lost,splice_region_variant	HIGH	ENST00000175238.10:c.2263T>C	ENSP00000175238.5:p.Ter755ArgextTer2	2346	2263	755	Tga/Cga	*/R	21/22	-
+split_stop_plus_c1	chr8	24507534	T	A	ENST00000175238.10	stop_lost,splice_region_variant	HIGH	ENST00000175238.10:c.2263T>A	ENSP00000175238.5:p.Ter755ArgextTer2	2346	2263	755	Tga/Aga	*/R	21/22	-
+split_stop_plus_c2	chr8	24507535	G	A	ENST00000175238.10	splice_region_variant,stop_retained_variant	LOW	ENST00000175238.10:c.2264G>A	ENSP00000175238.5:p.Ter755=	2347	2264	755	tGa/tAa	*	21/22	-
+split_stop_plus_c2	chr8	24507535	G	C	ENST00000175238.10	stop_lost,splice_region_variant	HIGH	ENST00000175238.10:c.2264G>C	ENSP00000175238.5:p.Ter755SerextTer2	2347	2264	755	tGa/tCa	*/S	21/22	-
+split_stop_plus_c3	chr8	24508546	A	G	ENST00000175238.10	stop_lost,splice_region_variant	HIGH	ENST00000175238.10:c.2265A>G	ENSP00000175238.5:p.Ter755TrpextTer2	2348	2265	755	tgA/tgG	*/W	22/22	-
+split_stop_plus_c3	chr8	24508546	A	T	ENST00000175238.10	stop_lost,splice_region_variant	HIGH	ENST00000175238.10:c.2265A>T	ENSP00000175238.5:p.Ter755CysextTer2	2348	2265	755	tgA/tgT	*/C	22/22	-
+split_stop_minus_c1	chr9	34552162	A	G	ENST00000378980.8	stop_lost,splice_region_variant	HIGH	ENST00000378980.8:c.1117T>C	ENSP00000368265.3:p.Ter373ArgextTer104	1398	1117	373	Tga/Cga	*/R	9/10	-
+split_stop_minus_c1	chr9	34552162	A	T	ENST00000378980.8	stop_lost,splice_region_variant	HIGH	ENST00000378980.8:c.1117T>A	ENSP00000368265.3:p.Ter373ArgextTer104	1398	1117	373	Tga/Aga	*/R	9/10	-
+split_stop_minus_c2	chr9	34552161	C	T	ENST00000378980.8	splice_region_variant,stop_retained_variant	LOW	ENST00000378980.8:c.1118G>A	ENSP00000368265.3:p.Ter373=	1399	1118	373	tGa/tAa	*	9/10	-
+split_stop_minus_c2	chr9	34552161	C	G	ENST00000378980.8	stop_lost,splice_region_variant	HIGH	ENST00000378980.8:c.1118G>C	ENSP00000368265.3:p.Ter373SerextTer104	1399	1118	373	tGa/tCa	*/S	9/10	-
+split_stop_minus_c3	chr9	34552071	T	C	ENST00000378980.8	stop_lost,splice_region_variant	HIGH	ENST00000378980.8:c.1119A>G	ENSP00000368265.3:p.Ter373TrpextTer104	1400	1119	373	tgA/tgG	*/W	10/10	-
+split_stop_minus_c3	chr9	34552071	T	G	ENST00000378980.8	stop_lost,splice_region_variant	HIGH	ENST00000378980.8:c.1119A>C	ENSP00000368265.3:p.Ter373CysextTer104	1400	1119	373	tgA/tgC	*/C	10/10	-
+par_y_p2ry8_utr	chrY	1500000	A	G	NM_178129.5	intron_variant	MODIFIER	NM_178129.5:c.-24-33418T>C	-	-	-	-	-	-	-	1/1
+par_y_p2ry8_cds	chrY	1466000	C	T	NM_178129.5	missense_variant	MODERATE	NM_178129.5:c.559G>A	NP_835230.1:p.Val187Met	848	559	187	Gtg/Atg	V/M	2/2	-
+gapped_htt_exon2	chr4	3086980	A	G	NM_002111.8	missense_variant	MODERATE	NM_002111.8:c.311A>G	NP_002102.4:p.His104Arg	456	311	104	cAt/cGt	H/R	2/67	-
+non_mane_tp53_r175h	chr17	7675088	C	T	NM_001126113.3	missense_variant	MODERATE	NM_001126113.3:c.524G>A	NP_001119585.1:p.Arg175His	666	524	175	cGc/cAc	R/H	5/12	-
+gapped_shank3_start_codon	chr22	50674416	T	C	NM_001372044.2	start_lost	HIGH	NM_001372044.2:c.2T>C	NP_001358973.1:p.Met1?	372	2	1	aTg/aCg	M/T	2/25	-
+gapped_shank3_after_break	chr22	50698700	T	C	NM_001372044.2	synonymous_variant	LOW	NM_001372044.2:c.1695T>C	NP_001358973.1:p.Ile565=	2065	1695	565	atT/atC	I	15/25	-
+gapped_nbpf1_after_break	chr1	16565700	G	A	NM_001405693.2	synonymous_variant	LOW	NM_001405693.2:c.3222C>T	NP_001392622.1:p.Cys1074=	4108	3222	1074	tgC/tgT	C	25/27	-

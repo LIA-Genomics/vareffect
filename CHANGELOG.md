@@ -27,7 +27,9 @@ For releases before `0.5.0`, see the git history.
 - Multi-locus accessions: one chrX and one chrY copy of a pseudoautosomal
   transcript. `TranscriptStore::get_all_by_accession` returns every copy in
   canonical chromosome order (`chrom::canonical_order_key`, then
-  `tx_start`). The MANE builder refuses any other repeated accession.
+  `tx_start`). The builder admits a repeated accession only as one chrX and
+  one chrY copy, each overlapping a pseudoautosomal region, and refuses any
+  other.
 - `TranscriptStore::from_bytes`, for callers that read the file themselves
   (for example to hash exactly the bytes they load).
   `TranscriptStore::load_from_path` now reads the file and calls it.
@@ -70,6 +72,23 @@ For releases before `0.5.0`, see the git history.
   windows spill onto the flanking coding bases.
 - `Consequence::NonCodingTranscriptVariant`,
   `VariantLocation::FrameshiftIntron` and `locate::FRAMESHIFT_INTRON_MAX_GAP`.
+- `vareffect build-transcripts --source mane|refseq|gencode` builds a store
+  from the MANE GFF3 (default, unchanged output), NCBI RefSeq's full GRCh38
+  annotation (curated `NM_` / `NR_` on the primary assembly, written as
+  `transcript_models_refseq.bin`) or GENCODE comprehensive
+  (`transcript_models_gencode.bin`). The CDS rows are taken as they are:
+  `stop_codon` rows are never added to them (GENCODE's CDS already contains
+  the stop). RefSeq and GENCODE models record CDS completeness (a RefSeq range marker
+  counts only on the CDS's first or last row; an interior one is a coverage
+  break), RefSeq's genome-mismatch flags (in-row `Gap` operations and
+  transcript stretches aligned nowhere between `cDNA_match` blocks) and both
+  sources' selenocysteine codons. Every
+  build writes `<stem>.excluded.tsv`, the candidate transcripts not
+  admitted and why (RefSeq alternate loci and patches, ribosomal-slippage
+  CDSs with two segments in one exon, ...), and the manifest gains
+  `source`, `counts`, `skipped_rows`, `anomalies`, `excluded_file` and
+  `excluded_sha256`. The builder loads the encoded store back before
+  writing it.
 
 ### Changed
 

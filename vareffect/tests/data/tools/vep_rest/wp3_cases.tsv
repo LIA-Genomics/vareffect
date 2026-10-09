@@ -1,0 +1,13 @@
+split_stop_plus_c1	8:24507534-24507534	C,A	ENST00000175238	&numbers=1
+split_stop_plus_c2	8:24507535-24507535	A,C	ENST00000175238	&numbers=1
+split_stop_plus_c3	8:24508546-24508546	G,T	ENST00000175238	&numbers=1
+split_stop_minus_c1	9:34552162-34552162	G,T	ENST00000378980	&numbers=1
+split_stop_minus_c2	9:34552161-34552161	T,G	ENST00000378980	&numbers=1
+split_stop_minus_c3	9:34552071-34552071	C,G	ENST00000378980	&numbers=1
+par_y_p2ry8_utr	Y:1500000-1500000	G	NM_178129.5	&refseq=1&numbers=1
+par_y_p2ry8_cds	Y:1466000-1466000	T	NM_178129.5	&refseq=1&numbers=1
+gapped_htt_exon2	4:3086980-3086980	G	NM_002111.8	&refseq=1&numbers=1
+non_mane_tp53_r175h	17:7675088-7675088	T	NM_001126113.3	&refseq=1&numbers=1
+gapped_shank3_start_codon	22:50674416-50674416	C	NM_001372044.2	&refseq=1&numbers=1
+gapped_shank3_after_break	22:50698700-50698700	C	NM_001372044.2	&refseq=1&numbers=1
+gapped_nbpf1_after_break	1:16565700-16565700	A	NM_001405693.2	&refseq=1&numbers=1

@@ -199,9 +199,8 @@ fn field(value: &str) -> Option<String> {
     (value != "-").then(|| value.to_string())
 }
 
-fn load_rows() -> Vec<VepRow> {
-    let text = std::fs::read_to_string(data_dir().join("incomplete_cds_vep116.tsv"))
-        .expect("read VEP fixture");
+fn load_rows(file: &str) -> Vec<VepRow> {
+    let text = std::fs::read_to_string(data_dir().join(file)).expect("read VEP fixture");
     text.lines()
         .filter(|line| !line.starts_with('#') && !line.starts_with("label\t"))
         .map(|line| {
@@ -323,146 +322,230 @@ fn annotate_row(
         .find(|r| r.transcript == row.transcript)
 }
 
-#[test]
-#[ignore = "requires FASTA_PATH (GRCh38 genome binary)"]
-fn incomplete_cds_and_frameshift_introns_match_vep_116() {
-    let engine = load_engine();
-    let fasta = open_fasta();
-    let rows = load_rows();
-    assert!(rows.len() > 150, "fixture has {} rows", rows.len());
-
-    let mut failures = Vec::new();
-    for row in &rows {
-        let id = format!(
-            "{} {}:{} {}>{} {}",
-            row.label, row.chrom, row.pos, row.ref_allele, row.alt_allele, row.transcript
-        );
-        let flanking_only = row
-            .consequences
-            .iter()
-            .all(|t| t == "upstream_gene_variant" || t == "downstream_gene_variant");
-        let Some(got) = annotate_row(&engine, &fasta, row) else {
-            if !flanking_only {
-                failures.push(format!("{id}: no result"));
-            }
-            continue;
-        };
-        if flanking_only {
-            // An insertion next to a transcript end is queried with its
-            // flanking bases, so the transcript is reported; the term must
-            // then be VEP's.
-            let got_terms: BTreeSet<String> = got
-                .consequences
-                .iter()
-                .map(|c| c.as_str().to_string())
-                .collect();
-            if got_terms != expected_terms(row) {
-                failures.push(format!("{id}: {got_terms:?} != VEP {:?}", row.consequences));
-            }
-            continue;
+/// Compare vareffect's result for `row` on `engine` with VEP's, pushing one
+/// line per difference.
+fn check_row(engine: &VarEffect, fasta: &FastaReader, row: &VepRow, failures: &mut Vec<String>) {
+    let id = format!(
+        "{} {}:{} {}>{} {}",
+        row.label, row.chrom, row.pos, row.ref_allele, row.alt_allele, row.transcript
+    );
+    let flanking_only = row
+        .consequences
+        .iter()
+        .all(|t| t == "upstream_gene_variant" || t == "downstream_gene_variant");
+    let Some(got) = annotate_row(engine, fasta, row) else {
+        if !flanking_only {
+            failures.push(format!("{id}: no result"));
         }
+        return;
+    };
+    if flanking_only {
+        // An insertion next to a transcript end is queried with its
+        // flanking bases, so the transcript is reported; the term must
+        // then be VEP's.
         let got_terms: BTreeSet<String> = got
             .consequences
             .iter()
             .map(|c| c.as_str().to_string())
             .collect();
-
-        if row.label.starts_with("intron_14bp") {
-            let normal_intron = got_terms
-                .iter()
-                .any(|t| t.contains("splice") || t == "intron_variant")
-                || got_terms.contains("non_coding_transcript_exon_variant");
-            if !normal_intron {
-                failures.push(format!(
-                    "{id}: 14-base intron treated as frameshift: {got_terms:?}"
-                ));
-            }
-            if got.hgvs_c != row.hgvsc {
-                failures.push(format!(
-                    "{id}: hgvs_c {:?} != VEP {:?}",
-                    got.hgvs_c, row.hgvsc
-                ));
-            }
-            continue;
+        if got_terms != expected_terms(row) {
+            failures.push(format!("{id}: {got_terms:?} != VEP {:?}", row.consequences));
         }
+        return;
+    }
+    let got_terms: BTreeSet<String> = got
+        .consequences
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
 
-        let mut check = |what: &str, got: String, want: String| {
-            if got != want {
-                failures.push(format!("{id}: {what} {got} != VEP {want}"));
-            }
+    if row.label.starts_with("gapped_") {
+        // The transcript has bases the genome lacks inside its CDS
+        // (`cds_alignment_gap`): no HGVS c./p., and positions keep the
+        // genome-built numbering (VEP_DIVERGENCES 3.3), so only the terms
+        // and impact are compared.
+        if got_terms != expected_terms(row) || row.impact != Some(got.impact.to_string()) {
+            failures.push(format!(
+                "{id}: {got_terms:?} {} != VEP {:?} {:?}",
+                got.impact, row.consequences, row.impact
+            ));
+        }
+        if got.hgvs_c.is_some() || got.hgvs_p.is_some() {
+            failures.push(format!(
+                "{id}: HGVS {:?} {:?} on a gapped CDS",
+                got.hgvs_c, got.hgvs_p
+            ));
+        }
+        return;
+    }
+
+    if row.label.starts_with("intron_14bp") {
+        let normal_intron = got_terms
+            .iter()
+            .any(|t| t.contains("splice") || t == "intron_variant")
+            || got_terms.contains("non_coding_transcript_exon_variant");
+        if !normal_intron {
+            failures.push(format!(
+                "{id}: 14-base intron treated as frameshift: {got_terms:?}"
+            ));
+        }
+        if got.hgvs_c != row.hgvsc {
+            failures.push(format!(
+                "{id}: hgvs_c {:?} != VEP {:?}",
+                got.hgvs_c, row.hgvsc
+            ));
+        }
+        return;
+    }
+
+    let mut check = |what: &str, got: String, want: String| {
+        if got != want {
+            failures.push(format!("{id}: {what} {got} != VEP {want}"));
+        }
+    };
+    check(
+        "consequences",
+        format!("{got_terms:?}"),
+        format!("{:?}", expected_terms(row)),
+    );
+    let decided_impact = DECIDED
+        .iter()
+        .find(|(label, _, _)| *label == row.label)
+        .map(|(_, _, impact)| impact.to_string());
+    if let Some(impact) = decided_impact.or_else(|| row.impact.clone()) {
+        check("impact", got.impact.to_string(), impact);
+    }
+    let hgvs_compared = !HGVS_NOT_COMPARED.contains(&row.label.as_str());
+    if hgvs_compared && !INSERTION_ROTATION_ROWS.contains(&row.label.as_str()) {
+        check(
+            "hgvs_c",
+            format!("{:?}", got.hgvs_c),
+            format!("{:?}", expected_hgvsc(row)),
+        );
+    }
+    if hgvs_compared {
+        check(
+            "hgvs_p",
+            format!("{:?}", strip_accession(got.hgvs_p.as_deref())),
+            format!("{:?}", expected_hgvsp(row)),
+        );
+    }
+    check(
+        "cdna_start",
+        format!("{:?}", got.cdna_position),
+        format!("{:?}", row.cdna_start),
+    );
+    check(
+        "cds_start",
+        format!("{:?}", got.cds_position),
+        format!("{:?}", row.cds_start),
+    );
+    check(
+        "protein_start",
+        format!("{:?}", got.protein_start),
+        format!("{:?}", row.protein_start),
+    );
+    let frameshift_insertion =
+        row.ref_allele == "-" && row.consequences.iter().any(|t| t == "frameshift_variant");
+    if !frameshift_insertion {
+        let spans_gap = row.label.starts_with("fs_del_spanning");
+        let display = |codons: Option<&str>| {
+            codons.map(|c| {
+                if spans_gap {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_string()
+                }
+            })
         };
         check(
-            "consequences",
-            format!("{got_terms:?}"),
-            format!("{:?}", expected_terms(row)),
-        );
-        let decided_impact = DECIDED
-            .iter()
-            .find(|(label, _, _)| *label == row.label)
-            .map(|(_, _, impact)| impact.to_string());
-        if let Some(impact) = decided_impact.or_else(|| row.impact.clone()) {
-            check("impact", got.impact.to_string(), impact);
-        }
-        let hgvs_compared = !HGVS_NOT_COMPARED.contains(&row.label.as_str());
-        if hgvs_compared && !INSERTION_ROTATION_ROWS.contains(&row.label.as_str()) {
-            check(
-                "hgvs_c",
-                format!("{:?}", got.hgvs_c),
-                format!("{:?}", expected_hgvsc(row)),
-            );
-        }
-        if hgvs_compared {
-            check(
-                "hgvs_p",
-                format!("{:?}", strip_accession(got.hgvs_p.as_deref())),
-                format!("{:?}", expected_hgvsp(row)),
-            );
-        }
-        check(
-            "cdna_start",
-            format!("{:?}", got.cdna_position),
-            format!("{:?}", row.cdna_start),
+            "codons",
+            format!("{:?}", display(got.codons.as_deref())),
+            format!("{:?}", display(row.codons.as_deref())),
         );
         check(
-            "cds_start",
-            format!("{:?}", got.cds_position),
-            format!("{:?}", row.cds_start),
+            "amino_acids",
+            format!("{:?}", got.amino_acids),
+            format!("{:?}", row.amino_acids),
         );
-        check(
-            "protein_start",
-            format!("{:?}", got.protein_start),
-            format!("{:?}", row.protein_start),
-        );
-        let frameshift_insertion =
-            row.ref_allele == "-" && row.consequences.iter().any(|t| t == "frameshift_variant");
-        if !frameshift_insertion {
-            let spans_gap = row.label.starts_with("fs_del_spanning");
-            let display = |codons: Option<&str>| {
-                codons.map(|c| {
-                    if spans_gap {
-                        c.to_ascii_lowercase()
-                    } else {
-                        c.to_string()
-                    }
-                })
-            };
-            check(
-                "codons",
-                format!("{:?}", display(got.codons.as_deref())),
-                format!("{:?}", display(row.codons.as_deref())),
+    }
+    if let Some(exon) = &row.exon {
+        check("exon", format!("{:?}", got.exon), format!("{exon:?}"));
+    }
+    if let Some(intron) = &row.intron {
+        check("intron", format!("{:?}", got.intron), format!("{intron:?}"));
+    }
+}
+
+#[test]
+#[ignore = "requires FASTA_PATH (GRCh38 genome binary)"]
+fn incomplete_cds_and_frameshift_introns_match_vep_116() {
+    let engine = load_engine();
+    let fasta = open_fasta();
+    let rows = load_rows("incomplete_cds_vep116.tsv");
+    assert!(rows.len() > 150, "fixture has {} rows", rows.len());
+
+    let mut failures = Vec::new();
+    for row in &rows {
+        check_row(&engine, &fasta, row, &mut failures);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} differences from VEP 116 over {} rows:\n{}",
+        failures.len(),
+        rows.len(),
+        failures.join("\n")
+    );
+}
+
+/// The built RefSeq and GENCODE stores, or `None` (with a `SKIP:` line) when
+/// either is missing.
+fn load_built_stores() -> Option<(VarEffect, VarEffect)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../data/vareffect");
+    let mut engines = Vec::with_capacity(2);
+    for stem in ["transcript_models_refseq", "transcript_models_gencode"] {
+        let path = dir.join(format!("{stem}.bin"));
+        if !path.exists() {
+            eprintln!(
+                "SKIP: {} not found (build it with `vareffect build-transcripts --source ...`)",
+                path.display()
             );
-            check(
-                "amino_acids",
-                format!("{:?}", got.amino_acids),
-                format!("{:?}", row.amino_acids),
-            );
+            return None;
         }
-        if let Some(exon) = &row.exon {
-            check("exon", format!("{:?}", got.exon), format!("{exon:?}"));
-        }
-        if let Some(intron) = &row.intron {
-            check("intron", format!("{:?}", got.intron), format!("{intron:?}"));
-        }
+        let store = TranscriptStore::load_from_path(&path)
+            .unwrap_or_else(|e| panic!("load {}: {e}", path.display()));
+        engines.push(VarEffect::new(store, open_fasta()));
+    }
+    let gencode = engines.pop().expect("two engines");
+    let refseq = engines.pop().expect("two engines");
+    Some((refseq, gencode))
+}
+
+/// The same VEP rows, plus split stops, a chrY PAR copy, a gapped-CDS NM_
+/// and a non-MANE NM_ (`source_stores_vep116.tsv`), on the stores built from
+/// RefSeq RS_2025_08 and GENCODE v50 instead of the extracted fixture: an
+/// `ENST` row runs on the GENCODE store, any other on the RefSeq store.
+///
+/// Also needs `data/vareffect/transcript_models_refseq.bin` and
+/// `transcript_models_gencode.bin`; prints `SKIP:` without them.
+#[test]
+#[ignore = "requires FASTA_PATH and the built RefSeq and GENCODE stores"]
+fn built_stores_match_vep_116() {
+    let fasta = open_fasta();
+    let Some((refseq, gencode)) = load_built_stores() else {
+        return;
+    };
+    let mut rows = load_rows("incomplete_cds_vep116.tsv");
+    rows.extend(load_rows("source_stores_vep116.tsv"));
+
+    let mut failures = Vec::new();
+    for row in &rows {
+        let engine = if row.transcript.starts_with("ENST") {
+            &gencode
+        } else {
+            &refseq
+        };
+        check_row(engine, &fasta, row, &mut failures);
     }
     assert!(
         failures.is_empty(),

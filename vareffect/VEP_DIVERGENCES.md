@@ -154,14 +154,26 @@ A RefSeq transcript can differ from the genome. Where the transcript lacks a
 genomic base (a `cDNA_match` `D` gap), RefSeq splits the exon there, and the
 genome-built model numbers the CDS as the transcript does (a frameshift
 intron, [3.2](#32-frameshift-introns)): NM_001304717.5 matches VEP 116. Where
-the transcript has bases the genome lacks (an `I` gap) inside the CDS, the
-genome-built numbering after the gap is not the transcript's own. Those
+the transcript has bases the genome lacks inside the CDS, the genome-built
+numbering after them is not the transcript's own: an `I` gap, or a stretch of
+the transcript its alignment leaves out between two `cDNA_match` blocks (a
+coverage break, which RefSeq also marks with an interior CDS `start_range` /
+`end_range`; NBPF1 NM_001405693.2, SHANK3 NM_001372044.2). So is it
+where a `D` gap lies inside an exon rather than at an exon split (RefSeq
+RS_2025_08: NM_001193335.3, NM_017680.6, NM_030582.4, NM_130444.3): the
+model keeps genomic bases the transcript lacks. Those
 models carry `TranscriptModel::cds_alignment_gap`, and `vareffect` reports
 no HGVS c. or p. for them and refuses to resolve HGVS c. on them
 (`CdsNumberingUnavailable`). Consequence terms, cDNA/CDS/protein positions,
 codons and amino acids are still computed from the genome, in the
-genome-built numbering. VEP's HGVS for these transcripts has not been measured yet
-(issue 13, WP3).
+genome-built numbering. VEP 116 writes HGVS in the transcript's numbering
+(NM_002111.8, HTT, `I` gap in exon 1: `c.311A>G`, `p.His104Arg`); the
+consequence term matches, as it does for SHANK3 and NBPF1 past their
+coverage breaks. RefSeq RS_2025_08 has 60 flagged coding transcripts. Of the
+53 with an in-row gap inside the CDS span, 38 are flagged (31 `I` only, 3 `I`
+and an in-exon `D`, 4 in-exon `D` only) and the 15 with only exon-split `D`
+gaps are not; coverage breaks add 22. An interior range is not an open CDS
+end: the start and stop stay complete (VEP 116 calls `start_lost` on SHANK3).
 Accepted by maintainer decision (issue 13): a missing HGVS string is safer
 than one that names the wrong residue. MANE 1.5 has no such transcript.
 
