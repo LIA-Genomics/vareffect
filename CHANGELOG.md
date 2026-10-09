@@ -161,6 +161,36 @@ For releases before `0.5.0`, see the git history.
   in-frame protein duplications and stop insertions VEP writes differently
   (a separate fix) and one frameshift at the stop codon, none of which
   matched before either.
+- In-frame insertions follow VEP 116's codon window, terms and HGVS p.
+  Between two codons only the inserted codon is shown (NM_000059.4
+  `c.44_45insATT`: `-/TTA`, `-/L`, was `attttt/attTTAttt`, `IF/ILF`) and the
+  protein position spans both flanking residues. An insertion inside a codon
+  whose peptide neither starts nor ends with the reference residue is
+  `protein_altering_variant` (NM_000546.6 `c.523_524insTTT`, was
+  `inframe_insertion`), and a stop-carrying one may be `stop_gained` alone;
+  a stop inserted just before the native stop is `stop_retained_variant`
+  (NM_003036.4 `c.2152_*3dup`, was `stop_gained`), and an insertion before
+  the stop codon whose bases carry a stop is now `stop_gained` with the
+  termination codon past the native one (NM_000546.6
+  `c.1179_1180insCTGTAA`). Inside codon 1, VEP's start-codon rules apply
+  (`c.2_3insGAT`: `start_retained_variant`, was `inframe_insertion`;
+  `c.1_2insCGA`: `start_lost,start_retained_variant`). HGVS p. shifts the
+  inserted peptide C-terminal across the whole protein before checking for a
+  duplication (NM_001854.4 `p.Pro626_Gly628dup`, was `p.Gly625_Pro627dup`),
+  writes a stop insertion as an insertion (NM_000546.6
+  `p.Gln52_Trp53insTer`, was `p.Gln53Ter`), gives a stop-codon insertion
+  VEP's `delins` (`p.Ter394delinsTrpGly`, was none) and no notation for a
+  non-duplicating insertion just before the stop codon. An insertion with
+  an `N` is `coding_sequence_variant` with no amino acids or HGVS p., as in
+  VEP (was translated, e.g. a false `stop_gained`). Over GRCh38 ClinVar
+  insertions on MANE 1.5, 4,113 transcript rows move, all in-frame CDS
+  insertions: codons and protein position (4,013), amino acids (4,113),
+  HGVS p. (2,062), terms (562). In a stratified VEP 116 sample (up to 20 per
+  change bucket, 460 rows) codons, amino acids and protein position match
+  in all 460 (330, 285 and 330 before), terms in 458 (177 before) and HGVS
+  p. in 453 (157 before); the others are `start_lost` HGVS p. and two
+  `N`-containing minus-strand insertions VEP calls `stop_retained_variant`
+  (see `VEP_DIVERGENCES.md`).
 
 ## [0.5.0]
 

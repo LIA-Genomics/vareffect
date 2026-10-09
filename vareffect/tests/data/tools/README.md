@@ -43,7 +43,8 @@ python3 -I merge_vep_rows.py vep_rest/vep_rest_padded_cds.tsv vep_rest/vep_rest_
 ## Insertion-point fixture
 
 `../insertion_point_transcripts.jsonl` (MANE 1.5 NM_000546.6, NM_000059.4,
-NM_006231.4, NM_000548.5, NM_003036.4; GENCODE v50 ENST00000424518.6, ENST00000617316.2,
+NM_006231.4, NM_000548.5, NM_003036.4, NM_206933.4, NM_001232.4, NM_213653.4,
+NM_001854.4; GENCODE v50 ENST00000424518.6, ENST00000617316.2,
 ENST00000372299.4, ENST00000336338.10, extracted with `extract_fixture.py`) and
 `../insertion_point_vep116.tsv` back `tests/insertion_point_concordance.rs`:
 

@@ -819,6 +819,24 @@ fn inframe_3bp_insertion() {
     assert!(result.amino_acids.is_some());
 }
 
+#[test]
+fn inframe_insertion_with_an_unknown_base_is_coding_sequence_variant() {
+    // VEP 116 gives a non-ACGT allele no peptide: `coding_sequence_variant`
+    // alone, no amino acids and no HGVS p. (ClinVar NM_000057.4 insertion
+    // with `NNNNNNNNNN`, VEP REST).
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let idx = build_index(&tx);
+    let result = annotate_insertion("chr1", 1503, b"GNG", &tx, &idx, &fasta).unwrap();
+    assert_eq!(
+        result.consequences,
+        vec![Consequence::CodingSequenceVariant]
+    );
+    assert_eq!(result.amino_acids, None);
+    assert_eq!(result.hgvs_p, None);
+    assert_eq!(result.codons.as_deref(), Some("-/GNG"));
+}
+
 // -- Non-CDS indel tests ----------------------------------------------------
 
 #[test]
@@ -2869,5 +2887,162 @@ fn insertion_duplicating_following_bases_is_a_dup_of_them() {
         let hgvs = crate::hgvs_c::format_insertion_hgvs(pos, &bases, &tx.chrom, &tx, &idx, &fasta)
             .unwrap();
         assert_eq!(hgvs.as_deref(), Some("NM_SHIFT.1:c.13_15dup"), "{strand:?}");
+    }
+}
+
+mod inframe_insertion_terms {
+    //! VEP 116 terms of in-frame insertions (`VariationEffect.pm`), on codon
+    //! windows taken from VEP REST rows of NM_000546.6, NM_000374.5,
+    //! NM_001625.4 and NM_003036.4.
+
+    use super::super::indel::{CdsProtein, InsertionCodons, inframe_insertion_terms};
+    use super::*;
+    use crate::hgvs_p::ReferenceProtein;
+
+    /// An in-memory reference protein without its terminal stop.
+    struct Protein(&'static [u8]);
+
+    impl ReferenceProtein for Protein {
+        fn residue_count(&self) -> u32 {
+            self.0.len() as u32
+        }
+
+        fn residues(&self, start: u32, end: u32) -> Result<Vec<u8>, VarEffectError> {
+            Ok(self.0[start as usize..end as usize].to_vec())
+        }
+    }
+
+    fn terms(
+        ref_codon: &[u8],
+        inserted: &[u8],
+        local: usize,
+        codon_index: u32,
+        has_utr5: bool,
+        protein: &'static [u8],
+    ) -> Vec<Consequence> {
+        let codons =
+            InsertionCodons::from_codon(ref_codon.to_vec(), inserted, local, codon_index, false)
+                .expect("whole codons");
+        inframe_insertion_terms(&codons, inserted.len(), true, has_utr5, &Protein(protein))
+            .expect("in-memory protein")
+    }
+
+    const PROTEIN: &[u8] = b"MEEPQSDPSVEPPLSQETFSDLWKLLPEN";
+
+    #[test]
+    fn between_codons_is_inframe_insertion() {
+        assert_eq!(
+            terms(b"", b"TTA", 0, 14, true, PROTEIN),
+            vec![Consequence::InframeInsertion]
+        );
+    }
+
+    #[test]
+    fn inside_a_codon_without_the_reference_residue_is_protein_altering() {
+        // NM_000546.6 c.523_524insTTT: `cgc/cTTTgc`, `R/LC`.
+        assert_eq!(
+            terms(b"CGC", b"TTT", 1, 10, true, PROTEIN),
+            vec![Consequence::ProteinAlteringVariant]
+        );
+    }
+
+    #[test]
+    fn stop_insertions_inside_a_codon() {
+        // NM_000374.5 c.385_386insAGT: `tct/tAGTct`, `S/*S`.
+        assert_eq!(
+            terms(b"TCT", b"AGT", 1, 10, true, PROTEIN),
+            vec![Consequence::StopGained]
+        );
+        // NM_001625.4 c.597_599dup: `gag/gaGTAg`, `E/E*`.
+        let mut got = terms(b"GAG", b"GTA", 2, 10, true, PROTEIN);
+        got.sort_by_key(|c| c.severity_rank());
+        assert_eq!(
+            got,
+            vec![Consequence::StopGained, Consequence::InframeInsertion]
+        );
+    }
+
+    #[test]
+    fn insertions_at_the_stop_codon() {
+        let stop = PROTEIN.len() as u32;
+        // NM_000546.6 c.1180_1181insAAG (`*/*G`) and insGGG (`*/WG`).
+        assert_eq!(
+            terms(b"TGA", b"AAG", 1, stop, true, PROTEIN),
+            vec![
+                Consequence::StopRetainedVariant,
+                Consequence::InframeInsertion
+            ]
+        );
+        assert_eq!(
+            terms(b"TGA", b"GGG", 1, stop, true, PROTEIN),
+            vec![Consequence::StopLost]
+        );
+        // NM_000546.6 c.1179_1180insCTGTAA (`-/L*`): the stop is not next to
+        // the protein's last residue, so it is gained.
+        assert_eq!(
+            terms(b"", b"CTGTAA", 0, stop, true, PROTEIN),
+            vec![Consequence::StopGained, Consequence::InframeInsertion]
+        );
+    }
+
+    #[test]
+    fn stop_inserted_after_a_copy_of_the_protein_end_is_retained() {
+        // NM_003036.4 c.2152_*3dup shape: the spliced protein is the
+        // reference followed by a stop.
+        let protein: &'static [u8] = b"MAG";
+        assert_eq!(
+            terms(b"", b"GCAGGGTAGATA", 0, 1, true, protein),
+            vec![
+                Consequence::StopRetainedVariant,
+                Consequence::InframeInsertion
+            ]
+        );
+    }
+
+    #[test]
+    fn start_codon_insertions() {
+        // NM_000546.6 c.1_2insCGA (`atg/aCGAtg`) and c.2_3insGAT
+        // (`atg/atGATg`).
+        assert_eq!(
+            terms(b"ATG", b"CGA", 1, 0, true, PROTEIN),
+            vec![Consequence::StartLost, Consequence::StartRetainedVariant]
+        );
+        assert_eq!(
+            terms(b"ATG", b"GAT", 2, 0, true, PROTEIN),
+            vec![Consequence::StartRetainedVariant]
+        );
+        // Without a 5'UTR the start-position check does not run
+        // (`_inv_start_altered` needs one): derived from the source.
+        assert_eq!(
+            terms(b"ATG", b"CGA", 1, 0, false, PROTEIN),
+            vec![Consequence::StartRetainedVariant]
+        );
+    }
+
+    #[test]
+    fn insertion_codons_between_and_inside_codons() {
+        let between = InsertionCodons::from_codon(Vec::new(), b"TTA", 0, 14, false).unwrap();
+        assert_eq!(between.peptides.ref_aas, b"");
+        assert_eq!(between.peptides.alt_aas, b"L");
+        assert_eq!(
+            (between.peptides.tl_start, between.peptides.tl_end),
+            (15, 14)
+        );
+        let inside = InsertionCodons::from_codon(b"CGC".to_vec(), b"TTT", 1, 174, false).unwrap();
+        assert_eq!(inside.peptides.alt_aas, b"LC");
+        assert_eq!(
+            (inside.peptides.tl_start, inside.peptides.tl_end),
+            (175, 175)
+        );
+    }
+
+    #[test]
+    fn cds_protein_reads_residues_from_the_genome() {
+        let (_tmp, fasta) = write_test_fasta();
+        let tx = plus_strand_coding();
+        let idx = build_index(&tx);
+        let protein = CdsProtein::new("chr1", &tx, &idx, &fasta).unwrap();
+        assert_eq!(protein.residues(0, 3).unwrap(), b"MRR");
+        assert!(protein.residues(2, 2).unwrap().is_empty());
     }
 }

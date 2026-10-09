@@ -53,3 +53,15 @@ brca2_inframe_rotated	chr13	32316502	TTA	NM_000059.4	inframe_insertion	MODERATE	
 brca2_junction_dup_shifted	chr13	32326281	G	NM_000059.4	frameshift_variant,splice_region_variant	HIGH	NM_000059.4:c.516+1dup	None	714	715	515	516	172	aag/aaGg	K/KX	6/27	None
 tsc2_acceptor_dup_shifted	chr16	2072239	GGAGTCT	NM_000548.5	splice_acceptor_variant	HIGH	NM_000548.5:c.2098_2104dup	None	None	None	None	None	None	None	None	None	19/41
 ski_inframe_dup_into_utr	chr1	2306729	GCGGGCAGCGAGGGCGCTGCGGAGCTGGAGCCGTAGATT	NM_003036.4	inframe_insertion,stop_retained_variant	MODERATE	NM_003036.4:c.2152_*3dup	None	2599	2600	2151	2152	717	-/GCGGGCAGCGAGGGCGCTGCGGAGCTGGAGCCGTAGATT	-/AGSEGAAELEP*I	7/7	None
+tp53_stop_codon_retained	chr17	7669610	CTT	NM_000546.6	inframe_insertion,stop_retained_variant	MODERATE	NM_000546.6:c.1180_1181insAAG	NP_000537.3:p.Ter394delinsTer	1322	1323	1180	1181	394	tga/tAAGga	*/*G	11/11	None
+tp53_stop_codon_lost	chr17	7669610	CCC	NM_000546.6	stop_lost	HIGH	NM_000546.6:c.1181_1182insGGG	NP_000537.3:p.Ter394delinsTrpGly	1322	1323	1180	1181	394	tga/tGGGga	*/WG	11/11	None
+tp53_elongation_before_stop	chr17	7669611	TTACAG	NM_000546.6	stop_gained,inframe_insertion	HIGH	NM_000546.6:c.1179_1180insCTGTAA	None	1321	1322	1179	1180	393	-/CTGTAA	-/L*	11/11	None
+tp53_start_codon_lost	chr17	7676593	TCG	NM_000546.6	start_lost,start_retained_variant	HIGH	NM_000546.6:c.1_2insCGA	NP_000537.3:p.Asp1_?0	143	144	1	2	1	atg/aCGAtg	M/TM	2/11	None
+tp53_start_codon_retained	chr17	7676592	ATC	NM_000546.6	start_retained_variant	LOW	NM_000546.6:c.1_3dup	NP_000537.3:p.Met1dup	144	145	2	3	1	atg/atGATg	M/MM	2/11	None
+tp53_stop_insertion	chr17	7676210	CAT	NM_000546.6	stop_gained	HIGH	NM_000546.6:c.156_158dup	NP_000537.3:p.Gln52_Trp53insTer	300	301	158	159	53	tgg/tgATGg	W/*W	4/11	None
+tp53_stop_insertion_rotated	chr17	7674219	CGGTTCATGCCGGAGGTTCATGGGCGG	NM_000546.6	stop_gained,inframe_insertion	HIGH	NM_000546.6:c.743_744insCCGCCCATGAACCTCCGGCATGAACCG	NP_000537.3:p.Pro250_Ile251insTer	885	886	743	744	248	cgg/cgCCGCCCATGAACCTCCGGCATGAACCGg	R/RRP*TSGMNR	7/11	None
+brca2_stop_insertion	chr13	32336450	AGT	NM_000059.4	stop_gained,inframe_insertion	HIGH	NM_000059.4:c.2096_2098dup	NP_000050.3:p.Gln699_Leu700insTer	2294	2295	2095	2096	699	cag/cAGTag	Q/Q*	11/27	None
+ush2a_stop_between_codons	chr1	216325460	TTA	NM_206933.4	stop_gained,inframe_insertion	HIGH	NM_206933.4:c.987_988insTAA	NP_996816.3:p.Asp329_Asn330insTer	1426	1427	987	988	329	-/TAA	-/*	6/72	None
+casq2_dup_at_stop	chr1	115701244	TCA	NM_001232.4	inframe_insertion	MODERATE	NM_001232.4:c.1194_1196dup	NP_001223.2:p.Asp398dup	1369	1370	1196	1197	399	gaa/gaTGAa	E/DE	11/11	None
+hjv_dup_degenerate	chr1	146019625	CCT	NM_213653.4	inframe_insertion	MODERATE	NM_213653.4:c.204_206dup	NP_998818.1:p.Gly69dup	444	445	206	207	69	ggc/ggAGGc	G/GG	3/4	None
+col11a2_dup_shifted	chr1	103004626	GGAGGACCT	NM_001854.4	inframe_insertion	MODERATE	NM_001854.4:c.1872_1880dup	NP_001845.3:p.Pro626_Gly628dup	2224	2225	1880	1881	627	cct/ccAGGTCCTCCt	P/PGPP	19/67	None
