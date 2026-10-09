@@ -390,7 +390,8 @@ pub struct TranscriptModel {
     pub cds_alignment_gap: bool,
     /// 0-based genomic start of each selenocysteine codon (the lowest base of
     /// the codon on either strand), in ascending order. Empty when the
-    /// source names none.
+    /// source names none. `TGA` there reads as `U` in the reference peptide;
+    /// a base outside the CDS fails [`crate::LocateIndex::build`].
     pub selenocysteine_codons: Vec<u64>,
 }
 

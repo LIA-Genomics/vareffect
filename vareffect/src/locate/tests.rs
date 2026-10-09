@@ -1433,3 +1433,36 @@ mod insertion_point {
         assert_eq!(inside.exon_index, Some(0));
     }
 }
+
+#[test]
+fn selenocysteine_codons_map_to_codon_numbers_on_both_strands() {
+    // Plus: genomic 1800 is CDS offset 300, codon 101; 3002 is offset 502
+    // in the second segment, codon 168 (first base of codon 168 is 501).
+    let mut plus = plus_strand_coding();
+    plus.selenocysteine_codons = vec![3_002, 1_800];
+    let index = LocateIndex::build(&plus).unwrap();
+    assert_eq!(index.selenocysteine_codons(), &[101, 168]);
+    assert!(!index.has_selenocysteine_before(101));
+    assert!(index.has_selenocysteine_before(102));
+
+    // Minus: codon 2 is genomic 19494..19497, lowest base 19494.
+    let mut minus = minus_strand_coding();
+    minus.selenocysteine_codons = vec![19_494];
+    let index = LocateIndex::build(&minus).unwrap();
+    assert_eq!(index.selenocysteine_codons(), &[2]);
+
+    // No selenocysteine: nothing precedes any codon.
+    let index = LocateIndex::build(&plus_strand_coding()).unwrap();
+    assert!(index.selenocysteine_codons().is_empty());
+    assert!(!index.has_selenocysteine_before(u32::MAX));
+}
+
+#[test]
+fn selenocysteine_codon_outside_cds_is_malformed() {
+    let mut tx = plus_strand_coding();
+    tx.selenocysteine_codons = vec![1_200]; // 5'UTR
+    assert!(matches!(
+        LocateIndex::build(&tx),
+        Err(VarEffectError::Malformed(_))
+    ));
+}

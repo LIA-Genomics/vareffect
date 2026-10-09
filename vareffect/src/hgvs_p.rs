@@ -443,7 +443,12 @@ pub(crate) fn format_hgvs_p_frameshift(
     // Translate ref: truncate to complete codons (always exact when
     // UTR extension is not applied; may have trailing bases after UTR).
     let ref_complete_len = ref_seq.len() - (ref_seq.len() % 3);
-    let ref_protein = crate::codon::translate_sequence(&ref_seq[..ref_complete_len], is_mito)?;
+    let ref_protein = crate::codon::translate_reference_sequence(
+        &ref_seq[..ref_complete_len],
+        codon_start / 3 + 1,
+        index.selenocysteine_codons(),
+        is_mito,
+    )?;
 
     // Translate alt: truncate to complete codons, keep trailing bases
     // for CDS/UTR junction carryover.
@@ -498,6 +503,18 @@ pub(crate) fn format_hgvs_p_frameshift(
             });
         }
 
+        // VEP 116 counts to the first stop of the whole alternate
+        // translation, which reads an upstream selenocysteine TGA as one, so
+        // it writes `fsTer?` (NM_000581.4 c.149del: p.Gly50AlafsTer?). The
+        // PTC keeps the real termination codon.
+        let ter = |stop_n: u32| {
+            if index.has_selenocysteine_before(protein_pos) {
+                "?".to_string()
+            } else {
+                stop_n.to_string()
+            }
+        };
+
         // Scan for stop in the alt protein from the change point onward.
         // First check within the already-translated alt protein.
         if let Some(star_pos) = alt_protein[change_idx..].iter().position(|&a| a == b'*') {
@@ -510,7 +527,7 @@ pub(crate) fn format_hgvs_p_frameshift(
                     aa_three_letter(ref_aa),
                     protein_pos,
                     aa_three_letter(alt_aa),
-                    stop_n,
+                    ter(stop_n),
                 )),
                 // HGVS counts `fsTer` from the first changed residue as
                 // codon 1, so the terminating residue is `pos + n - 1`.
@@ -537,7 +554,7 @@ pub(crate) fn format_hgvs_p_frameshift(
                         aa_three_letter(ref_aa),
                         protein_pos,
                         aa_three_letter(alt_aa),
-                        stop_n,
+                        ter(stop_n),
                     )),
                     ptc: PtcSite::Residue(protein_pos + stop_n - 1),
                     edit,
@@ -1015,17 +1032,23 @@ pub(crate) fn format_hgvs_p_delins(
 /// # Returns
 ///
 /// The full `p.Ter{pos}{AltAA}extTer{N}` string, or `extTer?` if no
-/// in-frame stop is found in the 3'UTR.
+/// in-frame stop is found in the 3'UTR. A transcript with a
+/// selenocysteine codon always gets `extTer?`: VEP 116 counts to the first
+/// stop of the whole alternate translation, which reads the selenocysteine
+/// `TGA` as one (NM_000581.4 c.610T>C: `p.Ter204GlnextTer?`).
 pub(crate) fn format_hgvs_p_extension(
     alt_aa: u8,
     protein_pos: u32,
     chrom: &str,
     transcript: &TranscriptModel,
-    _index: &LocateIndex,
+    index: &LocateIndex,
     fasta: &FastaReader,
 ) -> Result<String, VarEffectError> {
     let is_mito = transcript.chrom == "chrM";
     let alt_name = aa_three_letter(alt_aa);
+    if index.has_selenocysteine_before(protein_pos) {
+        return Ok(format!("p.Ter{protein_pos}{alt_name}extTer?"));
+    }
 
     let utr_seq = fetch_3prime_utr_coding_seq(chrom, transcript, fasta)?;
 
@@ -1054,12 +1077,23 @@ pub(crate) fn format_hgvs_p_extension(
 ///
 /// * `protein_pos` — 1-based position of the original stop codon
 /// * `chrom`, `transcript`, `fasta` — for 3'UTR sequence fetch
+/// * `selenocysteine_upstream` — a selenocysteine codon precedes the first
+///   deleted residue ([`LocateIndex::has_selenocysteine_before`])
+///
+/// With a selenocysteine codon left upstream the extension is `delextTer?`,
+/// as in [`format_hgvs_p_extension`] (NM_000581.4 c.610_612del:
+/// `p.Ter204delextTer?`); VEP 116 counts when the deletion removes it
+/// (NM_001093771.3 c.1942_1950del: `p.Sec648_Ter650delextTer53`).
 pub(crate) fn format_hgvs_p_del_extension(
     protein_pos: u32,
     chrom: &str,
     transcript: &TranscriptModel,
+    selenocysteine_upstream: bool,
     fasta: &FastaReader,
 ) -> Result<String, VarEffectError> {
+    if selenocysteine_upstream {
+        return Ok(format!("p.Ter{protein_pos}delextTer?"));
+    }
     let is_mito = transcript.chrom == "chrM";
     let utr_seq = fetch_3prime_utr_coding_seq(chrom, transcript, fasta)?;
 

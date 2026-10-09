@@ -288,6 +288,9 @@ pub struct LocateIndex {
     /// Precomputed at build time for O(1) cDNA position computation. 0 for
     /// non-coding transcripts.
     utr5_exonic_len: u32,
+    /// 1-based codon numbers of the selenocysteine codons, ascending. Empty
+    /// for every transcript without `selenocysteine_codons`.
+    selenocysteine_codons: Vec<u32>,
 }
 
 impl LocateIndex {
@@ -301,7 +304,8 @@ impl LocateIndex {
     /// segment (a ribosomal-slippage CDS, which the codon walk cannot
     /// represent), or if the first CDS phase is non-zero on a transcript
     /// marked [`TranscriptModel::cds_start_complete`] (a partial first codon
-    /// cannot be a complete start).
+    /// cannot be a complete start), or if a selenocysteine codon base lies
+    /// outside the CDS.
     pub fn build(transcript: &TranscriptModel) -> Result<Self, VarEffectError> {
         let malformed =
             |msg: &str| VarEffectError::Malformed(format!("{}: {}", transcript.accession, msg));
@@ -411,6 +415,18 @@ impl LocateIndex {
             Vec::new()
         };
 
+        let mut selenocysteine_codons = transcript
+            .selenocysteine_codons
+            .iter()
+            .map(|&base| {
+                selenocysteine_codon_number(transcript, &cumulative_cds, base).ok_or_else(|| {
+                    malformed(&format!("selenocysteine codon at {base} outside the CDS"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        selenocysteine_codons.sort_unstable();
+        selenocysteine_codons.dedup();
+
         Ok(Self {
             cumulative_cds,
             cds_start_pad,
@@ -420,6 +436,7 @@ impl LocateIndex {
             cds_start_exon_idx,
             cds_end_exon_idx,
             utr5_exonic_len,
+            selenocysteine_codons,
         })
     }
 
@@ -496,6 +513,42 @@ impl LocateIndex {
     pub(crate) fn utr5_exonic_len(&self) -> u32 {
         self.utr5_exonic_len
     }
+
+    /// 1-based codon numbers of the transcript's selenocysteine codons,
+    /// ascending (empty for almost every transcript).
+    pub(crate) fn selenocysteine_codons(&self) -> &[u32] {
+        &self.selenocysteine_codons
+    }
+
+    /// `true` when a selenocysteine codon precedes codon `codon_number`
+    /// (1-based). VEP 116 scans the whole alternate translation for the
+    /// first stop and reads such a codon as one, so it finds no new stop
+    /// after the variant (`_stop_loss_extra_AA`, see [`crate::hgvs_p`]).
+    pub(crate) fn has_selenocysteine_before(&self, codon_number: u32) -> bool {
+        self.selenocysteine_codons
+            .first()
+            .is_some_and(|&first| first < codon_number)
+    }
+}
+
+/// 1-based codon number of the CDS base at 0-based genomic position `base`,
+/// or `None` when no CDS segment holds it. Either base of a codon gives the
+/// same number, so the lowest genomic base works on both strands.
+fn selenocysteine_codon_number(
+    transcript: &TranscriptModel,
+    cumulative_cds: &[u32],
+    base: u64,
+) -> Option<u32> {
+    let (seg_idx, seg) = transcript
+        .cds_segments
+        .iter()
+        .enumerate()
+        .find(|(_, seg)| seg.genomic_start <= base && base < seg.genomic_end)?;
+    let intra = match transcript.strand {
+        Strand::Plus => base - seg.genomic_start,
+        Strand::Minus => seg.genomic_end - 1 - base,
+    } as u32;
+    Some((cumulative_cds[seg_idx] + intra) / 3 + 1)
 }
 
 /// Compute the 5'UTR exonic length for a transcript: number of exonic bases

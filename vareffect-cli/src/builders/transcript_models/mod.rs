@@ -20,8 +20,8 @@
 //!
 //! Single pass over the (optionally gzipped) GFF3 into scratch maps keyed on
 //! the transcript row's `ID`: transcript rows, exon spans, CDS spans with
-//! their phase and per-row notes (protein accession, RefSeq partial ranges,
-//! exceptions and `transl_except`), RefSeq `cDNA_match` gaps, and GENCODE
+//! their phase and per-row notes (protein accession, RefSeq partial ranges
+//! and exceptions, RefSeq and MANE `transl_except`), RefSeq `cDNA_match` gaps, and GENCODE
 //! selenocysteine rows. Child rows (`start_codon`, `stop_codon`, UTRs,
 //! `stop_codon_redefined_as_selenocysteine`, `cDNA_match`) are matched
 //! explicitly and never folded into exons or CDS: the CDS rows already
@@ -539,6 +539,10 @@ fn scan_line(scan: &mut Scan, line: &str, source: TranscriptSource) -> Result<()
             if refseq {
                 notes
                     .read_refseq(attrs)
+                    .with_context(|| format!("reading CDS attributes of {parent}"))?;
+            } else if source == TranscriptSource::Mane {
+                notes
+                    .read_transl_except(attrs)
                     .with_context(|| format!("reading CDS attributes of {parent}"))?;
             }
         }
@@ -1060,10 +1064,9 @@ fn assemble_one(
             .get(accession)
             .map(|codons| codons.iter().copied().collect())
             .unwrap_or_default(),
-        TranscriptSource::RefSeq => notes
+        TranscriptSource::RefSeq | TranscriptSource::Mane => notes
             .map(|notes| notes.selenocysteine.iter().copied().collect())
             .unwrap_or_default(),
-        // MANE's selenocysteine codons are read in a later store version.
         _ => Vec::new(),
     };
     if notes.is_some_and(|notes| notes.other_transl_except) {
@@ -1217,9 +1220,9 @@ struct CdsNotes {
     /// A RefSeq CDS `exception` saying the protein follows transcript or
     /// proteomic data rather than the genome.
     mismatch_exception: bool,
-    /// RefSeq `transl_except` selenocysteine codon starts.
+    /// RefSeq or MANE `transl_except` selenocysteine codon starts.
     selenocysteine: BTreeSet<u64>,
-    /// A RefSeq `transl_except` entry other than `aa:Sec`.
+    /// A RefSeq or MANE `transl_except` entry other than `aa:Sec`.
     other_transl_except: bool,
 }
 
@@ -1234,6 +1237,16 @@ impl CdsNotes {
         self.mismatch_exception |= extract_attr(attrs, "exception").is_some_and(|exception| {
             exception.contains("annotated by transcript or proteomic data")
         });
+        self.read_transl_except(attrs)
+    }
+
+    /// Fold one CDS row's `transl_except` in: the MANE profile reads only
+    /// this (the selenocysteine codons of its 25 selenoproteins).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed `transl_except`.
+    fn read_transl_except(&mut self, attrs: &str) -> Result<()> {
         if let Some(raw) = extract_attr(attrs, "transl_except") {
             let parsed = parse_transl_except(&raw)?;
             self.selenocysteine.extend(parsed.selenocysteine);
@@ -1759,6 +1772,42 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         );
         assert_eq!(syngap.exons.last().unwrap().exon_number, 3);
         assert_eq!(syngap.exons.last().unwrap().genomic_start, 99);
+    }
+
+    #[test]
+    fn mane_profile_reads_selenocysteine_transl_except() {
+        // Shaped on MANE 1.5 NM_000581.4 (GPX1): every CDS row repeats the
+        // transcript's `transl_except`, percent-encoded. An `aa:Met` entry
+        // (alternative start) is counted, not stored.
+        let gff = "\
+##gff-version 3
+chr3\tNCBI\tgene\t100\t2000\t.\t-\t.\tID=gene-GPX1;Name=GPX1;Dbxref=HGNC:HGNC:4553;gene_biotype=protein_coding
+chr3\tNCBI\tmRNA\t100\t2000\t.\t-\t.\tID=rna-NM_000581.4;Parent=gene-GPX1;Name=NM_000581.4;tag=MANE Select
+chr3\tNCBI\texon\t100\t500\t.\t-\t.\tID=e1;Parent=rna-NM_000581.4
+chr3\tNCBI\texon\t1100\t2000\t.\t-\t.\tID=e2;Parent=rna-NM_000581.4
+chr3\tNCBI\tCDS\t200\t500\t.\t-\t1\tID=c1;Parent=rna-NM_000581.4;protein_id=NP_000572.2;transl_except=(pos:complement(1200..1202)%2Caa:Sec)
+chr3\tNCBI\tCDS\t1100\t1800\t.\t-\t0\tID=c1;Parent=rna-NM_000581.4;protein_id=NP_000572.2;transl_except=(pos:complement(1200..1202)%2Caa:Sec)
+chr3\tNCBI\tgene\t5000\t6000\t.\t+\t.\tID=gene-ALT;Name=ALT;Dbxref=HGNC:HGNC:99994;gene_biotype=protein_coding
+chr3\tNCBI\tmRNA\t5000\t6000\t.\t+\t.\tID=rna-NM_888888.1;Parent=gene-ALT;Name=NM_888888.1;tag=MANE Select
+chr3\tNCBI\texon\t5000\t6000\t.\t+\t.\tID=ae1;Parent=rna-NM_888888.1
+chr3\tNCBI\tCDS\t5100\t5900\t.\t+\t0\tID=ac1;Parent=rna-NM_888888.1;protein_id=NP_888888.1;transl_except=(pos:5100..5102%2Caa:Met)
+";
+        let file = write_temp(gff);
+        let parsed = parse_gff3(file.path(), TranscriptSource::Mane).expect("parse");
+
+        let gpx1 = parsed
+            .transcripts
+            .iter()
+            .find(|t| t.accession == "NM_000581.4")
+            .expect("GPX1 admitted");
+        assert_eq!(gpx1.selenocysteine_codons, vec![1199]);
+        let alt = parsed
+            .transcripts
+            .iter()
+            .find(|t| t.accession == "NM_888888.1")
+            .expect("alternative-start transcript admitted");
+        assert!(alt.selenocysteine_codons.is_empty());
+        assert_eq!(parsed.other_transl_except, 1);
     }
 
     #[test]

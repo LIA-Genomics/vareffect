@@ -22,8 +22,8 @@ For releases before `0.5.0`, see the git history.
 - `TranscriptModel::new` and `with_*` setters. New model fields:
   `cds_start_complete` / `cds_end_complete` (GENCODE `cds_start_NF` /
   `cds_end_NF`, RefSeq partial CDS ranges), `genome_mismatch`,
-  `cds_alignment_gap` and `selenocysteine_codons`. MANE models are complete,
-  genome-matching and carry no selenocysteine codons yet.
+  `cds_alignment_gap` and `selenocysteine_codons`. MANE models are complete
+  and genome-matching.
 - Multi-locus accessions: one chrX and one chrY copy of a pseudoautosomal
   transcript. `TranscriptStore::get_all_by_accession` returns every copy in
   canonical chromosome order (`chrom::canonical_order_key`, then
@@ -82,7 +82,8 @@ For releases before `0.5.0`, see the git history.
   counts only on the CDS's first or last row; an interior one is a coverage
   break), RefSeq's genome-mismatch flags (in-row `Gap` operations and
   transcript stretches aligned nowhere between `cDNA_match` blocks) and both
-  sources' selenocysteine codons. Every
+  sources' selenocysteine codons (MANE's come from `transl_except`, see
+  Changed). Every
   build writes `<stem>.excluded.tsv`, the candidate transcripts not
   admitted and why (RefSeq alternate loci and patches, ribosomal-slippage
   CDSs with two segments in one exon, ...), and the manifest gains
@@ -110,6 +111,21 @@ For releases before `0.5.0`, see the git history.
 
 ### Changed
 
+- Selenocysteine, following VEP 116. The MANE build reads `aa:Sec` from
+  `transl_except` (35 codons on 25 MANE 1.5 transcripts; other entries are
+  counted in the manifest's `other_transl_except`), so the MANE store bytes
+  change. In the reference peptide `TGA` at a selenocysteine codon is `U`;
+  alternate alleles translate with the standard table. A Sec codon SNV is
+  now `missense_variant` (`U/R`, `p.Sec428Arg`) or `stop_gained` (`U/*`,
+  `p.Sec49Ter`) instead of `stop_lost` or `stop_retained_variant`, and a
+  deletion of the codon is `inframe_deletion` `p.Sec49del`. As in VEP, which
+  counts the new stop from the start of the whole alternate translation, a
+  stop-lost that leaves a selenocysteine upstream is `extTer?` and a
+  frameshift after a selenocysteine `fsTer?`; the `ptc` field keeps the
+  located termination codon. A store whose selenocysteine codon lies outside
+  the CDS fails to load (`LocateIndex::build`). `codon::aa_three_letter` maps `U` to `"Sec"`. On ClinVar against
+  MANE 1.5, 17 CSQ entries on 5 transcripts change, all matching VEP 116
+  REST.
 - **Breaking.** `TranscriptModel` is `#[non_exhaustive]` (build it with
   `TranscriptModel::new`), `TranscriptModel::tier` is an
   `Option<TranscriptTier>` (`None` for a transcript without a MANE or RefSeq
