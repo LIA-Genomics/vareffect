@@ -3149,3 +3149,119 @@ mod inframe_insertion_terms {
         assert!(protein.residues(2, 2).unwrap().is_empty());
     }
 }
+
+// -- Unknown alternate bases (VEP 116 `coding_unknown`) ----------------------
+
+#[test]
+fn unknown_alt_bases_are_detected_case_insensitively() {
+    assert!(super::helpers::has_unknown_bases(b"N"));
+    assert!(super::helpers::has_unknown_bases(b"ACNT"));
+    assert!(super::helpers::has_unknown_bases(b"R"));
+    assert!(!super::helpers::has_unknown_bases(b"acgtACGT"));
+    assert!(!super::helpers::has_unknown_bases(b""));
+}
+
+#[test]
+fn unknown_alt_snv_is_coding_unknown_with_codons_and_no_hgvs() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    let known = annotate_snv("chr1", 1503, b'C', b'A', &tx, &index, &fasta).unwrap();
+    let unknown = annotate_snv("chr1", 1503, b'C', b'N', &tx, &index, &fasta).unwrap();
+    assert_eq!(
+        unknown.consequences,
+        vec![Consequence::CodingSequenceVariant]
+    );
+    assert_eq!(unknown.impact, Impact::Modifier);
+    assert_eq!((&unknown.hgvs_c, &unknown.hgvs_p), (&None, &None));
+    assert!(unknown.amino_acids.is_none());
+    // Codons and the protein position stay, as VEP's `Tct/Nct`.
+    assert_eq!(unknown.protein_start, known.protein_start);
+    assert!(unknown.codons.as_deref().is_some_and(|c| c.contains('N')));
+}
+
+#[test]
+fn unknown_alt_mnv_and_delins_lose_peptide_terms() {
+    let (_tmp, fasta) = write_test_fasta();
+    let store = crate::TranscriptStore::from_transcripts(vec![plus_strand_coding()]);
+    for (reference, alternate) in [(&b"CG"[..], &b"NA"[..]), (&b"CGTC"[..], &b"NG"[..])] {
+        let results = annotate("chr1", 1503, reference, alternate, &store, &fasta).unwrap();
+        for result in &results {
+            assert!(
+                !result.consequences.iter().any(|c| matches!(
+                    c,
+                    Consequence::MissenseVariant
+                        | Consequence::SynonymousVariant
+                        | Consequence::StopGained
+                        | Consequence::InframeDeletion
+                        | Consequence::ProteinAlteringVariant
+                )),
+                "{result:?}"
+            );
+            assert!(
+                result.hgvs_c.is_none() && result.hgvs_p.is_none() && result.amino_acids.is_none()
+            );
+            // CGTC>NG shortens the CDS by two bases: a frameshift whose stop
+            // is undetermined.
+            let expected = if result
+                .consequences
+                .contains(&Consequence::FrameshiftVariant)
+            {
+                PtcStatus::Indeterminate
+            } else {
+                PtcStatus::NotApplicable
+            };
+            assert_eq!(result.ptc, expected);
+        }
+    }
+}
+
+#[test]
+fn unknown_alt_frameshift_insertion_keeps_frameshift_without_a_located_stop() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    let result = annotate_insertion("chr1", 1504, b"N", &tx, &index, &fasta).unwrap();
+    assert_eq!(result.consequences, vec![Consequence::FrameshiftVariant]);
+    assert_eq!(result.impact, Impact::High);
+    assert!(result.hgvs_c.is_none() && result.hgvs_p.is_none() && result.amino_acids.is_none());
+    assert_eq!(result.ptc, PtcStatus::Indeterminate);
+}
+
+#[test]
+fn unknown_alt_indels_at_the_start_and_stop_codons_follow_vep() {
+    // VEP 116 NM_000546.6: c.1_2insNNN is `start_retained_variant`, c.1_2insN
+    // `frameshift_variant,start_retained_variant`, and an N insertion or
+    // delins in the stop codon `stop_retained_variant` alone.
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    let inframe = annotate_insertion("chr1", 1501, b"NNN", &tx, &index, &fasta).unwrap();
+    assert_eq!(
+        inframe.consequences,
+        vec![Consequence::StartRetainedVariant]
+    );
+    let frameshift = annotate_insertion("chr1", 1501, b"N", &tx, &index, &fasta).unwrap();
+    assert_eq!(
+        frameshift.consequences,
+        vec![
+            Consequence::FrameshiftVariant,
+            Consequence::StartRetainedVariant
+        ]
+    );
+    for bases in [&b"N"[..], &b"NNN"[..]] {
+        let at_stop = annotate_insertion("chr1", 4498, bases, &tx, &index, &fasta).unwrap();
+        assert_eq!(
+            at_stop.consequences,
+            vec![Consequence::StopRetainedVariant],
+            "{bases:?}"
+        );
+        assert_eq!(at_stop.ptc, PtcStatus::NotApplicable);
+    }
+    let store = crate::TranscriptStore::from_transcripts(vec![tx.clone()]);
+    let delins = annotate("chr1", 4497, b"TA", b"N", &store, &fasta).unwrap();
+    assert_eq!(
+        delins[0].consequences,
+        vec![Consequence::StopRetainedVariant]
+    );
+}

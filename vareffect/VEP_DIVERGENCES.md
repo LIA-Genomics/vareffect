@@ -361,16 +361,28 @@ for exon numbers) next to it.
   `p.Met1?`. The same offset gives VEP text such as `p.Asp0_Asp1ins...` for
   a `start_retained_variant` insertion that clips before residue 1 on a
   transcript without a 5'UTR; `vareffect` writes no HGVS p. there.
-- **Unknown bases in in-frame insertions.** An inserted `N` gives VEP 116
-  no peptide, so the insertion is `coding_sequence_variant` (or
-  `start_retained_variant` inside codon 1) with no amino acids or HGVS p.,
-  as in `vareffect`. Before its stop-codon overlap test VEP adds the
-  inserted length to the genomic start (`_overlaps_stop_codon_cil`), which
-  on the minus strand reaches back over the stop codon from up to the
-  insertion's length upstream; VEP then calls `stop_retained_variant`
-  (NM_000546.6 `c.1180_1181insNNN`, and long N-containing ClinVar insertions
-  such as NM_024675.4 near residue 1167). `vareffect` keeps
-  `coding_sequence_variant`.
+- **Unknown bases in the alternate allele.** An `N` (or any base other than
+  A, C, G, T) gives VEP 116 no peptide, so every term read from the peptide
+  becomes `coding_sequence_variant` (`coding_unknown`), and VEP writes no
+  HGVS c., HGVS p. or amino acids, keeping codons and positions; a
+  frameshift stays `frameshift_variant`. An insertion or delins at the start
+  codon is `start_retained_variant` (with `frameshift_variant` when the
+  length changes), and one overlapping the stop codon `stop_retained_variant`
+  alone. `vareffect` does the same (VEP 116 REST on 40 N alleles: ClinVar
+  SNVs `Tct/Nct`, MNVs `aCT/aAN`, delins and insertions, and NM_000546.6 at
+  its start and stop codons) and reports a frameshift's termination codon as
+  undetermined. Two differences remain:
+  - Before its stop-codon overlap test VEP adds the inserted length to the
+    genomic start (`_overlaps_stop_codon_cil`), which on the minus strand
+    reaches back over the stop codon from up to the insertion's length
+    upstream; VEP then calls `stop_retained_variant` for long N-containing
+    insertions that end before the stop codon (ClinVar NM_024675.4 near
+    residue 1167). `vareffect` keeps `coding_sequence_variant`.
+  - For an N SNV or MNV in the start codon VEP 116 reports
+    `intergenic_variant` on the transcript (its `_snp_start_altered` caches
+    1 and returns 0 for ambiguous sequence, so the start predicates disagree
+    by call order; NM_000546.6 `aTg/aNg`, `ATg/NNg`). `vareffect` reports
+    `coding_sequence_variant`.
 - **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
   resolve to `chrM` through the reader's alias table. VEP's in-frame
   insertion duplication check (`_check_for_peptide_duplication`) translates

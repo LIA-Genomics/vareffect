@@ -282,6 +282,162 @@ pub(super) fn without_gapped_numbering(
     result
 }
 
+/// `true` when an alternate allele has a base other than A, C, G or T
+/// (case-insensitive), typically an `N` from an unresolved stretch of an
+/// inserted sequence.
+pub(super) fn has_unknown_bases(alt: &[u8]) -> bool {
+    alt.iter()
+        .any(|base| !matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'))
+}
+
+/// The site of an alternate allele, for [`without_unknown_alt_effects`].
+pub(super) struct AltSite<'a> {
+    /// The trimmed alternate allele.
+    pub(super) alt: &'a [u8],
+    /// `true` for an insertion or a length-changing delins, `false` for an
+    /// SNV or MNV.
+    pub(super) is_indel: bool,
+    pub(super) chrom: &'a str,
+    pub(super) transcript: &'a TranscriptModel,
+    pub(super) index: &'a LocateIndex,
+    pub(super) fasta: &'a FastaReader,
+}
+
+/// Apply VEP 116's handling of an alternate allele with unknown bases (an
+/// `N`): it has no peptide, so no HGVS c., HGVS p. or amino acids are written
+/// and every term read from the peptide (missense, synonymous, stop and
+/// start terms, in-frame insertion or deletion, protein-altering) gives way
+/// to `coding_unknown` (`coding_sequence_variant`). Codons and positions
+/// stay (VEP 116 REST on ClinVar N alleles: NM_000518.5 `aCT/aAN`,
+/// NM_003051.4 `Tct/Nct`). VEP's ambiguity-aware start and stop rules for
+/// indels are kept (NM_000546.6, VEP 116):
+///
+/// - an insertion or delins at the start codon is `start_retained_variant`
+///   (`_ins_del_start_altered` returns 0 for ambiguous sequence), with
+///   `frameshift_variant` when the length changes by a non-multiple of 3;
+/// - one overlapping the stop codon is `stop_retained_variant` alone
+///   (`_ins_del_stop_altered_cil`), not a frameshift.
+///
+/// `coding_sequence_variant` is dropped next to `frameshift_variant` or
+/// `start_retained_variant`, which `coding_unknown` excludes. A frameshift's
+/// termination codon is undetermined (the unknown codons may hold a stop);
+/// otherwise there is no termination codon to report.
+///
+/// # Arguments
+///
+/// * `site` - The allele and the transcript it was annotated on
+/// * `result` - The annotation computed from it
+///
+/// # Returns
+///
+/// `result` unchanged when the allele is all A, C, G or T.
+///
+/// # Errors
+///
+/// Returns an error if the stop codon cannot be read from the reference.
+pub(super) fn without_unknown_alt_effects(
+    site: &AltSite<'_>,
+    mut result: ConsequenceResult,
+) -> Result<ConsequenceResult, VarEffectError> {
+    if !has_unknown_bases(site.alt) {
+        return Ok(result);
+    }
+    result.hgvs_c = None;
+    result.hgvs_p = None;
+    result.amino_acids = None;
+    let at_start = result.consequences.iter().any(|c| {
+        matches!(
+            c,
+            Consequence::StartLost | Consequence::StartRetainedVariant
+        )
+    });
+    let at_stop = site.is_indel && overlaps_stop_codon(site, &result)?;
+    let mut consequences: Vec<Consequence> = Vec::with_capacity(result.consequences.len());
+    for term in &result.consequences {
+        let term = match term {
+            Consequence::StartLost | Consequence::StartRetainedVariant if site.is_indel => {
+                Consequence::StartRetainedVariant
+            }
+            Consequence::FrameshiftVariant if at_stop => Consequence::StopRetainedVariant,
+            Consequence::MissenseVariant
+            | Consequence::SynonymousVariant
+            | Consequence::StopGained
+            | Consequence::StopLost
+            | Consequence::StopRetainedVariant
+            | Consequence::StartLost
+            | Consequence::StartRetainedVariant
+            | Consequence::InframeInsertion
+            | Consequence::InframeDeletion
+            | Consequence::ProteinAlteringVariant
+            | Consequence::CodingSequenceVariant => {
+                if at_stop {
+                    Consequence::StopRetainedVariant
+                } else {
+                    Consequence::CodingSequenceVariant
+                }
+            }
+            Consequence::TranscriptAblation
+            | Consequence::TranscriptAmplification
+            | Consequence::SpliceAcceptorVariant
+            | Consequence::SpliceDonorVariant
+            | Consequence::FrameshiftVariant
+            | Consequence::FeatureTruncation
+            | Consequence::FeatureElongation
+            | Consequence::SpliceRegionVariant
+            | Consequence::IncompleteTerminalCodonVariant
+            | Consequence::FivePrimeUtrVariant
+            | Consequence::ThreePrimeUtrVariant
+            | Consequence::NonCodingTranscriptExonVariant
+            | Consequence::IntronVariant
+            | Consequence::NonCodingTranscriptVariant
+            | Consequence::UpstreamGeneVariant
+            | Consequence::DownstreamGeneVariant
+            | Consequence::IntergenicVariant => *term,
+        };
+        if !consequences.contains(&term) {
+            consequences.push(term);
+        }
+    }
+    if site.is_indel && at_start && !consequences.contains(&Consequence::StartRetainedVariant) {
+        consequences.push(Consequence::StartRetainedVariant);
+    }
+    if consequences.iter().any(|c| {
+        matches!(
+            c,
+            Consequence::FrameshiftVariant | Consequence::StartRetainedVariant
+        )
+    }) {
+        consequences.retain(|c| *c != Consequence::CodingSequenceVariant);
+    }
+    result.impact = finalize_consequences(&mut consequences);
+    let frameshift = consequences.contains(&Consequence::FrameshiftVariant);
+    result.consequences = consequences;
+    if frameshift {
+        result.ptc = PtcStatus::Indeterminate;
+    } else {
+        result.ptc = PtcStatus::NotApplicable;
+        result.predicts_nmd = false;
+    }
+    Ok(result)
+}
+
+/// `true` when the variant's CDS span (for an insertion, its two flanking
+/// bases) touches the stop codon of a CDS that ends in one.
+fn overlaps_stop_codon(
+    site: &AltSite<'_>,
+    result: &ConsequenceResult,
+) -> Result<bool, VarEffectError> {
+    let Some(first) = result.cds_position else {
+        return Ok(false);
+    };
+    let last = result.cds_position_end.unwrap_or(first);
+    let total = site.index.total_cds_length();
+    if last + 2 < total || first > total {
+        return Ok(false);
+    }
+    ends_in_stop_codon(site.chrom, site.transcript, site.index, site.fasta)
+}
+
 /// `true` when codon 1 is a complete start codon, the only case in which
 /// VEP's start-codon predicates (`start_lost`, `start_retained_variant`)
 /// apply. A 5'-incomplete CDS (`cds_start_NF`) has no start codon, even
