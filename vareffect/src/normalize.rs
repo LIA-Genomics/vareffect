@@ -2,8 +2,9 @@
 //!
 //! Implements the HGVS 3' rule: indels in repeated sequences are shifted to
 //! the most 3' (coding-strand rightward) equivalent position before HGVS
-//! formatting. The shift respects region boundaries: exonic shifts stay
-//! within the exon, intronic shifts stay within the intron.
+//! formatting. Deletion shifts respect region boundaries: exonic shifts stay
+//! within the exon, intronic shifts stay within the intron. Insertion shifts
+//! follow VEP's genomic shift and cross exon/intron junctions.
 //!
 //! The 3' direction is relative to the **coding strand** (transcript
 //! direction):
@@ -106,104 +107,120 @@ pub(crate) fn compute_3prime_shift_deletion(
     }
 }
 
+/// Bases VEP reads on each side of an indel for its HGVS 3' shift
+/// (`$area_to_search` in `TranscriptVariationAllele::_genomic_shift`).
+const VEP_SHIFT_WINDOW: u64 = 1000;
+
 /// Compute the 3' shift offset (in genomic bases) for an insertion.
 ///
 /// Starting from the insertion point `ins_pos` (insertion is between
-/// `pos - 1` and `pos` on the genome), checks how many bases the
-/// insertion can slide toward the 3' end of the coding strand while
-/// remaining equivalent. At each step, the reference base at the shift
-/// position must match the corresponding inserted base (cycling through
-/// the inserted sequence).
+/// `pos - 1` and `pos` on the genome), counts how many bases the insertion
+/// can slide toward the 3' end of the coding strand while remaining
+/// equivalent: at each step the reference base entering on the 3' side must
+/// match the corresponding inserted base (cycling through the inserted
+/// sequence).
 ///
 /// Both `fasta` bytes and `inserted_bases` are in **plus-strand**
 /// orientation (VCF convention). The shift direction changes per strand
 /// but the base comparison is always plus-strand vs plus-strand.
 ///
-/// Stops at region boundaries: exonic shifts stop at exon/intron
-/// junctions; intronic shifts stop at intron/exon junctions.
+/// The shift is on the genomic sequence, as VEP 116's `_genomic_shift` and
+/// `perform_shift`: it crosses exon/intron junctions (VEP NM_000548.5
+/// `c.336+1_336+2dup` for an insertion after `c.336`), reads at most
+/// [`VEP_SHIFT_WINDOW`] bases past the insertion point (clamped to the
+/// chromosome), and moves at most `VEP_SHIFT_WINDOW + 1 - len` bases (the
+/// whole window for a longer insertion, except a minus-strand one exactly
+/// `VEP_SHIFT_WINDOW + 1` long, which VEP's reverse loop never shifts):
+/// VEP 116 leaves an
+/// 812-base ALMS1 insertion at NM_001378454.1 `c.2427_2428ins`, which an
+/// uncapped shift would move to `c.2239_3050dup`. The bases at the shifted
+/// point are [`rotate_inserted_bases`].
 ///
 /// # Returns
 ///
 /// Number of bases to shift (0 if no shift is possible).
+///
+/// # Errors
+///
+/// [`VarEffectError::ChromNotFound`] if `chrom` is not in the genome index,
+/// or any error from [`FastaReader::fetch_sequence`].
 pub(crate) fn compute_3prime_shift_insertion(
     chrom: &str,
     ins_pos: u64,
     inserted_bases: &[u8],
-    transcript: &TranscriptModel,
+    strand: Strand,
     fasta: &FastaReader,
 ) -> Result<u64, VarEffectError> {
-    let ins_len = inserted_bases.len();
+    let ins_len = inserted_bases.len() as u64;
     if ins_len == 0 {
         return Ok(0);
     }
-
-    match transcript.strand {
+    let chrom_len = fasta
+        .chrom_length(chrom)
+        .ok_or_else(|| VarEffectError::ChromNotFound {
+            chrom: chrom.to_string(),
+        })?;
+    let max_shift = if ins_len <= VEP_SHIFT_WINDOW {
+        VEP_SHIFT_WINDOW + 1 - ins_len
+    } else if strand == Strand::Minus && ins_len == VEP_SHIFT_WINDOW + 1 {
+        0
+    } else {
+        VEP_SHIFT_WINDOW
+    } as usize;
+    let shift = match strand {
+        // 3' = increasing genomic coordinate.
         Strand::Plus => {
-            // 3' = increasing genomic coordinate.
-            // Try exon first (with boundary fallback), then intron.
-            let fetch_end = if let Some(exon_range) = find_shift_exon_range(ins_pos, transcript) {
-                exon_range.1
-            } else if let Some((_, intron_end)) = containing_intron_range(ins_pos, transcript) {
-                intron_end
-            } else if ins_pos > 0 {
-                if let Some((_, intron_end)) = containing_intron_range(ins_pos - 1, transcript) {
-                    intron_end
-                } else {
-                    return Ok(0);
-                }
-            } else {
-                return Ok(0);
-            };
-            if fetch_end <= ins_pos {
+            let end = ins_pos.saturating_add(VEP_SHIFT_WINDOW).min(chrom_len);
+            if end <= ins_pos {
                 return Ok(0);
             }
-            let seq = fasta.fetch_sequence(chrom, ins_pos, fetch_end)?;
-            let mut shift = 0usize;
-            while shift < seq.len() {
-                if seq[shift] != inserted_bases[shift % ins_len] {
-                    break;
-                }
-                shift += 1;
-            }
-            Ok(shift as u64)
+            let seq = fasta.fetch_sequence(chrom, ins_pos, end)?;
+            seq.iter()
+                .zip(inserted_bases.iter().cycle())
+                .take(max_shift)
+                .take_while(|(reference, inserted)| reference == inserted)
+                .count()
         }
+        // 3' = decreasing genomic coordinate: walk left from `ins_pos - 1`,
+        // matching the inserted bases from their end.
         Strand::Minus => {
-            // 3' = decreasing genomic coordinate.
-            // Try exon first (with boundary fallback), then intron.
-            let fetch_start = if let Some(exon_range) =
-                find_shift_exon_range_minus(ins_pos, transcript)
-            {
-                exon_range.0
-            } else if ins_pos > 0 {
-                if let Some((intron_start, _)) = containing_intron_range(ins_pos - 1, transcript) {
-                    intron_start
-                } else if let Some((intron_start, _)) = containing_intron_range(ins_pos, transcript)
-                {
-                    intron_start
-                } else {
-                    return Ok(0);
-                }
-            } else {
-                return Ok(0);
-            };
-            if fetch_start >= ins_pos {
+            let start = ins_pos.saturating_sub(VEP_SHIFT_WINDOW);
+            if start >= ins_pos {
                 return Ok(0);
             }
-            let seq = fasta.fetch_sequence(chrom, fetch_start, ins_pos)?;
-            let mut shift = 0usize;
-            while shift < seq.len() {
-                // Walk backward from ins_pos - 1: seq[seq.len() - 1 - shift]
-                let ref_base = seq[seq.len() - 1 - shift];
-                // Match from the end of inserted_bases, cycling.
-                let ins_idx = ins_len - 1 - (shift % ins_len);
-                if ref_base != inserted_bases[ins_idx] {
-                    break;
-                }
-                shift += 1;
-            }
-            Ok(shift as u64)
+            let seq = fasta.fetch_sequence(chrom, start, ins_pos)?;
+            seq.iter()
+                .rev()
+                .zip(inserted_bases.iter().rev().cycle())
+                .take(max_shift)
+                .take_while(|(reference, inserted)| reference == inserted)
+                .count()
         }
+    };
+    Ok(shift as u64)
+}
+
+/// Rotate inserted bases to match an insertion shifted 3' by `shift` bases.
+///
+/// Shifting an insertion one base 3' moves its first coding-strand base to
+/// its end (VEP `perform_shift`, `hgvs_allele_string`): `GT` inserted after
+/// `...A|GTGG` and shifted 3 bases is `TG` after `...AGTG|G`. The bases are
+/// plus-strand, so a minus-strand shift rotates them right.
+///
+/// # Returns
+///
+/// The plus-strand inserted bases at the shifted insertion point.
+pub(crate) fn rotate_inserted_bases(inserted_bases: &[u8], shift: u64, strand: Strand) -> Vec<u8> {
+    let mut rotated = inserted_bases.to_vec();
+    if rotated.is_empty() {
+        return rotated;
     }
+    let steps = (shift % rotated.len() as u64) as usize;
+    match strand {
+        Strand::Plus => rotated.rotate_left(steps),
+        Strand::Minus => rotated.rotate_right(steps),
+    }
+    rotated
 }
 
 /// Find the exon whose `[genomic_start, genomic_end)` range contains `pos`.
@@ -236,40 +253,6 @@ fn containing_intron_range(pos: u64, transcript: &TranscriptModel) -> Option<(u6
         }
     }
     None
-}
-
-/// Find the exon range for a plus-strand insertion shift.
-///
-/// The insertion point may sit exactly at an exon boundary
-/// (`ins_pos == exon.genomic_end`). In that case, `ins_pos` itself is
-/// not inside any exon, but `ins_pos - 1` (the last exonic base) is.
-/// This fallback ensures boundary insertions get the correct exon
-/// constraint while naturally producing shift = 0 (the shift window
-/// `[ins_pos, exon_end)` is empty when `ins_pos == exon_end`).
-fn find_shift_exon_range(pos: u64, transcript: &TranscriptModel) -> Option<(u64, u64)> {
-    containing_exon_range(pos, transcript).or_else(|| {
-        if pos > 0 {
-            containing_exon_range(pos - 1, transcript)
-        } else {
-            None
-        }
-    })
-}
-
-/// Find the exon range for a minus-strand insertion shift.
-///
-/// For minus-strand, 3' = lower genomic coordinates, so we shift
-/// leftward from `ins_pos`. The insertion point may sit at the start
-/// of an exon (`ins_pos == exon.genomic_start`), in which case the
-/// fetch window `[exon_start, ins_pos)` is empty and shift = 0.
-/// Try `ins_pos - 1` first (leftward neighbor), then `ins_pos` itself.
-fn find_shift_exon_range_minus(pos: u64, transcript: &TranscriptModel) -> Option<(u64, u64)> {
-    if pos > 0
-        && let Some(r) = containing_exon_range(pos - 1, transcript)
-    {
-        return Some(r);
-    }
-    containing_exon_range(pos, transcript)
 }
 
 #[cfg(test)]
@@ -516,7 +499,7 @@ mod tests {
         // shift = 4
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 5, b"A", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 5, b"A", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 4);
     }
 
@@ -532,7 +515,7 @@ mod tests {
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 12, b"AT", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 12, b"AT", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -542,28 +525,35 @@ mod tests {
         // ref[1] = C != G -> shift 0.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 1, b"G", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 1, b"G", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
     #[test]
-    fn ins_at_exon_boundary_plus() {
-        // Exon 0 ends at pos 25. Insert at ins_pos=25 (between pos 24 and 25).
-        // find_shift_exon_range(25): containing_exon_range(25) finds exon 1 [30,62)?
-        // No — pos 25 is in the intron [25,30). containing_exon_range returns None.
-        // Fallback to pos-1=24 → exon 0 [0,25). fetch_end = 25.
-        // fetch_end <= ins_pos (25 <= 25) → return 0.
+    fn ins_crosses_donor_junction_plus() {
+        // Exon 0 ends at 25; chr1[25..28] = CGT. CG inserted after the last
+        // exon base slides two bases into the intron (VEP's genomic shift).
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 25, b"A", &tx, &fasta).unwrap();
-        assert_eq!(shift, 0);
+        let shift = compute_3prime_shift_insertion("chr1", 25, b"CG", tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 2);
+    }
+
+    #[test]
+    fn ins_crosses_acceptor_junction_plus() {
+        // Intron [25, 30), exon 1 from 30; chr1[28..33] = GATGG. GAT inserted
+        // at 28 slides over GATG into the exon and stops at the second G.
+        let (_tmp, fasta) = write_test_fasta();
+        let tx = chr1_plus_transcript();
+        let shift = compute_3prime_shift_insertion("chr1", 28, b"GAT", tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 4);
     }
 
     #[test]
     fn ins_zero_length() {
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 5, b"", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 5, b"", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -573,29 +563,11 @@ mod tests {
 
     #[test]
     fn ins_in_mono_repeat_minus() {
-        // chr17 pos 10..16: CCCCCC.
-        // Minus strand: 3' = decreasing genomic.
-        // Insert C at ins_pos=15 (between pos 14 and 15).
-        // find_shift_exon_range_minus(15): pos-1=14 is in exon [8,30).
-        // Fetch [8, 15) = "TCCCCCCC"... wait, let me re-examine.
-        // chr17: TCGATCGATC CCCCCC ATGATGATGATGAT NNNNNNNNN
-        //        0123456789 012345 0123456789...
-        //                   10     16
-        // Fetch [8, 15) = chr17[8..15] = "TCCCCCCC"
-        // Wait: chr17[8]=T, chr17[9]=C, chr17[10..15]=CCCCC → "TCCCCCC" (7 bytes)
-        // seq = [T, C, C, C, C, C, C]
-        //
-        // s=0: seq[6]=C, ins[0]=C → match (pos 14)
-        // s=1: seq[5]=C, ins[0]=C → match (pos 13)
-        // s=2: seq[4]=C, ins[0]=C → match (pos 12)
-        // s=3: seq[3]=C, ins[0]=C → match (pos 11)
-        // s=4: seq[2]=C, ins[0]=C → match (pos 10)
-        // s=5: seq[1]=C, ins[0]=C → match (pos 9)
-        // s=6: seq[0]=T, ins[0]=C → stop
-        // shift = 6
+        // chr17[9..16] = CCCCCCC, chr17[8] = T. Minus strand: 3' = decreasing
+        // genomic. C inserted at 15 slides over chr17[14] .. chr17[9]: shift 6.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -604,9 +576,7 @@ mod tests {
         // chr17 pos 16..30: ATGATGATGATGAT
         // Minus strand: 3' = decreasing genomic.
         // Insert ATG (plus-strand) at ins_pos=25 (between pos 24 and 25).
-        // Fetch [8, 25) = chr17[8..25].
-        // chr17[8..25] = "TCCCCCCCATGATGATG" (17 bytes)
-        //
+        // seq = chr17[..25], walked from its end:
         // ins = [A, T, G], ins_len = 3
         // s=0: seq[16]=G, ins[3-1-0]=ins[2]=G → match (pos 24)
         // s=1: seq[15]=T, ins[3-1-1]=ins[1]=T → match (pos 23)
@@ -621,7 +591,7 @@ mod tests {
         // shift = 9
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 25, b"ATG", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr17", 25, b"ATG", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 9);
     }
 
@@ -631,7 +601,7 @@ mod tests {
         // No repeat at this position: chr1[27] differs from inserted A.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 27, b"A", &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 27, b"A", tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -789,14 +759,13 @@ mod tests {
     #[test]
     fn ins_intronic_gc_repeat_plus() {
         // Insert GC at ins_pos=50 in intron [46, 56).
-        // chr1[50..56] = GCGCGC. Cycle through ins=[G,C].
-        // s=0: G==G, s=1: C==C, s=2: G==G, s=3: C==C,
-        // s=4: G==G, s=5: C==C, s=6: end of window → stop.
-        // shift = 6
+        // chr1[50..62] = GCGCGCGCGCGC. Cycle through ins=[G,C]; the shift
+        // crosses the intron/exon junction at 56 and stops at the end of
+        // chr1: shift = 12.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 50, b"GC", &tx, &fasta).unwrap();
-        assert_eq!(shift, 6);
+        let shift = compute_3prime_shift_insertion("chr1", 50, b"GC", tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 12);
     }
 
     // -----------------------------------------------------------------------
@@ -838,15 +807,97 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ins_intronic_c_repeat_minus() {
-        // chr17 intron [10, 30). Insert C at ins_pos=15.
-        // Minus strand: 3' = decreasing genomic. boundary_start = 10.
-        // Fetch [10, 15) = CCCCC (5 bytes).
-        // Walk backward: seq[4]=C==C, seq[3]=C==C, seq[2]=C==C,
-        // seq[1]=C==C, seq[0]=C==C → shift = 5.
+    fn ins_crosses_acceptor_junction_minus() {
+        // chr17 intron [10, 30), exon [0, 10); chr17[9..15] = CCCCCC.
+        // Minus strand: 3' = decreasing genomic. C inserted at 15 slides over
+        // the intronic Cs and the last exon base chr17[9]; chr17[8] = T stops it.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", &tx, &fasta).unwrap();
-        assert_eq!(shift, 5);
+        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 6);
+    }
+
+    #[test]
+    fn ins_crosses_donor_junction_minus() {
+        // Exon [30, 40) starts at 30 (its last base in coding order is 30);
+        // chr17[27..30] = GAT. AT inserted at 30 slides over AT into the
+        // intron and stops at G.
+        let (_tmp, fasta) = write_test_fasta();
+        let tx = chr17_minus_intron_transcript();
+        let shift = compute_3prime_shift_insertion("chr17", 30, b"AT", tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Shift window and rotation
+    // -----------------------------------------------------------------------
+
+    /// A chromosome `C` + 1100 `A` + `C` and a chromosome `G` + 20 `A`.
+    fn write_poly_a_fasta() -> (TempDir, FastaReader) {
+        let tmp = TempDir::new().unwrap();
+        let mut long = vec![b'C'];
+        long.extend(std::iter::repeat_n(b'A', 1100));
+        long.push(b'C');
+        let mut short = vec![b'G'];
+        short.extend(std::iter::repeat_n(b'A', 20));
+        let bin_path = tmp.path().join("poly.bin");
+        let idx_path = tmp.path().join("poly.bin.idx");
+        let contigs: &[(&str, &[u8])] = &[("chr2", long.as_slice()), ("chr3", short.as_slice())];
+        write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
+        let reader = FastaReader::open(&bin_path).unwrap();
+        (tmp, reader)
+    }
+
+    #[test]
+    fn ins_shift_capped_at_vep_window() {
+        // VEP moves an insertion at most `1001 - len` bases.
+        let (_tmp, fasta) = write_poly_a_fasta();
+        let shift = |pos, bases: &[u8], strand| {
+            compute_3prime_shift_insertion("chr2", pos, bases, strand, &fasta).unwrap()
+        };
+        assert_eq!(shift(1, b"A", Strand::Plus), 1000);
+        assert_eq!(shift(1, b"AA", Strand::Plus), 999);
+        assert_eq!(shift(1101, b"A", Strand::Minus), 1000);
+        assert_eq!(shift(1101, b"AAA", Strand::Minus), 998);
+        let long = vec![b'A'; 1001];
+        assert_eq!(shift(1, &long, Strand::Plus), 1000);
+        assert_eq!(shift(1101, &long, Strand::Minus), 0);
+        let longer = vec![b'A'; 1002];
+        assert_eq!(shift(1101, &longer, Strand::Minus), 1000);
+    }
+
+    #[test]
+    fn ins_shift_stops_at_chromosome_end() {
+        let (_tmp, fasta) = write_poly_a_fasta();
+        let shift = compute_3prime_shift_insertion("chr3", 1, b"A", Strand::Plus, &fasta).unwrap();
+        assert_eq!(shift, 20);
+        let shift = compute_3prime_shift_insertion("chr3", 21, b"A", Strand::Plus, &fasta).unwrap();
+        assert_eq!(shift, 0);
+    }
+
+    #[test]
+    fn ins_shift_unknown_chromosome_is_an_error() {
+        let (_tmp, fasta) = write_poly_a_fasta();
+        let err = compute_3prime_shift_insertion("chr9", 1, b"A", Strand::Plus, &fasta);
+        assert!(matches!(err, Err(VarEffectError::ChromNotFound { .. })));
+    }
+
+    #[test]
+    fn rotate_inserted_bases_plus_moves_first_base_to_end() {
+        assert_eq!(rotate_inserted_bases(b"GT", 3, Strand::Plus), b"TG");
+        assert_eq!(rotate_inserted_bases(b"GAT", 4, Strand::Plus), b"ATG");
+        assert_eq!(rotate_inserted_bases(b"GT", 4, Strand::Plus), b"GT");
+    }
+
+    #[test]
+    fn rotate_inserted_bases_minus_moves_last_base_to_front() {
+        assert_eq!(rotate_inserted_bases(b"AT", 1, Strand::Minus), b"TA");
+        assert_eq!(rotate_inserted_bases(b"ATG", 2, Strand::Minus), b"TGA");
+        assert_eq!(rotate_inserted_bases(b"ATG", 0, Strand::Minus), b"ATG");
+    }
+
+    #[test]
+    fn rotate_inserted_bases_empty() {
+        assert!(rotate_inserted_bases(b"", 5, Strand::Plus).is_empty());
     }
 }

@@ -46,3 +46,10 @@ cds_exon_end_plus	chr1	44130756	A	ENST00000372299	splice_region_variant,3_prime_
 cds_exon_end_minus	chr1	117963798	A	ENST00000336338	splice_region_variant,3_prime_UTR_variant	LOW	ENST00000336338.10:c.6672_*1insT	None	6743	6744	None	None	None	None	None	None	None
 pole_inframe_dup_minus	chr12	132665302	CCT	NM_006231.4	inframe_insertion,splice_region_variant	MODERATE	NM_006231.4:c.2465_2467dup	NP_006222.2:p.Lys822_Gly823insGlu	2494	2495	2467	2468	823	ggg/gAGGgg	G/EG	21/49	None
 tsc2_junction_dup_shifted	chr16	2053452	GT	NM_000548.5	frameshift_variant,splice_region_variant	HIGH	NM_000548.5:c.336+1_336+2dup	None	446	447	336	337	112	-/GT	-/X	None	None
+tp53_inframe_rotated	chr17	7675088	TGC	NM_000546.6	inframe_insertion	MODERATE	NM_000546.6:c.525_526insAGC	NP_000537.3:p.Arg175_Cys176insSer	665	666	523	524	175	cgc/cGCAgc	R/RS	5/11	None
+tp53_donor_dup_shifted	chr17	7674180	AC	NM_000546.6	frameshift_variant,splice_region_variant	HIGH	NM_000546.6:c.782+1_782+2dup	None	924	925	782	783	261	agt/agGTt	S/RX	None	None
+tp53_acceptor_dup_shifted	chr17	7673838	AC	NM_000546.6	splice_acceptor_variant	HIGH	NM_000546.6:c.783_784dup	None	None	None	None	None	None	None	None	None	7/10
+brca2_inframe_rotated	chr13	32316502	TTA	NM_000059.4	inframe_insertion	MODERATE	NM_000059.4:c.44_45insATT	NP_000050.3:p.Ile14_Phe15insLeu	241	242	42	43	14	-/TTA	-/L	2/27	None
+brca2_junction_dup_shifted	chr13	32326281	G	NM_000059.4	frameshift_variant,splice_region_variant	HIGH	NM_000059.4:c.516+1dup	None	714	715	515	516	172	aag/aaGg	K/KX	6/27	None
+tsc2_acceptor_dup_shifted	chr16	2072239	GGAGTCT	NM_000548.5	splice_acceptor_variant	HIGH	NM_000548.5:c.2098_2104dup	None	None	None	None	None	None	None	None	None	19/41
+ski_inframe_dup_into_utr	chr1	2306729	GCGGGCAGCGAGGGCGCTGCGGAGCTGGAGCCGTAGATT	NM_003036.4	inframe_insertion,stop_retained_variant	MODERATE	NM_003036.4:c.2152_*3dup	None	2599	2600	2151	2152	717	-/GCGGGCAGCGAGGGCGCTGCGGAGCTGGAGCCGTAGATT	-/AGSEGAAELEP*I	7/7	None

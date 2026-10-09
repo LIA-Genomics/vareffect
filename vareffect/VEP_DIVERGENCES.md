@@ -312,5 +312,12 @@ for exon numbers) next to it.
 - **IUPAC codes.** A few GRCh38.p14 patch regions contain ambiguity bases
   (`M`, `R`, `Y`); they are kept, and a codon containing one translates to
   `Xaa`.
+- **RefSeq transcripts that differ from the genome.** For a RefSeq model
+  with `_rna_edit` attributes, VEP builds HGVS from the edited transcript:
+  it shifts an indel on the transcript sequence (`_return_3prime`, poly-A
+  tails excepted), takes REF and ALT from it and corrects positions by the
+  misalignment offset (`hgvs_transcript`). `vareffect` has no edit
+  attributes and builds HGVS from the genome, so HGVS c. and p. can differ
+  on those transcripts. MANE transcripts match the genome.
 - **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
   resolve to `chrM` through the reader's alias table.
