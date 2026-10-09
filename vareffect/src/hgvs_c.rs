@@ -307,6 +307,7 @@ fn position_for_genomic(
 ///
 /// An insertion is a dup when the inserted sequence matches the reference
 /// immediately 5' (upstream in transcript direction) of the insertion point.
+/// Returns `false` when that stretch runs off the chromosome.
 ///
 /// Both FASTA bytes and VCF ALT bytes are in plus-strand orientation, so
 /// no complement is needed for the comparison itself.
@@ -326,7 +327,11 @@ fn is_duplication(
     let (fetch_start, fetch_end) = match transcript.strand {
         Strand::Plus => {
             // 5' = lower genomic coordinates
-            if ins_pos < ins_len {
+            if ins_pos < ins_len
+                || fasta
+                    .chrom_length(chrom)
+                    .is_some_and(|chrom_len| ins_pos > chrom_len)
+            {
                 return Ok(false); // out of bounds
             }
             (ins_pos - ins_len, ins_pos)
@@ -507,8 +512,10 @@ pub(crate) fn format_deletion_hgvs(
 /// # Arguments
 ///
 /// * `pos` -- 0-based genomic insertion point (insertion is between `pos-1`
-///   and `pos`)
-/// * `inserted_bases` -- plus-strand VCF ALT bases (NOT coding-strand)
+///   and `pos`), already 3'-shifted
+/// * `inserted_bases` -- plus-strand inserted bases at `pos` (NOT
+///   coding-strand), rotated by the shift
+///   ([`crate::normalize::rotate_inserted_bases`])
 /// * `chrom` -- UCSC-style chromosome name
 /// * `transcript` -- transcript model
 /// * `index` -- precomputed locate index
@@ -523,9 +530,19 @@ pub(crate) fn format_insertion_hgvs(
 ) -> Result<Option<String>, VarEffectError> {
     let ins_len = inserted_bases.len() as u64;
 
-    // Check for duplication first.
-    if is_duplication(pos, inserted_bases, chrom, transcript, fasta)? {
-        return format_duplication(pos, ins_len, chrom, transcript, index);
+    // Check for duplication first: of the bases 3' of the insertion, then of
+    // the 5' ones (VEP `hgvs_variant_notation`). After a full 3' shift only
+    // the 5' bases can match; the 3' check matters when the shift stopped at
+    // its cap (VEP 116 NM_000249.4 c.381-937_442dup, a 999-base insertion
+    // before c.381-937).
+    let after_following = match transcript.strand {
+        Strand::Plus => pos.checked_add(ins_len),
+        Strand::Minus => pos.checked_sub(ins_len),
+    };
+    for dup_end in [after_following, Some(pos)].into_iter().flatten() {
+        if is_duplication(dup_end, inserted_bases, chrom, transcript, fasta)? {
+            return format_duplication(dup_end, ins_len, chrom, transcript, index);
+        }
     }
 
     // Regular insertion: flanking positions. On minus strand, genomic pos

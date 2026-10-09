@@ -556,30 +556,39 @@ pub fn annotate_insertion(
     let location = locate_indel(chrom, pos, pos, transcript, locate_index)?;
     let effects = insertion_intron_effects(pos, transcript)?;
 
-    // HGVS 3' normalization: shift insertion to the most 3' equivalent
-    // position on the coding strand for HGVS notation. At the shifted
-    // position, is_duplication() in format_insertion_hgvs naturally re-checks
-    // the 5' flanking — if the shift moved the insertion point to a repeat
-    // boundary, dup is detected.
+    // HGVS 3' normalization: shift the insertion to the most 3' equivalent
+    // position on the coding strand, across exon/intron junctions as VEP's
+    // genomic shift does, with the inserted bases rotated to match. At the
+    // shifted position, is_duplication() in format_insertion_hgvs re-checks
+    // the 5' flank, so an insertion shifted to a repeat boundary is a dup.
     let shift = crate::normalize::compute_3prime_shift_insertion(
         chrom,
         pos,
         inserted_bases,
-        transcript,
+        transcript.strand,
         fasta,
     )?;
     let shifted_pos = match transcript.strand {
         Strand::Plus => pos + shift,
         Strand::Minus => pos - shift,
     };
+    let shifted_bases =
+        crate::normalize::rotate_inserted_bases(inserted_bases, shift, transcript.strand);
     let hgvs = hgvs_c::format_insertion_hgvs(
         shifted_pos,
-        inserted_bases,
+        &shifted_bases,
         chrom,
         transcript,
         locate_index,
         fasta,
     )?;
+    // VEP writes HGVS p. at the shifted insertion point (`hgvs_protein`
+    // translates the shifted allele), so it needs that point's region.
+    let shifted_region = if shift == 0 {
+        location.region.clone()
+    } else {
+        locate_indel(chrom, shifted_pos, shifted_pos, transcript, locate_index)?.region
+    };
 
     if let Some(intron) = frameshift_intron_endpoint(pos, pos, transcript, locate_index) {
         let mut result = super::complex::frameshift_intron_indel_result(
@@ -659,12 +668,33 @@ pub fn annotate_insertion(
                     fasta,
                     exon_index,
                     false,
-                    shift as u32,
+                    match (shift, &shifted_region) {
+                        (
+                            1..,
+                            IndelRegion::Cds {
+                                cds_offset_start, ..
+                            },
+                        ) => Some(ShiftedCdsInsertion {
+                            cds_offset: *cds_offset_start,
+                            inserted_bases: &shifted_bases,
+                        }),
+                        _ => None,
+                    },
                 ),
             }
         }
         _ => build_noncds_indel_result(transcript, &location, pos, pos),
     }?;
+    // A coding insertion shifted out of the CDS has no HGVS p. in VEP 116,
+    // whose `hgvs_protein` needs translation coordinates at the shifted
+    // point: into the intron (NM_004341.5 c.4728+1_4728+2dup) or past the
+    // stop codon (NM_003036.4 c.2152_*3dup). The consequences stay on the
+    // unshifted insertion.
+    if matches!(location.region, IndelRegion::Cds { .. })
+        && !matches!(shifted_region, IndelRegion::Cds { .. })
+    {
+        result.hgvs_p = None;
+    }
 
     for (hit, term) in [
         (effects.donor.is_some(), Consequence::SpliceDonorVariant),
@@ -1068,15 +1098,25 @@ fn annotate_cds_inframe_deletion(
     })
 }
 
+/// An insertion's CDS point and plus-strand bases after HGVS 3'
+/// normalization.
+struct ShiftedCdsInsertion<'a> {
+    /// 0-based CDS offset of the base the shifted insertion precedes.
+    cds_offset: u32,
+    /// Plus-strand inserted bases, rotated by the shift.
+    inserted_bases: &'a [u8],
+}
+
 /// Build the result for an inframe CDS insertion.
 ///
 /// Expands the insertion-point codon, splices in inserted bases
 /// (reverse-complemented for minus-strand), retranslates, and compares.
 ///
-/// `dna_shift` is the HGVS 3' normalization shift in genomic bases. When
-/// `> 0`, the HGVS p. notation is recomputed at the shifted CDS offset so
-/// protein-level dup detection works at the shifted position. All other
-/// result fields remain at the original `cds_offset`.
+/// `shifted` is the insertion after HGVS 3' normalization when that moved it
+/// to another CDS point: the HGVS p. notation is computed there, with the
+/// rotated bases, so protein-level dup detection works at the shifted
+/// position (VEP `hgvs_protein`). All other result fields remain at the
+/// original `cds_offset`.
 #[allow(clippy::too_many_arguments)]
 fn annotate_cds_inframe_insertion(
     chrom: &str,
@@ -1087,7 +1127,7 @@ fn annotate_cds_inframe_insertion(
     fasta: &FastaReader,
     exon_index: u16,
     is_splice_region: bool,
-    dna_shift: u32,
+    shifted: Option<ShiftedCdsInsertion<'_>>,
 ) -> Result<ConsequenceResult, VarEffectError> {
     let is_mito = transcript.chrom == "chrM";
 
@@ -1156,43 +1196,36 @@ fn annotate_cds_inframe_insertion(
         cdna_after
     };
 
-    // HGVS 3' normalization: when the DNA-level shift is non-zero and the
-    // shifted CDS offset stays strictly within the CDS, recompute the codon
-    // window at the shifted CDS offset so protein-level dup detection sees
-    // the shifted flanking amino acids. All non-HGVS fields (consequences,
-    // protein_start, codons, amino_acids, etc.) stay at the original
-    // position.
+    // HGVS 3' normalization: when the insertion shifted to another CDS
+    // point, recompute the codon window there with the rotated bases so
+    // protein-level dup detection sees the shifted flanking amino acids. All
+    // non-HGVS fields (consequences, protein_start, codons, amino_acids,
+    // etc.) stay at the original position.
     //
     // The codon window must extend far enough upstream to include the
     // preceding amino acids that the dup detection compares against. For
     // an insertion of N amino acids, we need at least N preceding codons
     // (= 3*N CDS bases) before the shifted insertion point.
     //
-    // If the 3' shift reaches or crosses the stop codon (insertion
-    // normalizes at/into the 3' UTR, e.g. HGVS c.*Ndup for last-exon
-    // duplications like SKI NM_003036.4:c.2152_*3dup), the shifted window
-    // is not meaningful at the protein level: the inserted codons would be
-    // placed after the translated stop, producing a bogus
-    // stop-straddling amino acid sequence. Fall back to the unshifted
-    // formatter in that case (HGVS c. still carries the UTR-shifted
-    // notation via the outer `shifted_pos`). `saturating_add` guards
-    // against a pathological u32 overflow before the bounds check runs.
-    let shifted_cds = cds_offset.saturating_add(dna_shift);
+    // A shift that leaves the CDS (into the 3' UTR, e.g. SKI
+    // NM_003036.4:c.2152_*3dup, or an intron) has no HGVS p. in VEP; the
+    // caller clears it, and the unshifted formatter only fills the field
+    // meanwhile.
     let ins_aa_count = (coding_inserted.len() / 3) as u32;
     // HGVS p. at an insertion point, from a window reaching `ins_aa_count + 1`
     // codons upstream, so the residue before the insertion and any duplicated
     // residues are inside it. A window starting at a split codon would leave
     // the left flank out (VEP 116 NM_006231.4 c.2465_2467dup:
     // p.Lys822_Gly823insGlu).
-    let format_at = |offset: u32| -> Result<Option<String>, VarEffectError> {
+    let format_at = |offset: u32, inserted: &[u8]| -> Result<Option<String>, VarEffectError> {
         let total = index.total_cds_length();
         let w_start = (offset / 3).saturating_sub(ins_aa_count + 1) * 3;
         let w_end = ((offset / 3 + 1) * 3).min(total);
         let w_ref = fetch_cds_sequence(w_start, w_end, chrom, transcript, index, fasta)?;
         let w_local = (offset - w_start) as usize;
-        let mut w_alt = Vec::with_capacity(w_ref.len() + coding_inserted.len());
+        let mut w_alt = Vec::with_capacity(w_ref.len() + inserted.len());
         w_alt.extend_from_slice(&w_ref[..w_local]);
-        w_alt.extend_from_slice(&coding_inserted);
+        w_alt.extend_from_slice(inserted);
         w_alt.extend_from_slice(&w_ref[w_local..]);
         let w_right_flank = if w_end < total {
             let next = fetch_ref_codon(w_end, chrom, transcript, index, fasta)?;
@@ -1208,8 +1241,12 @@ fn annotate_cds_inframe_insertion(
             w_right_flank,
         ))
     };
-    let hgvs_p = if dna_shift > 0 && shifted_cds < index.total_cds_length() {
-        format_at(shifted_cds)?
+    let hgvs_p = if let Some(shifted) = shifted {
+        let shifted_coding = match transcript.strand {
+            Strand::Plus => shifted.inserted_bases.to_vec(),
+            Strand::Minus => reverse_complement(shifted.inserted_bases),
+        };
+        format_at(shifted.cds_offset, &shifted_coding)?
     } else {
         // Without a DNA-level shift the insertion may still be a
         // protein-level duplication (codon degeneracy can produce identical
@@ -1218,13 +1255,13 @@ fn annotate_cds_inframe_insertion(
         // insertion point keeps the mid-codon amino acid identity.
         let aligned_cds = (cds_offset.div_ceil(3) * 3).min(index.total_cds_length());
         let aligned_dup = if aligned_cds != cds_offset {
-            format_at(aligned_cds)?.filter(|p| p.contains("dup"))
+            format_at(aligned_cds, &coding_inserted)?.filter(|p| p.contains("dup"))
         } else {
             None
         };
         match aligned_dup {
             Some(dup) => Some(dup),
-            None => format_at(cds_offset)?,
+            None => format_at(cds_offset, &coding_inserted)?,
         }
     };
 

@@ -2695,3 +2695,179 @@ mod incomplete_cds {
         assert_eq!(variant.pos, 1_500);
     }
 }
+
+// -- Insertion HGVS 3' shift ------------------------------------------------
+
+/// Plus-strand genome for the shift tests: exon 1 `[10, 40)` (CDS offsets
+/// 0..30, `ATG GAT CAG CCC.. CAG`), intron `[40, 60)` starting `GTAAG`, exon 2
+/// `[60, 90)` (CDS offsets 30..57 ending `TAA`, then 3 UTR bases).
+fn shift_plus_genome() -> Vec<u8> {
+    let mut genome = b"CCCCCCCCCC".to_vec();
+    genome.extend_from_slice(b"ATGGATCAG");
+    genome.extend_from_slice(&b"CCC".repeat(6));
+    genome.extend_from_slice(b"CAG");
+    genome.extend_from_slice(b"GTAAG");
+    genome.extend_from_slice(&b"C".repeat(13));
+    genome.extend_from_slice(b"AG");
+    genome.extend_from_slice(&b"CCC".repeat(8));
+    genome.extend_from_slice(b"TAA");
+    genome.extend_from_slice(&b"C".repeat(13));
+    assert_eq!(genome.len(), 100);
+    genome
+}
+
+/// The shift-test genome on chr5 and its reverse complement on chr6.
+fn write_shift_fasta() -> (TempDir, FastaReader) {
+    let tmp = TempDir::new().unwrap();
+    let plus = shift_plus_genome();
+    let minus = crate::codon::reverse_complement(&plus);
+    let bin_path = tmp.path().join("shift.bin");
+    let idx_path = tmp.path().join("shift.bin.idx");
+    let contigs: &[(&str, &[u8])] = &[("chr5", plus.as_slice()), ("chr6", minus.as_slice())];
+    write_genome_binary(contigs, "test", &bin_path, &idx_path).unwrap();
+    (tmp, FastaReader::open(&bin_path).unwrap())
+}
+
+/// Two-exon transcript over [`shift_plus_genome`]: on chr5 for the plus
+/// strand, mirrored onto chr6 (`x -> 99 - x`) for the minus strand.
+fn shift_transcript(strand: Strand) -> TranscriptModel {
+    let mirror = |start: u64, end: u64| match strand {
+        Strand::Plus => (start, end),
+        Strand::Minus => (100 - end, 100 - start),
+    };
+    let exon = |number: u16, start, end| {
+        let (genomic_start, genomic_end) = mirror(start, end);
+        Exon {
+            exon_number: number,
+            genomic_start,
+            genomic_end,
+        }
+    };
+    let segment = |exon_index: u16, start, end| {
+        let (genomic_start, genomic_end) = mirror(start, end);
+        CdsSegment {
+            exon_index,
+            genomic_start,
+            genomic_end,
+            phase: 0,
+        }
+    };
+    let (tx_start, tx_end) = mirror(10, 90);
+    let (cds_start, cds_end) = mirror(10, 87);
+    TranscriptModel {
+        accession: "NM_SHIFT.1".into(),
+        protein_accession: Some("NP_SHIFT.1".into()),
+        gene_symbol: "SHIFT".into(),
+        hgnc_id: None,
+        ensembl_accession: None,
+        chrom: match strand {
+            Strand::Plus => "chr5".into(),
+            Strand::Minus => "chr6".into(),
+        },
+        strand,
+        tx_start,
+        tx_end,
+        cds_genomic_start: Some(cds_start),
+        cds_genomic_end: Some(cds_end),
+        exons: vec![exon(1, 10, 40), exon(2, 60, 90)],
+        cds_segments: vec![segment(0, 10, 40), segment(1, 60, 87)],
+        tier: TranscriptTier::ManeSelect,
+        biotype: Biotype::ProteinCoding,
+        exon_count: 2,
+    }
+}
+
+/// Annotate an insertion given as a plus-strand point and bases on the
+/// plus-strand genome, mirrored for the minus strand.
+fn annotate_shift_insertion(strand: Strand, pos: u64, bases: &[u8]) -> ConsequenceResult {
+    let (_tmp, fasta) = write_shift_fasta();
+    let tx = shift_transcript(strand);
+    let idx = build_index(&tx);
+    let (pos, bases) = match strand {
+        Strand::Plus => (pos, bases.to_vec()),
+        Strand::Minus => (100 - pos, crate::codon::reverse_complement(bases)),
+    };
+    annotate_insertion(&tx.chrom, pos, &bases, &tx, &idx, &fasta).unwrap()
+}
+
+#[test]
+fn shifted_inframe_insertion_rotates_bases() {
+    // ATA inserted after c.4 (GA|TCAG) shifts two bases to c.6_7 as AAT
+    // (VEP 116 NM_001378454.1 c.7539_7540insAAT p.His2513_Ala2514insAsn,
+    // where the unrotated bases gave insIle).
+    for strand in [Strand::Plus, Strand::Minus] {
+        let result = annotate_shift_insertion(strand, 14, b"ATA");
+        assert_eq!(
+            result.hgvs_c.as_deref(),
+            Some("NM_SHIFT.1:c.6_7insAAT"),
+            "{strand:?}"
+        );
+        assert_eq!(
+            result.hgvs_p.as_deref(),
+            Some("p.Asp2_Gln3insAsn"),
+            "{strand:?}"
+        );
+        assert_eq!(result.consequences, vec![Consequence::InframeInsertion]);
+    }
+}
+
+#[test]
+fn junction_insertion_shifts_into_intron() {
+    // GT inserted after the last exon base c.30 shifts into the intron, a
+    // duplication of +1/+2 with no HGVS p.; the consequences stay on the
+    // junction insertion (VEP 116 NM_000548.5 c.336+1_336+2dup:
+    // frameshift_variant, splice_region_variant, no HGVS p.).
+    for strand in [Strand::Plus, Strand::Minus] {
+        let result = annotate_shift_insertion(strand, 40, b"GT");
+        assert_eq!(
+            result.hgvs_c.as_deref(),
+            Some("NM_SHIFT.1:c.30+1_30+2dup"),
+            "{strand:?}"
+        );
+        assert_eq!(result.hgvs_p, None, "{strand:?}");
+        assert_eq!(
+            result.consequences,
+            vec![
+                Consequence::FrameshiftVariant,
+                Consequence::SpliceRegionVariant
+            ],
+            "{strand:?}"
+        );
+    }
+}
+
+#[test]
+fn intronic_insertion_shifts_into_exon() {
+    // GCC inserted between -2 and -1 (A|G CCC) shifts three bases into
+    // exon 2, a duplication of -1 and c.31_32 (VEP 116 NM_001005361.3
+    // c.691_699dup where the edge-bounded shift gave
+    // c.689-1_689insGGCTACATT).
+    for strand in [Strand::Plus, Strand::Minus] {
+        let result = annotate_shift_insertion(strand, 59, b"GCC");
+        assert_eq!(
+            result.hgvs_c.as_deref(),
+            Some("NM_SHIFT.1:c.31-1_32dup"),
+            "{strand:?}"
+        );
+        assert_eq!(result.hgvs_p, None, "{strand:?}");
+    }
+}
+
+#[test]
+fn insertion_duplicating_following_bases_is_a_dup_of_them() {
+    // CCC before c.13 inside a CCC run (a shift capped short of the run's
+    // end) duplicates the 3' bases c.13_15, which VEP checks before the 5'
+    // ones (`hgvs_variant_notation`).
+    let (_tmp, fasta) = write_shift_fasta();
+    for strand in [Strand::Plus, Strand::Minus] {
+        let tx = shift_transcript(strand);
+        let idx = build_index(&tx);
+        let (pos, bases) = match strand {
+            Strand::Plus => (22, b"CCC".to_vec()),
+            Strand::Minus => (78, b"GGG".to_vec()),
+        };
+        let hgvs = crate::hgvs_c::format_insertion_hgvs(pos, &bases, &tx.chrom, &tx, &idx, &fasta)
+            .unwrap();
+        assert_eq!(hgvs.as_deref(), Some("NM_SHIFT.1:c.13_15dup"), "{strand:?}");
+    }
+}

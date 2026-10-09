@@ -8,9 +8,18 @@
 //! REST release 116 output (GRCh38, fetched 2026-10-09 with
 //! `data/tools/vep_insertion_rows.py`). Each inserted base matches neither
 //! flanking base, so no row is a duplication or a shiftable repeat, except
-//! two ClinVar duplications that pin HGVS p. after a 3' shift: a minus-strand
-//! in-frame duplication splitting a codon (NM_006231.4 `c.2465_2467dup`) and
-//! a junction insertion in a repeat (NM_000548.5 `c.336+1_336+2dup`).
+//! the rows that pin HGVS after a 3' shift (inserted bases given): a
+//! minus-strand in-frame duplication splitting a codon (NM_006231.4
+//! `c.2465_2467dup`); junction insertions shifted into the intron, with no
+//! HGVS p. (NM_000548.5 `c.336+1_336+2dup`, NM_000059.4 `c.516+1dup`,
+//! NM_000546.6 `c.782+1_782+2dup`); intronic insertions shifted into the
+//! exon (NM_000548.5 `c.2098_2104dup`, NM_000546.6 `c.783_784dup`); and
+//! in-frame insertions whose bases rotate with the shift (NM_000059.4
+//! `c.44_45insATT`, NM_000546.6 `c.525_526insAGC`); and an in-frame
+//! duplication shifted past the stop codon, with no HGVS p. (NM_003036.4
+//! `c.2152_*3dup`). The NM_000546.6 shift
+//! rows are right-aligned inputs: ClinVar's left-aligned positions are
+//! already 3' on the minus strand.
 //!
 //! `#[ignore]`-gated: needs the reference genome. Run with:
 //! ```bash
@@ -34,12 +43,16 @@
 //!    the following junction at its mRNA point (ENST00000372299.4
 //!    `c.1170_*1insA`) and vareffect at the genomic one (`c.1170_1170+1insA`).
 //!    HGVS c. is not compared on those rows (`HGVS_C_JUNCTION_ROWS`).
-//! 5. Known pre-existing difference, not part of this suite's subject: VEP's
-//!    HGVS 3' shift carries an insertion in a repeat across an exon/intron
-//!    junction and builds HGVS p. there (NM_000548.5 `c.336+1_336+2dup`, no
-//!    HGVS p.); vareffect's stops at the exon edge (`c.336_336+1insGT`,
-//!    `p.Gly113ValfsTer70`). HGVS c. and p. are not compared on that row
-//!    (`HGVS_SHIFT_ROWS`).
+//! 5. Known pre-existing difference, not part of this suite's subject: for
+//!    an in-frame insertion between two codons VEP shows only the inserted
+//!    codon (NM_000059.4 `c.44_45insATT`: `-/TTA`, `-/L`) and vareffect the
+//!    flanking codons too (`attttt/attTTAttt`, `IF/ILF`). Codons and amino
+//!    acids are not compared on those rows (`CODON_BOUNDARY_ROWS`).
+//! 6. Known pre-existing difference, not part of this suite's subject: an
+//!    in-frame insertion before the stop codon whose bases carry a stop is
+//!    VEP's `stop_retained_variant` (NM_003036.4 `c.2152_*3dup`) and
+//!    vareffect's `stop_gained`. Terms and impact are not compared on those
+//!    rows (`STOP_INSERTION_ROWS`).
 
 use std::path::{Path, PathBuf};
 
@@ -51,9 +64,13 @@ const INFRAME_NAMING_ROWS: &[&str] = &["tp53_mid_if", "brca2_mid_if"];
 /// Rows hit by the pre-existing HGVS c. junction difference (normalization 4).
 const HGVS_C_JUNCTION_ROWS: &[&str] = &["cds_exon_end_plus", "cds_exon_end_minus"];
 
-/// Rows hit by the pre-existing HGVS shift limit at a junction
+/// Rows hit by the pre-existing codon-boundary display difference
 /// (normalization 5).
-const HGVS_SHIFT_ROWS: &[&str] = &["tsc2_junction_dup_shifted"];
+const CODON_BOUNDARY_ROWS: &[&str] = &["brca2_inframe_rotated", "ski_inframe_dup_into_utr"];
+
+/// Rows hit by the pre-existing stop-insertion naming difference
+/// (normalization 6).
+const STOP_INSERTION_ROWS: &[&str] = &["ski_inframe_dup_into_utr"];
 
 fn data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data")
@@ -186,7 +203,7 @@ fn insertions_are_classified_at_their_insertion_point_as_vep_116() {
     let engine = load_engine();
     let fasta = open_fasta();
     let rows = load_rows();
-    assert_eq!(rows.len(), 46, "fixture rows");
+    assert_eq!(rows.len(), 53, "fixture rows");
 
     let mut failures = Vec::new();
     for row in &rows {
@@ -196,7 +213,9 @@ fn insertions_are_classified_at_their_insertion_point_as_vep_116() {
                 failures.push(format!("{} {what}: {got} != VEP {want}", row.label));
             }
         };
-        if !INFRAME_NAMING_ROWS.contains(&row.label.as_str()) {
+        if !INFRAME_NAMING_ROWS.contains(&row.label.as_str())
+            && !STOP_INSERTION_ROWS.contains(&row.label.as_str())
+        {
             let mut got_terms: Vec<String> = got
                 .consequences
                 .iter()
@@ -211,21 +230,18 @@ fn insertions_are_classified_at_their_insertion_point_as_vep_116() {
             check("impact", got.impact.to_string(), row.impact.clone());
         }
         // With its accession, so the fixture model's version must be VEP's.
-        let hgvs_shift = HGVS_SHIFT_ROWS.contains(&row.label.as_str());
-        if !hgvs_shift && !HGVS_C_JUNCTION_ROWS.contains(&row.label.as_str()) {
+        if !HGVS_C_JUNCTION_ROWS.contains(&row.label.as_str()) {
             check(
                 "hgvs_c",
                 format!("{:?}", got.hgvs_c),
                 format!("{:?}", row.hgvsc),
             );
         }
-        if !hgvs_shift {
-            check(
-                "hgvs_p",
-                format!("{:?}", strip_accession(got.hgvs_p.as_deref())),
-                format!("{:?}", strip_accession(row.hgvsp.as_deref())),
-            );
-        }
+        check(
+            "hgvs_p",
+            format!("{:?}", strip_accession(got.hgvs_p.as_deref())),
+            format!("{:?}", strip_accession(row.hgvsp.as_deref())),
+        );
         check(
             "cdna",
             format!("{:?}", (got.cdna_position, got.cdna_position_end)),
@@ -242,7 +258,7 @@ fn insertions_are_classified_at_their_insertion_point_as_vep_116() {
             format!("{:?}", row.protein_start),
         );
         let frameshift = row.consequences.iter().any(|t| t == "frameshift_variant");
-        if !frameshift {
+        if !frameshift && !CODON_BOUNDARY_ROWS.contains(&row.label.as_str()) {
             check(
                 "codons",
                 format!("{:?}", got.codons),

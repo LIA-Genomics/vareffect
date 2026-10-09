@@ -140,10 +140,27 @@ For releases before `0.5.0`, see the git history.
   4,667,273 transcript rows move, all insertions; no HGVS c. changes. In a
   stratified sample (up to 20 variants per term-change bucket; 484 variants,
   517 transcript rows), terms and HGVS p. both match VEP 116 in 390 rows,
-  against none before. Known gap: an insertion in a repeat at an exon/intron
-  junction now has VEP's terms but an HGVS p. where VEP gives none, because
-  vareffect's HGVS 3' shift stops at the exon edge (NM_000548.5
-  `c.336_336+1insGT`, VEP `c.336+1_336+2dup`).
+  against none before.
+- Insertion HGVS follows VEP 116's 3' shift. The shift is on the genome, so
+  it crosses exon/intron junctions (NM_000548.5 `c.336+1_336+2dup`, was
+  `c.336_336+1insGT`), reads at most 1000 bases and moves at most 1001 minus
+  the insertion length, as VEP's. The inserted bases rotate with the shift,
+  which also finds duplications the unrotated bases hid (NM_000051.4
+  `c.-32_-31dup`, was `c.-31_-31+1insGT`), and a duplication of the bases 3'
+  of the insertion is checked before one of the 5' bases, as VEP does. HGVS
+  p. is written at the shifted point: none when a coding insertion shifts
+  out of the CDS, into the intron or past the stop codon (VEP; NM_003036.4
+  `c.2152_*3dup`), and an in-frame insertion translates the rotated bases
+  (NM_001378454.1 `p.His2513_Ala2514insAsn`, was `insIle`). Consequences,
+  NMD and PTC stay on the unshifted insertion. Over GRCh38 ClinVar on MANE
+  1.5, 12,634 of 4,667,273 transcript rows move, all insertions, in HGVS c.
+  (12,605) and HGVS p. (4,437) only; the 63 rows shifted past the stop codon
+  all match VEP 116. In a stratified sample (up to 20 per change bucket, 385
+  rows), HGVS c. matches VEP 116 in
+  all 385 (none before) and HGVS p. in 371 (232 before); the other 14 are
+  in-frame protein duplications and stop insertions VEP writes differently
+  (a separate fix) and one frameshift at the stop codon, none of which
+  matched before either.
 
 ## [0.5.0]
 
