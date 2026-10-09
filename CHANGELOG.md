@@ -102,6 +102,13 @@ For releases before `0.5.0`, see the git history.
   `TranscriptStore` construction fails with it, instead of keeping only the
   last segment, computing with the bad phase or panicking. MANE 1.5 has
   none of these.
+- **Breaking.** `locate_indel` classifies an insertion at its insertion
+  point, as VEP 116 does: on the minus strand `IndelRegion::Cds` offsets move
+  one base later (the insertion goes before `cds_offset_start` on both
+  strands); an insertion at an exon/intron junction is the mRNA insertion
+  between the two exons, with no exon or intron number; one next to a UTR
+  base is a UTR insertion; the splice flags follow VEP's two-flank rule; and
+  `crosses_exon_boundary` is always `false` for an insertion.
 - **Breaking.** A store with no transcripts, or with bytes after the payload,
   is an error at load time. The builder refuses a GFF3 that admits no
   transcripts instead of writing an empty store, which would annotate every
@@ -114,6 +121,29 @@ For releases before `0.5.0`, see the git history.
   compare it with the 0.5 file SHA. That link holds only for this
   header-only transition; across later format versions, key on
   (`format_version`, `payload_sha256`).
+
+### Fixed
+
+- Insertions are annotated at their insertion point (VEP 116). Before, an
+  insertion was classified by a single genomic base, which on the minus
+  strand lies on the wrong side of it: minus-strand coding insertions were one
+  base early (TP53 `c.523_524insT` was `p.Arg175SerfsTer6`, VEP
+  `p.Arg175LeufsTer6`), and each exon/intron or UTR/CDS edge was wrong on one
+  strand (plus: `splice_donor_variant` at the donor junction,
+  `frameshift_variant` + `start_lost` before the first coding base; minus:
+  `splice_acceptor_variant` at the acceptor junction, a frameshift after the
+  last coding base). Canonical-site insertions no longer carry
+  `coding_sequence_variant` and `intron_variant`, and splice terms follow
+  VEP's insertion predicates. In-frame insertion HGVS p. now sees the residue
+  before a split codon (NM_006231.4 `c.2465_2467dup`:
+  `p.Lys822_Gly823insGlu`). Over GRCh38 ClinVar on MANE 1.5, 15,549 of
+  4,667,273 transcript rows move, all insertions; no HGVS c. changes. In a
+  stratified sample (up to 20 variants per term-change bucket; 484 variants,
+  517 transcript rows), terms and HGVS p. both match VEP 116 in 390 rows,
+  against none before. Known gap: an insertion in a repeat at an exon/intron
+  junction now has VEP's terms but an HGVS p. where VEP gives none, because
+  vareffect's HGVS 3' shift stops at the exon edge (NM_000548.5
+  `c.336_336+1insGT`, VEP `c.336+1_336+2dup`).
 
 ## [0.5.0]
 

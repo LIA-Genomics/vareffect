@@ -46,6 +46,10 @@ three as `splice_region_variant` (plus `intron_variant` where applicable).
 To recover the finer term, reclassify from the splice offsets that
 `locate_indel` exposes.
 
+For an insertion on an exon short enough that two introns' windows reach
+it, VEP sets the splice-region flag intron by intron, so its result depends on
+the order it visits them; `vareffect` takes either intron's region (accepted, maintainer decision 2026-10-09: LOW term, rare).
+
 ### 2.2 Intronic variants of non-coding transcripts
 
 VEP may give `non_coding_transcript_variant`; `vareffect` gives

@@ -901,23 +901,19 @@ fn deletion_overlaps_splice_acceptor() {
 
 #[test]
 fn insertion_at_splice_donor() {
+    // Between +1 and +2: the canonical term alone, with the intron number
+    // (VEP 116 BRCA2 NM_000059.4 c.67+1_67+2insA: splice_donor_variant).
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_insertion("chr1", 2001, b"GGG", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-            || result
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant)
-            || result
-                .consequences
-                .contains(&Consequence::SpliceRegionVariant),
-        "expected splice consequence, got {:?}",
-        result.consequences,
-    );
+    assert_eq!(result.consequences, vec![Consequence::SpliceDonorVariant]);
+    assert_eq!(result.intron.as_deref(), Some("1/2"));
+    assert_eq!(result.exon, None);
+    let minus = minus_strand_coding();
+    let minus_idx = build_index(&minus);
+    let result = annotate_insertion("chr17", 17_999, b"C", &minus, &minus_idx, &fasta).unwrap();
+    assert_eq!(result.consequences, vec![Consequence::SpliceDonorVariant]);
 }
 
 // -- Minus-strand indel tests -----------------------------------------------
@@ -1198,17 +1194,75 @@ fn boundary_del_cds_utr() {
 
 #[test]
 fn insertion_at_exon_intron_junction() {
+    // Between the last exon base and +1: an mRNA insertion before exon 2's
+    // first coding base, plus splice_region_variant, with no exon or intron
+    // number (VEP 116 BRCA2 NM_000059.4 c.67_67+1insA: frameshift_variant,
+    // splice_region_variant, CDS 67-68).
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
-    let result = annotate_insertion("chr1", 2000, b"AAA", &tx, &idx, &fasta).unwrap();
+    let result = annotate_insertion("chr1", 2000, b"A", &tx, &idx, &fasta).unwrap();
+    assert_eq!(
+        result.consequences,
+        vec![
+            Consequence::FrameshiftVariant,
+            Consequence::SpliceRegionVariant
+        ]
+    );
+    assert_eq!(
+        (result.cds_position, result.cds_position_end),
+        (Some(500), Some(501))
+    );
+    assert_eq!(
+        (result.exon.as_deref(), result.intron.as_deref()),
+        (None, None)
+    );
+    // The acceptor side of the same junction is the same mRNA insertion.
+    let acceptor = annotate_insertion("chr1", 3000, b"A", &tx, &idx, &fasta).unwrap();
+    assert_eq!(acceptor.cds_position, Some(500));
+    assert!(
+        acceptor
+            .consequences
+            .contains(&Consequence::SpliceRegionVariant)
+    );
+}
+
+#[test]
+fn insertion_at_a_non_coding_junction_is_a_transcript_variant() {
+    // VEP 116 ENST00000424518.6 n.197_197+1insT: splice_region_variant,
+    // non_coding_transcript_variant, cDNA at the mRNA point, no exon.
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = noncoding_2_exon();
+    let idx = build_index(&tx);
+    let result = annotate_insertion(&tx.chrom.clone(), 300, b"A", &tx, &idx, &fasta).unwrap();
+    assert_eq!(
+        result.consequences,
+        vec![
+            Consequence::SpliceRegionVariant,
+            Consequence::NonCodingTranscriptVariant
+        ]
+    );
+    assert_eq!(
+        (result.cdna_position, result.cdna_position_end),
+        (Some(200), Some(201))
+    );
+    assert_eq!(result.exon, None);
+}
+
+#[test]
+fn deletion_at_a_donor_site_keeps_its_terms() {
+    // Deletions keep `build_splice_indel_result`: a deletion over the exon
+    // end and +1 is splice_donor_variant with its coding and intron terms.
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let idx = build_index(&tx);
+    let result = annotate_deletion("chr1", 1_999, 2_001, b"AA", &tx, &idx, &fasta).unwrap();
     assert!(
         result
             .consequences
-            .contains(&Consequence::SpliceDonorVariant),
-        "insertion at donor junction: {:?}",
-        result.consequences,
+            .contains(&Consequence::SpliceDonorVariant)
     );
+    assert!(result.consequences.contains(&Consequence::IntronVariant));
 }
 
 #[test]
@@ -2531,7 +2585,7 @@ mod incomplete_cds {
         tx.cds_genomic_end = Some(1_502);
         let index = LocateIndex::build(&tx).unwrap();
         assert_eq!(
-            super::indel::partial_codon_insertion_site(0, &tx, &index),
+            super::indel::partial_codon_insertion_site(0, &index),
             Some(super::indel::PartialCodonInsertion::Inside)
         );
     }

@@ -194,6 +194,8 @@ const VARIANTS: &[Expected] = &[
     // Genomic: insertion between 43057063 and 43057064 (1-based)
     // Plus-strand inserted base: G (complement of coding C)
     // VCF: pos 43057063 (1-based) = 43057062 (0-based), REF=G, ALT=GG
+    // Re-fetched from VEP REST release 116 on 2026-10-09
+    // (region 17:43057064-43057063/G): CDS 5265-5266, cDNA 5378-5379.
     Expected {
         label: "BRCA1 c.5266dup frameshift insertion (minus)",
         chrom: "chr17",
@@ -204,13 +206,13 @@ const VARIANTS: &[Expected] = &[
         consequences: &["frameshift_variant"],
         impact: "HIGH",
         protein_start: Some(1755),
-        protein_end: Some(1755),
-        cds_position: Some(5264),
-        cds_position_end: Some(5265),
-        cdna_position: Some(5377),
-        cdna_position_end: Some(5378),
+        protein_end: Some(1756),
+        cds_position: Some(5265),
+        cds_position_end: Some(5266),
+        cdna_position: Some(5378),
+        cdna_position_end: Some(5379),
         codons: Some("-/C"),
-        amino_acids: Some("S/X"),
+        amino_acids: Some("-/X"),
         exon: Some("19/23"),
         intron: None,
         vep_divergence: false,
@@ -922,6 +924,8 @@ const VARIANTS: &[Expected] = &[
     // VCF: pos 7674180 (1-based) = 7674179 (0-based), REF=C, ALT=CA
     // VEP returns: frameshift_variant + splice_region_variant
     // VEP does NOT assign splice_donor_variant for this junction insertion.
+    // Values from VEP REST release 116 on 2026-10-09 (region
+    // 17:7674181-7674180/A): the mRNA insertion between c.782 and c.783.
     Expected {
         label: "TP53 junction insertion exon/intron (minus)",
         chrom: "chr17",
@@ -929,21 +933,21 @@ const VARIANTS: &[Expected] = &[
         ref_allele: b"C",
         alt_allele: b"CA",
         transcript: "NM_000546.6",
-        consequences: &["splice_donor_variant"],
+        consequences: &["frameshift_variant", "splice_region_variant"],
         impact: "HIGH",
-        protein_start: None,
-        protein_end: None,
-        cds_position: None,
-        cds_position_end: None,
-        cdna_position: None,
-        cdna_position_end: None,
-        codons: None,
-        amino_acids: None,
-        exon: Some("7/11"),
+        protein_start: Some(261),
+        protein_end: Some(261),
+        cds_position: Some(782),
+        cds_position_end: Some(783),
+        cdna_position: Some(924),
+        cdna_position_end: Some(925),
+        codons: Some("agt/agTt"),
+        amino_acids: Some("S/SX"),
+        exon: None,
         intron: None,
         vep_divergence: false,
         vep_consequence: None,
-        hgvs_p: None,
+        hgvs_p: Some("p.Gly262TrpfsTer2"),
     },
     // #28 — BRCA2 c.681+1_681+3del: pure intronic splice donor deletion
     // VEP query: NM_000059.4:c.681+1_681+3del
