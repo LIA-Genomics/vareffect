@@ -71,131 +71,182 @@ fn annotate_deletion_core(
 ) -> Result<ConsequenceResult, VarEffectError> {
     let location = locate_indel(chrom, start, end, transcript, locate_index)?;
 
-    // HGVS 3' normalization: shift deletion to the most 3' equivalent
-    // position on the coding strand for HGVS notation. Skip boundary-spanning
-    // deletions (multi-exon shifts are not meaningful for HGVS c.).
-    let shift = if !location.crosses_exon_boundary {
-        crate::normalize::compute_3prime_shift_deletion(chrom, start, end, transcript, fasta)?
-    } else {
-        0
-    };
+    // HGVS 3' normalization: shift the deletion to the most 3' equivalent
+    // position on the coding strand, on the genome as VEP 116 does, across
+    // exon/intron junctions. The consequences stay on the unshifted deletion.
+    let shift = crate::normalize::compute_3prime_shift_deletion(
+        chrom,
+        start,
+        end,
+        transcript.strand,
+        fasta,
+    )?;
     let (hgvs_start, hgvs_end) = match transcript.strand {
         Strand::Plus => (start + shift, end + shift),
         Strand::Minus => (start - shift, end - shift),
     };
-    let hgvs = hgvs_c::format_deletion_hgvs(chrom, hgvs_start, hgvs_end, transcript, locate_index)?;
-
-    if let Some(intron) = frameshift_intron_endpoint(start, end, transcript, locate_index) {
-        let mut result = super::complex::frameshift_intron_indel_result(
-            start,
-            end,
-            intron,
-            &location,
-            transcript,
-            locate_index,
-        );
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
-
-    if location.overlaps_splice_canonical
-        && exonic_splice_spill(start, end, transcript, locate_index).is_none()
+    // A deletion with no HGVS c. at its own position keeps none: its shifted
+    // range is not reproduced the way VEP writes it (deletions from the CDS
+    // across a 5'UTR intron, NM_025150.5; VEP_DIVERGENCES.md 2.3).
+    let hgvs = if shift > 0
+        && hgvs_c::format_deletion_hgvs(chrom, start, end, transcript, locate_index)?.is_none()
     {
-        let mut result = build_splice_indel_result(transcript, &location, start, end)?;
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
+        None
+    } else {
+        hgvs_c::format_deletion_hgvs(chrom, hgvs_start, hgvs_end, transcript, locate_index)?
+    };
+    let shifted_region = if shift > 0 {
+        Some(locate_indel(chrom, hgvs_start, hgvs_end, transcript, locate_index)?.region)
+    } else {
+        None
+    };
 
-    if location.crosses_exon_boundary {
-        let mut result = super::complex::annotate_boundary_spanning_deletion(
-            chrom,
-            start,
-            end,
-            transcript,
-            locate_index,
-            fasta,
-            &location,
-        )?;
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
-
-    // CDS/UTR boundary within the same exon
-    if matches!(location.region, IndelRegion::BoundarySpanning) {
-        let mut result = super::complex::annotate_boundary_spanning_deletion(
-            chrom,
-            start,
-            end,
-            transcript,
-            locate_index,
-            fasta,
-            &location,
-        )?;
-        result.hgvs_c = hgvs;
-        return Ok(result);
-    }
-
-    let mut result = match &location.region {
-        IndelRegion::Cds {
-            cds_offset_start,
-            cds_offset_end,
-        } => {
-            let del_cds_len = cds_offset_end - cds_offset_start;
-            let exon_index = location.exon_index.unwrap_or(0);
-
-            if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
-                partial_terminal_codon_indel_result(
-                    chrom,
-                    *cds_offset_start,
-                    *cds_offset_end,
-                    &[],
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                )
-            } else if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
-                deletion_into_partial_codon_result(
-                    chrom,
-                    *cds_offset_start,
-                    *cds_offset_end,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                )
-            } else if !del_cds_len.is_multiple_of(3) {
-                annotate_cds_frameshift(
-                    chrom,
-                    *cds_offset_start,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                    *cds_offset_end,
-                    None,
-                    None,
-                    0,
-                )
-            } else {
-                annotate_cds_inframe_deletion(
-                    chrom,
-                    *cds_offset_start,
-                    *cds_offset_end,
-                    transcript,
-                    locate_index,
-                    fasta,
-                    exon_index,
-                    location.overlaps_splice_region,
-                )
-            }
+    let mut result = 'annotate: {
+        if let Some(intron) = frameshift_intron_endpoint(start, end, transcript, locate_index) {
+            let mut result = super::complex::frameshift_intron_indel_result(
+                start,
+                end,
+                intron,
+                &location,
+                transcript,
+                locate_index,
+            );
+            result.hgvs_c = hgvs;
+            break 'annotate result;
         }
-        _ => build_noncds_indel_result(transcript, &location, start, end),
-    }?;
 
-    result.hgvs_c = hgvs;
+        if location.overlaps_splice_canonical
+            && exonic_splice_spill(start, end, transcript, locate_index).is_none()
+        {
+            let mut result = build_splice_indel_result(transcript, &location, start, end)?;
+            result.hgvs_c = hgvs;
+            break 'annotate result;
+        }
+
+        if location.crosses_exon_boundary {
+            let mut result = super::complex::annotate_boundary_spanning_deletion(
+                chrom,
+                start,
+                end,
+                transcript,
+                locate_index,
+                fasta,
+                &location,
+            )?;
+            result.hgvs_c = hgvs;
+            break 'annotate result;
+        }
+
+        // CDS/UTR boundary within the same exon
+        if matches!(location.region, IndelRegion::BoundarySpanning) {
+            let mut result = super::complex::annotate_boundary_spanning_deletion(
+                chrom,
+                start,
+                end,
+                transcript,
+                locate_index,
+                fasta,
+                &location,
+            )?;
+            result.hgvs_c = hgvs;
+            break 'annotate result;
+        }
+
+        let mut result = match &location.region {
+            IndelRegion::Cds {
+                cds_offset_start,
+                cds_offset_end,
+            } => {
+                let del_cds_len = cds_offset_end - cds_offset_start;
+                let exon_index = location.exon_index.unwrap_or(0);
+
+                if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
+                    partial_terminal_codon_indel_result(
+                        chrom,
+                        *cds_offset_start,
+                        *cds_offset_end,
+                        &[],
+                        transcript,
+                        locate_index,
+                        fasta,
+                        exon_index,
+                    )
+                } else if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
+                    deletion_into_partial_codon_result(
+                        chrom,
+                        *cds_offset_start,
+                        *cds_offset_end,
+                        transcript,
+                        locate_index,
+                        fasta,
+                        exon_index,
+                        location.overlaps_splice_region,
+                    )
+                } else if !del_cds_len.is_multiple_of(3) {
+                    annotate_cds_frameshift(
+                        chrom,
+                        *cds_offset_start,
+                        transcript,
+                        locate_index,
+                        fasta,
+                        exon_index,
+                        location.overlaps_splice_region,
+                        *cds_offset_end,
+                        None,
+                        None,
+                        0,
+                    )
+                } else {
+                    annotate_cds_inframe_deletion(
+                        chrom,
+                        *cds_offset_start,
+                        *cds_offset_end,
+                        transcript,
+                        locate_index,
+                        fasta,
+                        exon_index,
+                        location.overlaps_splice_region,
+                    )
+                }
+            }
+            _ => build_noncds_indel_result(transcript, &location, start, end),
+        }?;
+        result.hgvs_c = hgvs;
+        result
+    };
+
+    // VEP writes HGVS p. from the shifted deletion (`hgvs_protein` translates
+    // the shifted allele): none for a coding deletion shifted out of the CDS
+    // (VEP 116 NM_000632.4 c.1497+1del), and the shifted deletion's for one
+    // that reaches the CDS from an intron and shifts wholly into it
+    // (NM_000540.3 c.958_960del `p.Glu320del`). A purely intronic deletion
+    // shifted into an exon has none (`c.410-1del` written `c.410del`), nor
+    // has one from the 5'UTR (VEP_DIVERGENCES.md 2.3).
+    if let Some(shifted_region) = &shifted_region {
+        let shifted_in_cds = matches!(shifted_region, IndelRegion::Cds { .. });
+        if matches!(location.region, IndelRegion::Cds { .. }) {
+            if !shifted_in_cds {
+                result.hgvs_p = None;
+            }
+        } else if shifted_in_cds
+            && location.crosses_exon_boundary
+            && transcript
+                .cds_segments
+                .iter()
+                .any(|segment| start < segment.genomic_end && segment.genomic_start < end)
+        {
+            result.hgvs_p = annotate_deletion_core(
+                chrom,
+                hgvs_start,
+                hgvs_end,
+                &[],
+                transcript,
+                locate_index,
+                fasta,
+            )?
+            .hgvs_p;
+        }
+    }
     Ok(result)
 }
 

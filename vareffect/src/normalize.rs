@@ -2,9 +2,8 @@
 //!
 //! Implements the HGVS 3' rule: indels in repeated sequences are shifted to
 //! the most 3' (coding-strand rightward) equivalent position before HGVS
-//! formatting. Deletion shifts respect region boundaries: exonic shifts stay
-//! within the exon, intronic shifts stay within the intron. Insertion shifts
-//! follow VEP's genomic shift and cross exon/intron junctions.
+//! formatting. Both follow VEP's genomic shift and cross exon/intron
+//! junctions.
 //!
 //! The 3' direction is relative to the **coding strand** (transcript
 //! direction):
@@ -16,95 +15,97 @@
 
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
-use crate::types::{Strand, TranscriptModel};
+use crate::types::Strand;
 
 /// Compute the 3' shift offset (in genomic bases) for a deletion.
 ///
 /// Starting from the deletion range `[del_start, del_end)` on the reference,
-/// checks how many bases the deletion can slide toward the 3' end of the
-/// coding strand while remaining equivalent. A deletion `[s, e)` can shift
-/// right by 1 iff `ref[s] == ref[e]` (the base entering the window from the
-/// 3' side equals the base leaving from the 5' side).
+/// counts how many bases the deletion can slide toward the 3' end of the
+/// coding strand while remaining equivalent: a deletion `[s, e)` moves one
+/// base 3' on the plus strand iff `ref[s] == ref[e]`, on the minus strand
+/// iff `ref[s - 1] == ref[e - 1]`.
 ///
-/// Stops at region boundaries: exonic shifts stop at exon/intron
-/// junctions; intronic shifts stop at intron/exon junctions.
+/// The shift is on the genomic sequence, as VEP 116's `_genomic_shift` and
+/// `perform_shift` do for insertions and deletions alike: it crosses
+/// exon/intron junctions (VEP 116 NM_000632.4 `c.1497+1del` for a deletion
+/// of the last exon base before an identical intron base), reads at most
+/// [`VEP_SHIFT_WINDOW`] bases past the deletion (clamped to the chromosome),
+/// and moves at most as far as [`vep_max_shift`] allows.
 ///
 /// # Returns
 ///
 /// Number of bases to shift (0 if no shift is possible).
+///
+/// # Errors
+///
+/// [`VarEffectError::ChromNotFound`] if `chrom` is not in the genome index,
+/// or any error from [`FastaReader::fetch_sequence`].
 pub(crate) fn compute_3prime_shift_deletion(
     chrom: &str,
     del_start: u64,
     del_end: u64,
-    transcript: &TranscriptModel,
+    strand: Strand,
     fasta: &FastaReader,
 ) -> Result<u64, VarEffectError> {
-    let del_len = del_end - del_start;
+    let del_len = del_end.saturating_sub(del_start);
     if del_len == 0 {
         return Ok(0);
     }
-
-    match transcript.strand {
+    let chrom_len = fasta
+        .chrom_length(chrom)
+        .ok_or_else(|| VarEffectError::ChromNotFound {
+            chrom: chrom.to_string(),
+        })?;
+    let max_shift = vep_max_shift(del_len, strand);
+    let shift = match strand {
+        // 3' = increasing genomic coordinate: compare the base leaving the
+        // deletion on its 5' side with the one entering on its 3' side.
         Strand::Plus => {
-            // 3' = increasing genomic coordinate.
-            // Find the region (exon or intron) containing the 3' end of
-            // the deletion and use its boundary as the shift limit.
-            let fetch_end = if let Some((_, exon_end)) =
-                containing_exon_range(del_end - 1, transcript)
-            {
-                exon_end
-            } else if let Some((_, intron_end)) = containing_intron_range(del_end - 1, transcript) {
-                intron_end
-            } else {
+            let end = del_end.saturating_add(VEP_SHIFT_WINDOW).min(chrom_len);
+            if end <= del_end {
                 return Ok(0);
-            };
-            if fetch_end <= del_end {
-                return Ok(0); // no room to shift
             }
-            let seq = fasta.fetch_sequence(chrom, del_start, fetch_end)?;
-            let dl = del_len as usize;
-            let mut shift = 0usize;
-            // seq[shift] = ref[del_start + shift]
-            // seq[dl + shift] = ref[del_end + shift]
-            while dl + shift < seq.len() {
-                if seq[shift] != seq[dl + shift] {
-                    break;
-                }
-                shift += 1;
-            }
-            Ok(shift as u64)
+            let seq = fasta.fetch_sequence(chrom, del_start, end)?;
+            let deleted = del_len as usize;
+            seq.iter()
+                .zip(&seq[deleted..])
+                .take(max_shift)
+                .take_while(|(leaving, entering)| leaving == entering)
+                .count()
         }
+        // 3' = decreasing genomic coordinate.
         Strand::Minus => {
-            // 3' = decreasing genomic coordinate.
-            // Find the region (exon or intron) containing the 3' coding
-            // end (= lowest genomic coord) and use its boundary as limit.
-            let fetch_start = if let Some((exon_start, _)) =
-                containing_exon_range(del_start, transcript)
-            {
-                exon_start
-            } else if let Some((intron_start, _)) = containing_intron_range(del_start, transcript) {
-                intron_start
-            } else {
+            let start = del_start.saturating_sub(VEP_SHIFT_WINDOW);
+            if start >= del_start {
                 return Ok(0);
-            };
-            if fetch_start >= del_start {
-                return Ok(0); // no room to shift
             }
-            let seq = fasta.fetch_sequence(chrom, fetch_start, del_end)?;
-            let ds = (del_start - fetch_start) as usize;
-            let de = (del_end - fetch_start) as usize;
-            let mut shift = 0usize;
-            // Compare ref[del_start - 1 - shift] with ref[del_end - 1 - shift].
-            // In seq coords: seq[ds - 1 - shift] vs seq[de - 1 - shift].
-            while shift < ds {
-                if seq[ds - 1 - shift] != seq[de - 1 - shift] {
-                    break;
-                }
-                shift += 1;
-            }
-            Ok(shift as u64)
+            let seq = fasta.fetch_sequence(chrom, start, del_end)?;
+            let before = (del_start - start) as usize;
+            seq[..before]
+                .iter()
+                .rev()
+                .zip(seq.iter().rev())
+                .take(max_shift)
+                .take_while(|(entering, leaving)| entering == leaving)
+                .count()
         }
-    }
+    };
+    Ok(shift as u64)
+}
+
+/// Most bases VEP 116's `perform_shift` moves an indel of `len` bases: its
+/// loop runs over the [`VEP_SHIFT_WINDOW`] flanking bases minus the indel,
+/// so `VEP_SHIFT_WINDOW + 1 - len`; a longer indel gets the whole window,
+/// except a minus-strand one exactly `VEP_SHIFT_WINDOW + 1` long, which the
+/// reverse loop never shifts.
+fn vep_max_shift(len: u64, strand: Strand) -> usize {
+    (if len <= VEP_SHIFT_WINDOW {
+        VEP_SHIFT_WINDOW + 1 - len
+    } else if strand == Strand::Minus && len == VEP_SHIFT_WINDOW + 1 {
+        0
+    } else {
+        VEP_SHIFT_WINDOW
+    }) as usize
 }
 
 /// Bases VEP reads on each side of an indel for its HGVS 3' shift
@@ -160,13 +161,7 @@ pub(crate) fn compute_3prime_shift_insertion(
         .ok_or_else(|| VarEffectError::ChromNotFound {
             chrom: chrom.to_string(),
         })?;
-    let max_shift = if ins_len <= VEP_SHIFT_WINDOW {
-        VEP_SHIFT_WINDOW + 1 - ins_len
-    } else if strand == Strand::Minus && ins_len == VEP_SHIFT_WINDOW + 1 {
-        0
-    } else {
-        VEP_SHIFT_WINDOW
-    } as usize;
+    let max_shift = vep_max_shift(ins_len, strand);
     let shift = match strand {
         // 3' = increasing genomic coordinate.
         Strand::Plus => {
@@ -223,42 +218,22 @@ pub(crate) fn rotate_inserted_bases(inserted_bases: &[u8], shift: u64, strand: S
     rotated
 }
 
-/// Find the exon whose `[genomic_start, genomic_end)` range contains `pos`.
-///
-/// Returns `None` if `pos` is intronic or outside all exons.
-fn containing_exon_range(pos: u64, transcript: &TranscriptModel) -> Option<(u64, u64)> {
-    transcript
-        .exons
-        .iter()
-        .find(|e| pos >= e.genomic_start && pos < e.genomic_end)
-        .map(|e| (e.genomic_start, e.genomic_end))
-}
-
-/// Find the intron whose `[genomic_start, genomic_end)` range contains `pos`.
-///
-/// Returns `None` if `pos` is exonic, outside the transcript, or the
-/// transcript has fewer than two exons.
-///
-/// Intron boundaries are derived from adjacent exon pairs:
-/// - Plus strand (exons ascending): `[exons[i].genomic_end, exons[i+1].genomic_start)`
-/// - Minus strand (exons descending): `[exons[i+1].genomic_end, exons[i].genomic_start)`
-fn containing_intron_range(pos: u64, transcript: &TranscriptModel) -> Option<(u64, u64)> {
-    for pair in transcript.exons.windows(2) {
-        let (intron_start, intron_end) = match transcript.strand {
-            Strand::Plus => (pair[0].genomic_end, pair[1].genomic_start),
-            Strand::Minus => (pair[1].genomic_end, pair[0].genomic_start),
-        };
-        if pos >= intron_start && pos < intron_end {
-            return Some((intron_start, intron_end));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fasta::write_genome_binary;
+    use crate::types::TranscriptModel;
+
+    #[test]
+    fn vep_max_shift_follows_the_perform_shift_loop() {
+        // VEP 116 `perform_shift`: 1001 - len steps; a longer indel gets the
+        // window, except a minus-strand one exactly 1001 long.
+        assert_eq!(vep_max_shift(1, Strand::Plus), 1000);
+        assert_eq!(vep_max_shift(1000, Strand::Minus), 1);
+        assert_eq!(vep_max_shift(1001, Strand::Plus), 1000);
+        assert_eq!(vep_max_shift(1001, Strand::Minus), 0);
+        assert_eq!(vep_max_shift(2000, Strand::Minus), 1000);
+    }
     use crate::types::{Biotype, CdsSegment, Exon, TranscriptTier};
     use tempfile::TempDir;
 
@@ -420,7 +395,7 @@ mod tests {
         // shift = 4
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 4, 5, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 4, 5, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 4);
     }
 
@@ -438,7 +413,7 @@ mod tests {
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 10, 12, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 10, 12, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -448,7 +423,7 @@ mod tests {
         // Delete T at [0, 1). ref[0]=T, ref[1]=C → no match.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 0, 1, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 0, 1, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -460,7 +435,7 @@ mod tests {
         // fetch_end <= del_end → return 0.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 24, 25, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 24, 25, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -468,7 +443,7 @@ mod tests {
     fn del_zero_length() {
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 5, 5, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 5, 5, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -492,7 +467,7 @@ mod tests {
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 15, 16, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr17", 15, 16, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -735,19 +710,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn del_intronic_gc_repeat_plus() {
-        // Intron [46, 56). chr1[46..56] = NNGCGCGCGC.
-        // Delete GC at [48, 50). 3' direction = rightward.
-        // Shift window: [48, 56). seq = chr1[48..56] = GCGCGCGC (8 bytes).
-        // dl = 2.
-        // s=0: seq[0]=G == seq[2]=G, s=1: seq[1]=C == seq[3]=C,
-        // s=2: G==G, s=3: C==C, s=4: G==G, s=5: C==C,
-        // s=6: dl + 6 = 8 == seq.len() → stop.
-        // shift = 6
+    fn del_intronic_gc_repeat_crosses_into_the_exon_plus() {
+        // Delete GC at [48, 50) in intron [46, 56). chr1[48..62] is a GC
+        // repeat to the chromosome end, so the genomic shift (VEP 116
+        // `perform_shift`) crosses the junction at 56: 12 bases.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 48, 50, &tx, &fasta).unwrap();
-        assert_eq!(shift, 6);
+        let shift = compute_3prime_shift_deletion("chr1", 48, 50, tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 12);
     }
 
     #[test]
@@ -756,20 +726,18 @@ mod tests {
         // chr1[48] = G, chr1[49] = C → no match. shift = 0.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 48, 49, &tx, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 48, 49, tx.strand, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
     #[test]
-    fn del_intronic_stops_at_boundary_plus() {
-        // Delete GC at [52, 54) in intron [46, 56).
-        // Shift window: [52, 56). seq = GCGC (4 bytes), dl = 2.
-        // s=0: G==G, s=1: C==C, s=2: dl+2 = 4 == seq.len() → stop.
-        // shift = 2 (clamped at intron end, does NOT cross into exon 1).
+    fn del_intronic_crosses_the_junction_plus() {
+        // Delete GC at [52, 54) in intron [46, 56): the repeat runs on past
+        // the junction at 56 to the chromosome end (62), so shift = 8.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 52, 54, &tx, &fasta).unwrap();
-        assert_eq!(shift, 2);
+        let shift = compute_3prime_shift_deletion("chr1", 52, 54, tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 8);
     }
 
     // -----------------------------------------------------------------------
@@ -794,32 +762,23 @@ mod tests {
 
     #[test]
     fn del_intronic_c_repeat_minus() {
-        // chr17 intron [10, 30). chr17[10..16] = CCCCCC.
-        // Delete C at [15, 16). Minus strand: 3' = decreasing genomic.
-        // boundary_start = 10 (intron start). Fetch [10, 16) = CCCCCC.
-        // ds = 15 - 10 = 5, de = 16 - 10 = 6.
-        // s=0: seq[4]=C vs seq[5]=C → match
-        // s=1: seq[3]=C vs seq[4]=C → match
-        // s=2: seq[2]=C vs seq[3]=C → match
-        // s=3: seq[1]=C vs seq[2]=C → match
-        // s=4: seq[0]=C vs seq[1]=C → match
-        // s=5: s == ds → stop
-        // shift = 5
+        // chr17 = TCGATCGAT CCCCCCC ATG...: a C run at [9, 16). Delete C at
+        // [15, 16); minus strand, 3' = leftward. The genomic shift passes the
+        // intron start at 10 and stops at chr17[8] = T: shift = 6.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 15, 16, &tx, &fasta).unwrap();
-        assert_eq!(shift, 5);
+        let shift = compute_3prime_shift_deletion("chr17", 15, 16, tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 6);
     }
 
     #[test]
-    fn del_intronic_stops_at_boundary_minus() {
-        // Delete C at [10, 11) in intron [10, 30). Minus strand: 3' = leftward.
-        // boundary_start = 10. fetch_start (10) >= del_start (10) → return 0.
-        // At the 3' intron boundary, no room to shift.
+    fn del_intronic_crosses_the_intron_start_minus() {
+        // Delete C at [10, 11), the 3' end of intron [10, 30). chr17[9] = C
+        // continues the run into the exon, so the shift crosses it: 1.
         let (_tmp, fasta) = write_test_fasta();
         let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 10, 11, &tx, &fasta).unwrap();
-        assert_eq!(shift, 0);
+        let shift = compute_3prime_shift_deletion("chr17", 10, 11, tx.strand, &fasta).unwrap();
+        assert_eq!(shift, 1);
     }
 
     // -----------------------------------------------------------------------

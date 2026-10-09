@@ -70,6 +70,11 @@ or termination codon. A deletion starting at CDS offset 1 or 2 does draw
 **Difference:** VEP writes `p.Met1_?5`-style HGVS p. and no
 `protein_start`; `vareffect` writes no HGVS p. and `protein_start` 1.
 
+A deletion running from the CDS start back across a 5'UTR intron has no
+HGVS c. in `vareffect`; VEP 116 writes one after its 3' shift
+(NM_025150.5 `c.-30_-28del`, NM_001018005.2 `c.-74_-46del`, NM_006533.4
+`c.-13_-9del`; 3 ClinVar x MANE 1.5 entries).
+
 ## 3. Incomplete transcripts
 
 These cases do not occur in MANE except TMEM247 NM_001424184.1; they matter
