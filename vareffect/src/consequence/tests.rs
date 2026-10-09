@@ -1025,8 +1025,18 @@ fn plus_strand_frameshift_start_lost() {
     let (_tmp, fasta) = write_test_fasta();
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
-    // CDS starts at genomic 1500 (first base of ATG). Delete the A.
-    let result = annotate_deletion("chr1", 1500, 1501, b"A", &tx, &idx, &fasta).unwrap();
+    // CDS starts at genomic 1500 (first base of ATG). Delete the T: `AGC`
+    // is no start codon. (Deleting the A would only shift the start into
+    // this fixture's all-`A` 5'UTR, which VEP's `_ins_del_start_altered`
+    // calls retained; see the next assertion.)
+    let retained = annotate_deletion("chr1", 1500, 1501, b"A", &tx, &idx, &fasta).unwrap();
+    assert!(
+        retained
+            .consequences
+            .contains(&Consequence::StartRetainedVariant)
+            && retained.consequences.contains(&Consequence::StartLost)
+    );
+    let result = annotate_deletion("chr1", 1501, 1502, b"T", &tx, &idx, &fasta).unwrap();
     assert!(
         result.consequences.contains(&Consequence::StartLost),
         "expected start_lost, got {:?}",
@@ -3264,4 +3274,159 @@ fn unknown_alt_indels_at_the_start_and_stop_codons_follow_vep() {
         delins[0].consequences,
         vec![Consequence::StopRetainedVariant]
     );
+}
+
+// -- Frameshift codon window, peptide and terms (VEP 116) -------------------
+
+#[test]
+fn frameshift_insertion_shows_the_codon_window() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    // Inside codon 2 (`CGT`), after its first base: `cgt/cAgt`, `R/QX`.
+    let inside = annotate_insertion("chr1", 1504, b"A", &tx, &index, &fasta).unwrap();
+    assert_eq!(inside.codons.as_deref(), Some("cgt/cAgt"));
+    assert_eq!(inside.amino_acids.as_deref(), Some("R/QX"));
+    // Between codons 1 and 2: no reference codon (`-/T`, `-/X`).
+    let between = annotate_insertion("chr1", 1503, b"T", &tx, &index, &fasta).unwrap();
+    assert_eq!(between.codons.as_deref(), Some("-/T"));
+    assert_eq!(between.amino_acids.as_deref(), Some("-/X"));
+    assert_eq!(between.consequences, vec![Consequence::FrameshiftVariant]);
+}
+
+#[test]
+fn frameshift_reading_a_stop_in_its_window_is_also_stop_gained() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    // `cgt/cAATAgt`: CAA TAG T reads `Q*X`.
+    let result = annotate_insertion("chr1", 1504, b"AATA", &tx, &index, &fasta).unwrap();
+    assert_eq!(
+        result.consequences,
+        vec![Consequence::StopGained, Consequence::FrameshiftVariant]
+    );
+    assert_eq!(result.amino_acids.as_deref(), Some("R/Q*X"));
+}
+
+#[test]
+fn frameshift_peptide_drops_x_after_a_lone_stop() {
+    // VEP 116 `TranscriptVariationAllele::peptide`: `CE/*` (NM_017635.5).
+    assert_eq!(frameshift_peptide_for_test(b"TGAC"), b"*");
+    assert_eq!(frameshift_peptide_for_test(b"TGGC"), b"WX");
+    assert_eq!(frameshift_peptide_for_test(b"TGATGGC"), b"*WX");
+    assert_eq!(frameshift_peptide_for_test(b"T"), b"X");
+}
+
+fn frameshift_peptide_for_test(seq: &[u8]) -> Vec<u8> {
+    super::indel::translate_with_partial_codon(seq, false).unwrap()
+}
+
+/// A minus-strand transcript on `chrT` whose 5'UTR spans two exons:
+/// exon 1 `[150, 160)` (UTR only) and exon 2 `[80, 130)` with the CDS on
+/// `[91, 127)`. Coding strand: UTR `...{last}` + `TGC`, CDS `ATGC...`.
+fn two_exon_utr_minus(last_utr_base: u8) -> (TempDir, FastaReader, TranscriptModel) {
+    let tmp = TempDir::new().unwrap();
+    let mut chrt = vec![b'C'; 200];
+    // Plus-strand bases are the complements of the coding bases, read 3'->5'.
+    chrt[150] = crate::codon::complement(last_utr_base);
+    chrt[127..130].copy_from_slice(b"GCA"); // coding `TGC`
+    chrt[123..127].copy_from_slice(b"GCAT"); // coding `ATGC`
+    let contigs: Vec<(&str, &[u8])> = vec![("chrT", &chrt)];
+    let bin_path = tmp.path().join("t.bin");
+    let idx_path = tmp.path().join("t.bin.idx");
+    write_genome_binary(&contigs, "t", &bin_path, &idx_path).unwrap();
+    let fasta = FastaReader::open(&bin_path).unwrap();
+    let exons = vec![
+        Exon {
+            exon_number: 1,
+            genomic_start: 150,
+            genomic_end: 160,
+        },
+        Exon {
+            exon_number: 2,
+            genomic_start: 80,
+            genomic_end: 130,
+        },
+    ];
+    let tx = TranscriptModel::new("NM_UTR2.1", "UTR2", "chrT", Strand::Minus, exons)
+        .with_cds_segments(vec![CdsSegment {
+            exon_index: 1,
+            genomic_start: 91,
+            genomic_end: 127,
+            phase: 0,
+        }])
+        .with_biotype(Biotype::ProteinCoding);
+    (tmp, fasta, tx)
+}
+
+#[test]
+fn utr5_tail_reads_across_the_utr_intron_on_the_minus_strand() {
+    let (_tmp, fasta, tx) = two_exon_utr_minus(b'A');
+    let index = LocateIndex::build(&tx).unwrap();
+    let tail = |n| super::indel::utr5_tail(n, &tx, &index, &fasta).unwrap();
+    assert_eq!(tail(2), b"GC");
+    assert_eq!(tail(4), b"ATGC");
+    // Exon 1 is all `G` on the coding strand except its last base.
+    assert_eq!(tail(13), b"GGGGGGGGGATGC");
+    assert_eq!(tail(50).len(), 13);
+}
+
+#[test]
+fn deletion_shifting_the_start_into_a_two_exon_utr_is_start_retained() {
+    // Deleting c.1_4 (`ATGC`) leaves `...A` + `TGC` + `...`: the same
+    // sequence as deleting the UTR copy, so the start is kept (and moved).
+    let (_tmp, fasta, tx) = two_exon_utr_minus(b'A');
+    let index = LocateIndex::build(&tx).unwrap();
+    let kept = annotate_deletion("chrT", 123, 127, b"GCAT", &tx, &index, &fasta).unwrap();
+    assert!(
+        kept.consequences
+            .contains(&Consequence::StartRetainedVariant),
+        "{kept:?}"
+    );
+    assert!(kept.consequences.contains(&Consequence::StartLost));
+    // With a `G` before `TGC` the UTR no longer copies the start codon.
+    let (_tmp, fasta, tx) = two_exon_utr_minus(b'G');
+    let index = LocateIndex::build(&tx).unwrap();
+    let lost = annotate_deletion("chrT", 123, 127, b"GCAT", &tx, &index, &fasta).unwrap();
+    assert!(
+        lost.consequences.contains(&Consequence::StartLost),
+        "{lost:?}"
+    );
+    assert!(
+        !lost
+            .consequences
+            .contains(&Consequence::StartRetainedVariant)
+    );
+}
+
+#[test]
+fn frameshift_at_the_start_codon_follows_vep_start_rules() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = plus_strand_coding();
+    let index = LocateIndex::build(&tx).unwrap();
+    // A duplicated first base only shifts the start into the 5'UTR (`A`s):
+    // VEP 116 NM_000546.6 c.1dup is `start_lost,start_retained_variant`.
+    let dup = annotate_insertion("chr1", 1501, b"A", &tx, &index, &fasta).unwrap();
+    assert_eq!(
+        dup.consequences,
+        vec![
+            Consequence::FrameshiftVariant,
+            Consequence::StartLost,
+            Consequence::StartRetainedVariant
+        ]
+    );
+    // Deleting the `G` leaves `ATC`: start lost, not retained.
+    let deletion = annotate_deletion("chr1", 1502, 1503, b"G", &tx, &index, &fasta).unwrap();
+    assert!(deletion.consequences.contains(&Consequence::StartLost));
+    assert!(
+        !deletion
+            .consequences
+            .contains(&Consequence::StartRetainedVariant)
+    );
+    // An insertion right after the start codon does not touch it.
+    let after = annotate_insertion("chr1", 1503, b"T", &tx, &index, &fasta).unwrap();
+    assert!(!after.consequences.iter().any(|c| matches!(
+        c,
+        Consequence::StartLost | Consequence::StartRetainedVariant
+    )));
 }

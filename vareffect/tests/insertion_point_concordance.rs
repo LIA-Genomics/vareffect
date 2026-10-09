@@ -37,8 +37,8 @@
 //! 1. `splice_donor_region_variant`, `splice_donor_5th_base_variant` and
 //!    `splice_polypyrimidine_tract_variant` fold into `splice_region_variant`,
 //!    as everywhere in vareffect.
-//! 2. Codons and amino acids of a frameshift insertion are not compared
-//!    (a pre-existing display difference on every transcript).
+//! 2. (Retired: codons and amino acids of frameshift insertions now follow
+//!    VEP's codon window and are compared.)
 //! 3. Known pre-existing difference, not part of this suite's subject: where
 //!    a CDS ends at an exon end, VEP writes the HGVS c. of an insertion at
 //!    the following junction at its mRNA point (ENST00000372299.4
@@ -242,19 +242,16 @@ fn insertions_are_classified_at_their_insertion_point_as_vep_116() {
             format!("{:?}", got.protein_start),
             format!("{:?}", row.protein_start),
         );
-        let frameshift = row.consequences.iter().any(|t| t == "frameshift_variant");
-        if !frameshift {
-            check(
-                "codons",
-                format!("{:?}", got.codons),
-                format!("{:?}", row.codons),
-            );
-            check(
-                "amino_acids",
-                format!("{:?}", got.amino_acids),
-                format!("{:?}", row.amino_acids),
-            );
-        }
+        check(
+            "codons",
+            format!("{:?}", got.codons),
+            format!("{:?}", row.codons),
+        );
+        check(
+            "amino_acids",
+            format!("{:?}", got.amino_acids),
+            format!("{:?}", row.amino_acids),
+        );
         check("exon", format!("{:?}", got.exon), format!("{:?}", row.exon));
         check(
             "intron",
