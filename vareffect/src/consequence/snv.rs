@@ -76,7 +76,7 @@ pub fn annotate_snv(
         locate_index,
         fasta,
     )?;
-    Ok(super::helpers::without_gapped_hgvs(transcript, result))
+    Ok(super::helpers::without_gapped_numbering(transcript, result))
 }
 
 /// Internal SNV annotator that skips REF verification. Called by the

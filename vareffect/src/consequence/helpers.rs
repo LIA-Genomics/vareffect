@@ -1,6 +1,6 @@
 //! Internal helper functions shared across consequence submodules.
 
-use super::{Consequence, ConsequenceResult, Impact};
+use super::{Consequence, ConsequenceResult, Impact, PtcStatus};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::locate::LocateIndex;
@@ -114,7 +114,7 @@ pub(super) fn build_base_result(
         hgvs_c: None,
         hgvs_p: None,
         predicts_nmd: false,
-        ptc: super::PtcStatus::NotApplicable,
+        ptc: PtcStatus::NotApplicable,
     }
 }
 
@@ -250,17 +250,34 @@ pub(super) fn add_splice_spill(
     result.impact = finalize_consequences(&mut result.consequences);
 }
 
-/// Clear HGVS c. and p. on a transcript flagged
-/// [`TranscriptModel::cds_alignment_gap`]: its genome-built CDS numbering
-/// differs from the transcript's own, so a genome-derived HGVS string would
-/// name the wrong residue (maintainer decision, issue 13).
-pub(super) fn without_gapped_hgvs(
+/// Clear everything numbered along the transcript on a transcript flagged
+/// [`TranscriptModel::cds_alignment_gap`]: HGVS c. and p., cDNA, CDS and
+/// protein positions, codons and amino acids, and the termination codon
+/// with its NMD verdicts (`ptc` becomes [`PtcStatus::Indeterminate`],
+/// `predicts_nmd` false, as for any undetermined termination codon). Its
+/// genome-built numbering differs from the transcript's own, so these would
+/// name the wrong base or residue, and the 50-nucleotide distances would be
+/// measured in the wrong frame (maintainer decisions, issue 13). Consequence
+/// terms, impact and exon / intron numbers are kept.
+pub(super) fn without_gapped_numbering(
     transcript: &TranscriptModel,
     mut result: ConsequenceResult,
 ) -> ConsequenceResult {
     if transcript.cds_alignment_gap {
         result.hgvs_c = None;
         result.hgvs_p = None;
+        result.cdna_position = None;
+        result.cdna_position_end = None;
+        result.cds_position = None;
+        result.cds_position_end = None;
+        result.protein_start = None;
+        result.protein_end = None;
+        result.codons = None;
+        result.amino_acids = None;
+        if result.ptc != PtcStatus::NotApplicable {
+            result.ptc = PtcStatus::Indeterminate;
+        }
+        result.predicts_nmd = false;
     }
     result
 }

@@ -361,19 +361,25 @@ fn check_row(engine: &VarEffect, fasta: &FastaReader, row: &VepRow, failures: &m
 
     if row.label.starts_with("gapped_") {
         // The transcript has bases the genome lacks inside its CDS
-        // (`cds_alignment_gap`): no HGVS c./p., and positions keep the
-        // genome-built numbering (VEP_DIVERGENCES 3.3), so only the terms
-        // and impact are compared.
+        // (`cds_alignment_gap`): nothing numbered along the transcript is
+        // reported (VEP_DIVERGENCES 3.3), so only the terms and impact are
+        // compared.
         if got_terms != expected_terms(row) || row.impact != Some(got.impact.to_string()) {
             failures.push(format!(
                 "{id}: {got_terms:?} {} != VEP {:?} {:?}",
                 got.impact, row.consequences, row.impact
             ));
         }
-        if got.hgvs_c.is_some() || got.hgvs_p.is_some() {
+        let numbered = (
+            &got.hgvs_c,
+            &got.hgvs_p,
+            got.cds_position,
+            got.protein_start,
+            &got.codons,
+        );
+        if numbered != (&None, &None, None, None, &None) {
             failures.push(format!(
-                "{id}: HGVS {:?} {:?} on a gapped CDS",
-                got.hgvs_c, got.hgvs_p
+                "{id}: transcript numbering {numbered:?} on a gapped CDS"
             ));
         }
         return;

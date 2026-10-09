@@ -108,9 +108,12 @@ For releases before `0.5.0`, see the git history.
   `start_retained_variant` or `p.Met1?` (VEP 116 ENST00000616125.5 `c.1A>G`
   is `missense_variant` `p.Met1Val`). On `cds_end_complete = false` the CDS
   has no stop codon on the genome. A model flagged `cds_alignment_gap` gets
-  no HGVS c. or p., and `resolve_hgvs_c` refuses it with the new
-  `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3). No MANE 1.5 output
-  changes.
+  no HGVS c. or p., cDNA / CDS / protein positions, codons or amino acids,
+  its termination codon is `PtcStatus::Indeterminate` and `predicts_nmd` is
+  false (consequence terms, impact and exon / intron numbers are kept), and
+  `resolve_hgvs_c` refuses it with the new
+  `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3).
+  No MANE 1.5 output changes.
 - **Breaking.** Stores written by vareffect 0.5 and earlier are refused with
   `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`, and
   format 1 stores from development builds of 0.6 with
