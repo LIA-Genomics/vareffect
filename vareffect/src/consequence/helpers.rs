@@ -251,18 +251,13 @@ pub(super) fn add_splice_spill(
 }
 
 /// Clear everything numbered along the transcript on a transcript flagged
-/// [`TranscriptModel::cds_alignment_gap`]: HGVS c. and p., cDNA, CDS and
-/// protein positions, codons and amino acids, and the termination codon
-/// with its NMD verdicts (`ptc` becomes [`PtcStatus::Indeterminate`],
-/// `predicts_nmd` false, as for any undetermined termination codon). Its
-/// genome-built numbering differs from the transcript's own, so these would
-/// name the wrong base or residue, and the 50-nucleotide distances would be
-/// measured in the wrong frame (maintainer decisions, issue 13). Consequence
-/// terms, impact and exon / intron numbers are kept.
+/// [`TranscriptModel::cds_alignment_gap`]: HGVS c. and p., cDNA/CDS/protein
+/// positions, codons and amino acids; `ptc` becomes
+/// [`PtcStatus::Indeterminate`] and `predicts_nmd` false. Terms, impact and
+/// exon/intron numbers are kept (`VEP_DIVERGENCES.md` 3.3).
 ///
-/// Past a [`TranscriptModel::utr_numbering_breaks`] bound only the numbering
-/// that bound covers is cleared: cDNA positions, and HGVS c. or n. naming
-/// such a position.
+/// Past a [`TranscriptModel::utr_numbering_breaks`] bound only cDNA positions,
+/// and HGVS c. or n. naming such a position, are cleared.
 pub(super) fn without_gapped_numbering(
     transcript: &TranscriptModel,
     mut result: ConsequenceResult,
@@ -367,24 +362,16 @@ pub(super) struct AltSite<'a> {
 }
 
 /// Apply VEP 116's handling of an alternate allele with unknown bases (an
-/// `N`): it has no peptide, so no HGVS c., HGVS p. or amino acids are written
-/// and every term read from the peptide (missense, synonymous, stop and
-/// start terms, in-frame insertion or deletion, protein-altering) gives way
-/// to `coding_unknown` (`coding_sequence_variant`). Codons and positions
-/// stay (VEP 116 REST on ClinVar N alleles: NM_000518.5 `aCT/aAN`,
-/// NM_003051.4 `Tct/Nct`). VEP's ambiguity-aware start and stop rules for
-/// indels are kept (NM_000546.6, VEP 116):
-///
-/// - an insertion or delins at the start codon is `start_retained_variant`
-///   (`_ins_del_start_altered` returns 0 for ambiguous sequence), with
-///   `frameshift_variant` when the length changes by a non-multiple of 3;
-/// - one overlapping the stop codon is `stop_retained_variant` alone
-///   (`_ins_del_stop_altered_cil`), not a frameshift.
-///
+/// `N`): it has no peptide, so no HGVS c., HGVS p. or amino acids, and every
+/// peptide-derived term gives way to `coding_sequence_variant`
+/// (`coding_unknown`). Codons and positions stay (NM_000518.5 `aCT/aAN`,
+/// NM_003051.4 `Tct/Nct`). VEP's ambiguity-aware indel rules are kept
+/// (NM_000546.6): an insertion or delins at the start codon is
+/// `start_retained_variant` (plus `frameshift_variant` for a non-multiple of
+/// 3), one overlapping the stop codon `stop_retained_variant` alone.
 /// `coding_sequence_variant` is dropped next to `frameshift_variant` or
-/// `start_retained_variant`, which `coding_unknown` excludes. A frameshift's
-/// termination codon is undetermined (the unknown codons may hold a stop);
-/// otherwise there is no termination codon to report.
+/// `start_retained_variant`. A frameshift's termination codon is
+/// undetermined; otherwise there is none to report.
 ///
 /// # Arguments
 ///
@@ -514,13 +501,10 @@ pub(super) fn has_complete_start_codon(transcript: &TranscriptModel, index: &Loc
 /// `true` when the CDS ends in a stop codon on the genome: its length is a
 /// whole number of codons and the last one translates to `*`.
 ///
-/// False for a 3'-incomplete CDS (`cds_end_NF`, whatever its last codon
-/// reads) and for a stop that only polyadenylation completes
-/// (NM_001424184.1, MT-ND4). VEP 116 gives a deletion from such a
-/// partial codon into the 3'UTR no stop-codon term (NM_001424184.1
-/// c.658_*2del: `incomplete_terminal_codon_variant`,
-/// `coding_sequence_variant`, `3_prime_UTR_variant`), and
-/// `VariationEffect.pm::_overlaps_stop_codon` returns 0 for `cds_end_NF`.
+/// False for a 3'-incomplete CDS (`cds_end_NF`) and for a stop that only
+/// polyadenylation completes (NM_001424184.1, MT-ND4); VEP's
+/// `_overlaps_stop_codon` returns 0 for `cds_end_NF` (`VEP_DIVERGENCES.md`
+/// 3.1).
 ///
 /// # Errors
 ///

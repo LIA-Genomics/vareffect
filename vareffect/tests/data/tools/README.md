@@ -75,3 +75,5 @@ python3 -I vep_rows.py < vep_rest/partial_span_cases.tsv   # recorded as vep_res
 python3 -I merge_vep_rows.py /dev/null /dev/null /dev/null vep_rest/vep_rest_wp3.tsv \
   vep_rest/vep_rest_partial_span.tsv > ../source_stores_vep116.tsv
 ```
+
+`vep_rest/vep_rest_selenocysteine.tsv` holds the VEP 116 rows (GPX1, SELENOP and other selenoproteins) behind the selenocysteine tests in `src/consequence/tests.rs` and `VEP_DIVERGENCES.md`.

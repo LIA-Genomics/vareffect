@@ -255,8 +255,7 @@ fn annotate_deletion_core(
 /// Translate a coding sequence whose last codon may be incomplete: complete
 /// codons as usual, a trailing partial codon as `X` unless the complete
 /// codons are a lone stop (`TranscriptVariationAllele.pm::peptide`,
-/// ensembl-variation release/116: VEP 116 c.658_659insGA `X/*`, edge
-/// insGGGTGAG `-/G*X`).
+/// ensembl-variation release/116).
 pub(super) fn translate_with_partial_codon(
     seq: &[u8],
     is_mito: bool,
@@ -290,44 +289,23 @@ pub(super) fn translate_reference_with_partial_codon(
     Ok(aas)
 }
 
-/// Result for a deletion or deletion-insertion that starts in a complete
-/// codon and ends in the incomplete terminal codon of a CDS whose length is
-/// not a whole number of codons, or at the end of such a CDS.
+/// Result for a deletion, deletion-insertion or MNV that starts in a complete
+/// codon and ends in the incomplete terminal codon of a CDS, or at its end.
 ///
 /// Codons and amino acids run from the first changed codon to the CDS end,
-/// the partial codon read as `X`, and HGVS p. is `p.?`: the residue of the
-/// partial codon is unknown. A stop created in a complete codon gets its
-/// PTC as an SNV stop there does; a frameshift without one is
-/// [`super::PtcStatus::Indeterminate`]: the new frame runs past the
-/// annotated sequence. VEP 116 writes strings such as `p.LeuTer47=`
-/// and `p.Leu48LeufsTer?` there (VEP_DIVERGENCES.md).
+/// the partial codon read as `X`. HGVS p. is `p.?` (none for a deletion that
+/// removes the CDS end). A stop created in a complete codon gets its PTC as
+/// an SNV stop there does; a frameshift without one is
+/// [`super::PtcStatus::Indeterminate`].
 ///
-/// A pure deletion (`replacement` empty) shifts or removes complete codons:
-/// `frameshift_variant` (or `inframe_deletion`), as VEP 116 gives for
-/// NM_001424184.1 `c.657_658del` (codons `tcATa/tca`, amino acids `SX/S`).
-/// Removing the CDS end itself leaves no reading frame to shift and no stop
-/// codon to lose: `incomplete_terminal_codon_variant` +
-/// `coding_sequence_variant`. VEP's `frameshift_variant` + `stop_lost` there
-/// (`c.656_659del`) names a stop the transcript does not have
-/// (VEP_DIVERGENCES.md), and has no HGVS p.
-///
-/// A deletion-insertion or MNV follows VEP 116 (ENST00000229384.5,
-/// ENST00000237512.4, `.vareffect-tasks/partial-codon-errors`): a length
-/// change that is not a whole number of codons is `frameshift_variant`
-/// (`c.141_142delinsA`, also at the CDS end). A gain of whole codons whose
-/// alternate peptide starts or ends with the reference one is
-/// `inframe_insertion` (`c.141_142delinsACTGA`, `LX/LLX`); any other
-/// non-zero whole-codon change is `protein_altering_variant`
-/// (`c.138_142delinsAA`), unless the alternate peptide starts with a stop or,
-/// stop included, starts or ends with the reference one (`LX/Y*LX`).
-/// A new stop codon adds `stop_gained` (ENST00000456594.1
-/// `c.710_712delinsAG`, `SX/*`), an MNV that changes a complete codon's
-/// residue `missense_variant` (ENST00000568666.5 `c.1209_1210delinsGT`,
-/// `FX/LX`). `coding_sequence_variant` joins every result but a frameshift
-/// or `protein_altering_variant` (VEP's `coding_unknown`: the reference
-/// peptide ends in `X`), so an MNV is `coding_sequence_variant` and
-/// `c.140_142delinsAAGGGA` (`LX/*GX`) `stop_gained` +
-/// `coding_sequence_variant`.
+/// Terms follow VEP 116 (`VEP_DIVERGENCES.md` 3.1): a pure deletion is
+/// `frameshift_variant` or `inframe_deletion`, or, removing the CDS end,
+/// `incomplete_terminal_codon_variant` + `coding_sequence_variant`. A
+/// deletion-insertion or MNV gets VEP's frameshift, `inframe_insertion`
+/// (the alternate peptide starts or ends with the reference one),
+/// `protein_altering_variant`, `stop_gained` and `missense_variant`
+/// predicates, with `coding_sequence_variant` beside every result but a
+/// frameshift or `protein_altering_variant` (VEP's `coding_unknown`).
 ///
 /// # Arguments
 ///
@@ -505,15 +483,12 @@ pub(super) fn residue_changed(ref_aas: &[u8], alt_aas: &[u8]) -> bool {
 /// Result for a deletion or insertion that starts in the incomplete terminal
 /// codon of a CDS whose length is not a whole number of codons.
 ///
-/// VEP's `frameshift` and inframe predicates do not apply to a partial codon
-/// (`VariationEffect.pm::partial_codon`). VEP 116: removing the whole partial
-/// codon is `protein_altering_variant` + `incomplete_terminal_codon_variant`
-/// (ENST00000379099.3 `c.923del`, NM_001424184.1 `c.658_659del`: codons
-/// `TA/-`, amino acids `X/-`); removing part of it, or inserting without
-/// completing a codon, is `incomplete_terminal_codon_variant` +
-/// `coding_sequence_variant` (`c.658del`: `Ta/a`, `X`); an insertion that
-/// completes a stop codon adds `stop_gained` (`c.658_659insG`: `ta/tGa`,
-/// `X/*`). HGVS p. is `p.?`: the residue is unknown.
+/// VEP's `frameshift` and inframe predicates do not apply there
+/// (`VariationEffect.pm::partial_codon`). Removing the whole partial codon is
+/// `protein_altering_variant` + `incomplete_terminal_codon_variant`; anything
+/// else is `incomplete_terminal_codon_variant` + `coding_sequence_variant`,
+/// plus `stop_gained` when an insertion completes a stop. HGVS p. is `p.?`.
+/// Examples: `VEP_DIVERGENCES.md` 3.1.
 #[allow(clippy::too_many_arguments)]
 fn partial_terminal_codon_indel_result(
     chrom: &str,
@@ -666,19 +641,12 @@ pub(super) fn partial_codon_insertion_site(
 }
 
 /// Result for an insertion between the last complete codon and the
-/// incomplete terminal codon.
-///
-/// VEP 116 translates the inserted bases on their own
-/// ([`translate_with_partial_codon`]). Every such insertion is `inframe_insertion` +
-/// `incomplete_terminal_codon_variant`; `stop_gained` is added when the
-/// translation has a stop and `coding_sequence_variant` when it has an `X`
-/// (NM_001424184.1 c.657_658insG `-/X`, insGGG `-/G`, insTGA and insTGAG
-/// `-/*` and insGGGTGAG `-/G*X` with `stop_gained`; ENST00000518351.2 the
-/// same on the minus strand).
-/// Codons are `-/<inserted>` and the positions are the two flanking bases.
-/// A stop is a termination codon at the original terminus, in the last
-/// exon, and gets HGVS p. `p.?` as on the rest of the partial codon (VEP
-/// writes `p.Ter220=` or nothing); without a stop there is no HGVS p.
+/// incomplete terminal codon: `inframe_insertion` +
+/// `incomplete_terminal_codon_variant`, the inserted bases translated on
+/// their own ([`translate_with_partial_codon`]), with `coding_sequence_variant`
+/// for an `X` and `stop_gained` for a stop. Codons are `-/<inserted>`, the
+/// positions the two flanking bases. A stop gets HGVS p. `p.?`; without one
+/// there is no HGVS p. Examples: `VEP_DIVERGENCES.md` 3.1.
 fn partial_codon_edge_insertion_result(
     insert_before: u32,
     inserted_bases: &[u8],

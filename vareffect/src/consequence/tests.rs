@@ -3,7 +3,7 @@ use super::helpers::trim_alleles;
 use super::*;
 use crate::fasta::{FastaReader, write_genome_binary};
 use crate::locate::{LocateIndex, VariantLocation, locate_variant};
-use crate::test_fixtures::{minus_strand_coding, noncoding_2_exon, plus_strand_coding};
+use crate::test_fixtures::{minus_strand_coding, model, noncoding_2_exon, plus_strand_coding};
 use crate::types::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
 use tempfile::TempDir;
 
@@ -250,77 +250,38 @@ fn write_test_fasta() -> (TempDir, FastaReader) {
 /// Mitochondrial plus-strand coding transcript.
 /// CDS [100, 400) = 300 bp = 100 codons.
 fn mito_coding() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_TEST_MITO.1".into(),
-        protein_accession: Some("NP_TEST_MITO.1".into()),
-        gene_symbol: "TESTMITO".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chrM".into(),
-        strand: Strand::Plus,
-        tx_start: 0,
-        tx_end: 1000,
-        cds_genomic_start: Some(100),
-        cds_genomic_end: Some(400),
-        exons: vec![Exon {
-            exon_number: 1,
-            genomic_start: 0,
-            genomic_end: 1000,
-        }],
-        cds_segments: vec![CdsSegment {
-            exon_index: 0,
-            genomic_start: 100,
-            genomic_end: 400,
-            phase: 0,
-        }],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 1,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NM_TEST_MITO.1",
+        "TESTMITO",
+        "chrM",
+        Strand::Plus,
+        &[(0, 1000)],
+        &[(100, 400, 0)],
+    )
+    .with_protein_accession(Some("NP_TEST_MITO.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
 }
 
 /// Single-exon plus-strand coding transcript on chr3.
 /// CDS [600, 1400) = 800 bp.
 fn single_exon_coding() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_TEST_SE.1".into(),
-        protein_accession: Some("NP_TEST_SE.1".into()),
-        gene_symbol: "TESTSE".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr3".into(),
-        strand: Strand::Plus,
-        tx_start: 0,
-        tx_end: 2000,
-        cds_genomic_start: Some(600),
-        cds_genomic_end: Some(1400),
-        exons: vec![Exon {
-            exon_number: 1,
-            genomic_start: 0,
-            genomic_end: 2000,
-        }],
-        cds_segments: vec![CdsSegment {
-            exon_index: 0,
-            genomic_start: 600,
-            genomic_end: 1400,
-            phase: 0,
-        }],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 1,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NM_TEST_SE.1",
+        "TESTSE",
+        "chr3",
+        Strand::Plus,
+        &[(0, 2000)],
+        &[(600, 1400, 0)],
+    )
+    .with_protein_accession(Some("NP_TEST_SE.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
+}
+
+/// `true` when `result` carries `term`.
+fn has(result: &ConsequenceResult, term: Consequence) -> bool {
+    result.consequences.contains(&term)
 }
 
 fn build_index(tx: &TranscriptModel) -> LocateIndex {
@@ -336,7 +297,7 @@ fn missense_variant() {
     let idx = build_index(&tx);
     // Position 1503: CDS offset 3, codon 2 pos 0. CGT->TGT = Arg->Cys.
     let result = annotate_snv("chr1", 1503, b'C', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::MissenseVariant));
+    assert!(has(&result, Consequence::MissenseVariant));
     assert_eq!(result.impact, Impact::Moderate);
     assert_eq!(result.protein_start, Some(2));
     assert_eq!(result.amino_acids.as_deref(), Some("R/C"));
@@ -351,11 +312,7 @@ fn synonymous_variant() {
     let idx = build_index(&tx);
     // Position 1505: CDS offset 5, codon 2 pos 2. CGT->CGA = Arg->Arg.
     let result = annotate_snv("chr1", 1505, b'T', b'A', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SynonymousVariant)
-    );
+    assert!(has(&result, Consequence::SynonymousVariant));
     assert_eq!(result.impact, Impact::Low);
     assert_eq!(result.amino_acids.as_deref(), Some("R"));
     assert_eq!(result.codons.as_deref(), Some("cgT/cgA"));
@@ -368,46 +325,24 @@ fn stop_gained() {
     let idx = build_index(&tx);
     // CGA at offset 3-5 (genomic 103-105). CGA->TGA: C->T at 103.
     let result = annotate_snv("chr1", 103, b'C', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::StopGained));
+    assert!(has(&result, Consequence::StopGained));
     assert_eq!(result.impact, Impact::High);
     assert_eq!(result.amino_acids.as_deref(), Some("R/*"));
 }
 
 /// Tiny transcript + FASTA for stop_gained testing. CDS has CGA codon.
 fn stop_gained_transcript() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_STOP_GAINED.1".into(),
-        protein_accession: Some("NP_STOP_GAINED.1".into()),
-        gene_symbol: "TESTSTOP".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr1".into(),
-        strand: Strand::Plus,
-        tx_start: 50,
-        tx_end: 200,
-        cds_genomic_start: Some(100),
-        cds_genomic_end: Some(112),
-        exons: vec![Exon {
-            exon_number: 1,
-            genomic_start: 50,
-            genomic_end: 200,
-        }],
-        cds_segments: vec![CdsSegment {
-            exon_index: 0,
-            genomic_start: 100,
-            genomic_end: 112,
-            phase: 0,
-        }],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 1,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NM_STOP_GAINED.1",
+        "TESTSTOP",
+        "chr1",
+        Strand::Plus,
+        &[(50, 200)],
+        &[(100, 112, 0)],
+    )
+    .with_protein_accession(Some("NP_STOP_GAINED.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
 }
 
 fn write_stop_gained_fasta() -> (TempDir, FastaReader) {
@@ -442,7 +377,7 @@ fn stop_lost() {
     // Stop codon TAA at CDS offsets 1497-1499, genomic 4497-4499.
     // T->C at offset 1497: TAA->CAA = Gln. StopLost.
     let result = annotate_snv("chr1", 4497, b'T', b'C', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::StopLost));
+    assert!(has(&result, Consequence::StopLost));
     assert_eq!(result.impact, Impact::High);
     assert_eq!(result.amino_acids.as_deref(), Some("*/Q"));
     assert_eq!(result.protein_start, Some(500));
@@ -455,7 +390,7 @@ fn start_lost() {
     let idx = build_index(&tx);
     // Start codon ATG at CDS 0-2, genomic 1500-1502. A->C: ATG->CTG = Leu.
     let result = annotate_snv("chr1", 1500, b'A', b'C', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::StartLost));
+    assert!(has(&result, Consequence::StartLost));
     assert_eq!(result.impact, Impact::High);
     assert_eq!(result.protein_start, Some(1));
 }
@@ -467,11 +402,7 @@ fn stop_retained_variant() {
     let idx = build_index(&tx);
     // Stop TAA at offsets 1497-1499. A->G at offset 1499: TAA->TAG = stop.
     let result = annotate_snv("chr1", 4499, b'A', b'G', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::StopRetainedVariant)
-    );
+    assert!(has(&result, Consequence::StopRetainedVariant));
     assert_eq!(result.impact, Impact::Low);
 }
 
@@ -482,11 +413,7 @@ fn splice_donor_maps_correctly() {
     let idx = build_index(&tx);
     // Intron 0 starts at genomic 2000 (after exon 0). Donor +1 = 2000.
     let result = annotate_snv("chr1", 2000, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-    );
+    assert!(has(&result, Consequence::SpliceDonorVariant));
     assert_eq!(result.impact, Impact::High);
     assert!(result.intron.is_some());
 }
@@ -498,11 +425,7 @@ fn splice_acceptor_maps_correctly() {
     let idx = build_index(&tx);
     // Intron 0 ends before exon 1 at 3000. Acceptor -1 = 2999.
     let result = annotate_snv("chr1", 2999, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceAcceptorVariant)
-    );
+    assert!(has(&result, Consequence::SpliceAcceptorVariant));
     assert_eq!(result.impact, Impact::High);
 }
 
@@ -512,7 +435,7 @@ fn intron_variant_maps_correctly() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_snv("chr1", 2500, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::IntronVariant));
+    assert!(has(&result, Consequence::IntronVariant));
     assert_eq!(result.impact, Impact::Modifier);
     assert!(result.intron.is_some());
     assert!(result.cds_position.is_none());
@@ -525,11 +448,7 @@ fn five_prime_utr_maps_correctly() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_snv("chr1", 1200, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FivePrimeUtrVariant)
-    );
+    assert!(has(&result, Consequence::FivePrimeUtrVariant));
     assert_eq!(result.impact, Impact::Modifier);
     assert!(result.exon.is_some());
 }
@@ -540,11 +459,7 @@ fn three_prime_utr_maps_correctly() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_snv("chr1", 4600, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::ThreePrimeUtrVariant)
-    );
+    assert!(has(&result, Consequence::ThreePrimeUtrVariant));
     assert_eq!(result.impact, Impact::Modifier);
 }
 
@@ -556,16 +471,8 @@ fn compound_missense_splice_region() {
     // Exon 1 starts at 3000. First 3 bases are exonic splice region.
     // CDS offset 500 at pos 3000: codon 167, position 2. CGT->CGA = Arg (synonymous + splice_region).
     let result = annotate_snv("chr1", 3000, b'T', b'A', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SynonymousVariant)
-    );
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceRegionVariant)
-    );
+    assert!(has(&result, Consequence::SynonymousVariant));
+    assert!(has(&result, Consequence::SpliceRegionVariant));
     assert_eq!(result.impact, Impact::Low);
 }
 
@@ -575,11 +482,7 @@ fn upstream_gene_variant() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_snv("chr1", 500, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::UpstreamGeneVariant)
-    );
+    assert!(has(&result, Consequence::UpstreamGeneVariant));
     assert_eq!(result.impact, Impact::Modifier);
 }
 
@@ -589,11 +492,7 @@ fn downstream_gene_variant() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_snv("chr1", 5500, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::DownstreamGeneVariant)
-    );
+    assert!(has(&result, Consequence::DownstreamGeneVariant));
     assert_eq!(result.impact, Impact::Modifier);
 }
 
@@ -603,11 +502,7 @@ fn non_coding_exon_variant() {
     let tx = noncoding_2_exon();
     let idx = build_index(&tx);
     let result = annotate_snv("chr2", 200, b'A', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::NonCodingTranscriptExonVariant)
-    );
+    assert!(has(&result, Consequence::NonCodingTranscriptExonVariant));
     assert_eq!(result.impact, Impact::Modifier);
 }
 
@@ -619,7 +514,7 @@ fn minus_strand_complement() {
     // CDS offset 3 = codon 2, pos 0, at genomic 19496.
     // VCF ref = G (plus-strand), alt = A. Coding-strand: C->T. CGT->TGT = R->C.
     let result = annotate_snv("chr17", 19496, b'G', b'A', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::MissenseVariant));
+    assert!(has(&result, Consequence::MissenseVariant));
     assert_eq!(result.amino_acids.as_deref(), Some("R/C"));
     assert_eq!(result.protein_start, Some(2));
 }
@@ -632,7 +527,7 @@ fn codon_spanning_exon_boundary() {
     // Codon at CDS offsets 498-500 spans segments 0 and 1.
     // Positions 1998=C, 1999=G, 3000=T. Change G->A at 1999: CGT->CAT = R->H.
     let result = annotate_snv("chr1", 1999, b'G', b'A', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::MissenseVariant));
+    assert!(has(&result, Consequence::MissenseVariant));
     assert_eq!(result.amino_acids.as_deref(), Some("R/H"));
     assert_eq!(result.codons.as_deref(), Some("cGt/cAt"));
     assert_eq!(result.cds_position, Some(500));
@@ -653,11 +548,11 @@ fn mitochondrial_tga_is_trp() {
     }
     // T->A at 103 (codon pos 0): TGA->AGA. On mito AGA = stop.
     let result = annotate_snv("chrM", 103, b'T', b'A', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::StopGained));
+    assert!(has(&result, Consequence::StopGained));
 
     // TGA->TCA: G->C at 104. TCA = Ser. TGA(Trp)->TCA(Ser) = missense.
     let result2 = annotate_snv("chrM", 104, b'G', b'C', &tx, &idx, &fasta).unwrap();
-    assert!(result2.consequences.contains(&Consequence::MissenseVariant));
+    assert!(has(&result2, Consequence::MissenseVariant));
     assert_eq!(result2.amino_acids.as_deref(), Some("W/S"));
 }
 
@@ -761,11 +656,7 @@ fn frameshift_1bp_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1503, 1504, b"C", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert_eq!(result.impact, Impact::High);
     assert_eq!(result.protein_start, Some(2));
 }
@@ -776,11 +667,7 @@ fn frameshift_2bp_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1503, 1505, b"CG", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert_eq!(result.impact, Impact::High);
 }
 
@@ -790,7 +677,7 @@ fn inframe_3bp_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1503, 1506, b"CGT", &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::InframeDeletion));
+    assert!(has(&result, Consequence::InframeDeletion));
     assert_eq!(result.impact, Impact::Moderate);
     assert!(result.amino_acids.is_some());
 }
@@ -801,7 +688,7 @@ fn inframe_6bp_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1503, 1509, b"CGTCGT", &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::InframeDeletion));
+    assert!(has(&result, Consequence::InframeDeletion));
     assert_eq!(result.impact, Impact::Moderate);
 }
 
@@ -813,11 +700,7 @@ fn frameshift_1bp_insertion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_insertion("chr1", 1503, b"A", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert_eq!(result.impact, Impact::High);
 }
 
@@ -827,11 +710,7 @@ fn frameshift_2bp_insertion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_insertion("chr1", 1503, b"AT", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert_eq!(result.impact, Impact::High);
 }
 
@@ -841,7 +720,7 @@ fn inframe_3bp_insertion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_insertion("chr1", 1503, b"GGG", &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::InframeInsertion));
+    assert!(has(&result, Consequence::InframeInsertion));
     assert_eq!(result.impact, Impact::Moderate);
     assert!(result.amino_acids.is_some());
 }
@@ -872,7 +751,7 @@ fn intronic_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 2500, 2503, b"AAA", &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::IntronVariant));
+    assert!(has(&result, Consequence::IntronVariant));
     assert_eq!(result.impact, Impact::Modifier);
 }
 
@@ -882,11 +761,7 @@ fn utr5_deletion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1200, 1203, b"AAA", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FivePrimeUtrVariant)
-    );
+    assert!(has(&result, Consequence::FivePrimeUtrVariant));
 }
 
 #[test]
@@ -895,11 +770,7 @@ fn utr3_insertion() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_insertion("chr1", 4600, b"GGG", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::ThreePrimeUtrVariant)
-    );
+    assert!(has(&result, Consequence::ThreePrimeUtrVariant));
 }
 
 // -- Splice overlap tests ---------------------------------------------------
@@ -912,12 +783,8 @@ fn deletion_overlaps_splice_donor() {
     // Delete [1998, 2002) -- spans exon/intron boundary, overlaps donor
     let result = annotate_deletion("chr1", 1998, 2002, b"AAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-            || result
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant),
+        has(&result, Consequence::SpliceDonorVariant)
+            || has(&result, Consequence::SpliceAcceptorVariant),
         "expected splice consequence, got {:?}",
         result.consequences,
     );
@@ -932,12 +799,8 @@ fn deletion_overlaps_splice_acceptor() {
     // Delete [2998, 3002) -- spans intron/exon boundary, overlaps acceptor
     let result = annotate_deletion("chr1", 2998, 3002, b"AAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-            || result
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant),
+        has(&result, Consequence::SpliceDonorVariant)
+            || has(&result, Consequence::SpliceAcceptorVariant),
         "expected splice consequence, got {:?}",
         result.consequences,
     );
@@ -973,14 +836,12 @@ fn minus_strand_frameshift() {
     // suppressed FrameshiftVariant when StartLost fired.
     let result = annotate_deletion("chr17", 19498, 19499, b"A", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StartLost),
+        has(&result, Consequence::StartLost),
         "expected start_lost (1bp del at codon 1 destroys Met), got {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result, Consequence::FrameshiftVariant),
         "expected frameshift_variant alongside start_lost (1bp del is frameshifting), got {:?}",
         result.consequences,
     );
@@ -989,9 +850,7 @@ fn minus_strand_frameshift() {
     // Frameshift well inside CDS (codon 4)
     let result2 = annotate_deletion("chr17", 19490, 19491, b"A", &tx, &idx, &fasta).unwrap();
     assert!(
-        result2
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result2, Consequence::FrameshiftVariant),
         "expected frameshift_variant for deletion at codon 4, got {:?}",
         result2.consequences,
     );
@@ -1005,7 +864,7 @@ fn minus_strand_inframe_deletion() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr17", 19490, 19493, b"AAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::InframeDeletion),
+        has(&result, Consequence::InframeDeletion),
         "expected inframe_deletion, got {:?}",
         result.consequences,
     );
@@ -1021,7 +880,7 @@ fn deletion_of_start_codon() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1500, 1503, b"ATG", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StartLost),
+        has(&result, Consequence::StartLost),
         "expected start_lost, got {:?}",
         result.consequences,
     );
@@ -1043,21 +902,16 @@ fn plus_strand_frameshift_start_lost() {
     // calls retained; see the next assertion.)
     let retained = annotate_deletion("chr1", 1500, 1501, b"A", &tx, &idx, &fasta).unwrap();
     assert!(
-        retained
-            .consequences
-            .contains(&Consequence::StartRetainedVariant)
-            && retained.consequences.contains(&Consequence::StartLost)
+        has(&retained, Consequence::StartRetainedVariant) && has(&retained, Consequence::StartLost)
     );
     let result = annotate_deletion("chr1", 1501, 1502, b"T", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StartLost),
+        has(&result, Consequence::StartLost),
         "expected start_lost, got {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result, Consequence::FrameshiftVariant),
         "expected frameshift_variant alongside start_lost, got {:?}",
         result.consequences,
     );
@@ -1074,7 +928,7 @@ fn deletion_of_stop_codon() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 4497, 4500, b"TAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StopLost),
+        has(&result, Consequence::StopLost),
         "expected stop_lost, got {:?}",
         result.consequences,
     );
@@ -1099,21 +953,17 @@ fn plus_strand_deletion_spans_stop_into_3utr_frameshift_length() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 4498, 4508, b"AAAAAAAAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StopLost),
+        has(&result, Consequence::StopLost),
         "expected stop_lost, got {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::ThreePrimeUtrVariant),
+        has(&result, Consequence::ThreePrimeUtrVariant),
         "expected 3_prime_UTR_variant, got {:?}",
         result.consequences,
     );
     assert!(
-        !result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        !has(&result, Consequence::FrameshiftVariant),
         "must NOT emit frameshift_variant (VEP suppresses it via undefined cds_end), got {:?}",
         result.consequences,
     );
@@ -1134,14 +984,12 @@ fn plus_strand_deletion_spans_stop_into_3utr_inframe_length() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 4497, 4506, b"AAAAAAAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StopLost),
+        has(&result, Consequence::StopLost),
         "expected stop_lost, got {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::ThreePrimeUtrVariant),
+        has(&result, Consequence::ThreePrimeUtrVariant),
         "expected 3_prime_UTR_variant, got {:?}",
         result.consequences,
     );
@@ -1160,21 +1008,17 @@ fn minus_strand_deletion_spans_stop_into_3utr_frameshift_length() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr17", 10_995, 11_002, b"AAAAAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StopLost),
+        has(&result, Consequence::StopLost),
         "expected stop_lost, got {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::ThreePrimeUtrVariant),
+        has(&result, Consequence::ThreePrimeUtrVariant),
         "expected 3_prime_UTR_variant, got {:?}",
         result.consequences,
     );
     assert!(
-        !result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        !has(&result, Consequence::FrameshiftVariant),
         "must NOT emit frameshift_variant, got {:?}",
         result.consequences,
     );
@@ -1187,11 +1031,7 @@ fn non_coding_transcript_deletion() {
     let tx = noncoding_2_exon();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr2", 150, 153, b"AAA", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::NonCodingTranscriptExonVariant)
-    );
+    assert!(has(&result, Consequence::NonCodingTranscriptExonVariant));
 }
 
 #[test]
@@ -1201,9 +1041,7 @@ fn exon_intron_boundary_deferred() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1999, 2002, b"AAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant),
+        has(&result, Consequence::SpliceDonorVariant),
         "expected splice_donor_variant, got {:?}",
         result.consequences,
     );
@@ -1219,9 +1057,7 @@ fn boundary_del_splice_donor_priority() {
     // Delete [1998, 2003): 2 CDS + 3 intronic. Donor +1/+2 at 2000-2001.
     let result = annotate_deletion("chr1", 1998, 2003, b"AAAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant),
+        has(&result, Consequence::SpliceDonorVariant),
         "splice donor should win over frame: {:?}",
         result.consequences,
     );
@@ -1236,10 +1072,8 @@ fn boundary_del_cds_utr() {
     let idx = build_index(&tx);
     // Delete [4498, 4502): 2 CDS bases (last 2 of stop TAA) + 2 UTR bases.
     let result = annotate_deletion("chr1", 4498, 4502, b"AAAA", &tx, &idx, &fasta).unwrap();
-    let has_frame_or_stop = result
-        .consequences
-        .contains(&Consequence::FrameshiftVariant)
-        || result.consequences.contains(&Consequence::StopLost);
+    let has_frame_or_stop =
+        has(&result, Consequence::FrameshiftVariant) || has(&result, Consequence::StopLost);
     assert!(
         has_frame_or_stop,
         "expected frameshift or stop_lost for CDS/UTR boundary del: {:?}",
@@ -1275,11 +1109,7 @@ fn insertion_at_exon_intron_junction() {
     // The acceptor side of the same junction is the same mRNA insertion.
     let acceptor = annotate_insertion("chr1", 3000, b"A", &tx, &idx, &fasta).unwrap();
     assert_eq!(acceptor.cds_position, Some(500));
-    assert!(
-        acceptor
-            .consequences
-            .contains(&Consequence::SpliceRegionVariant)
-    );
+    assert!(has(&acceptor, Consequence::SpliceRegionVariant));
 }
 
 #[test]
@@ -1312,12 +1142,8 @@ fn deletion_at_a_donor_site_keeps_its_terms() {
     let tx = plus_strand_coding();
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1_999, 2_001, b"AA", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-    );
-    assert!(result.consequences.contains(&Consequence::IntronVariant));
+    assert!(has(&result, Consequence::SpliceDonorVariant));
+    assert!(has(&result, Consequence::IntronVariant));
 }
 
 #[test]
@@ -1328,12 +1154,8 @@ fn multi_exon_del_full_exon() {
     // Delete [2500, 3600): spans intron + exon 1 + intron.
     let result = annotate_deletion("chr1", 2500, 3600, b"A", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant)
-            || result
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant),
+        has(&result, Consequence::SpliceDonorVariant)
+            || has(&result, Consequence::SpliceAcceptorVariant),
         "multi-exon del should have splice: {:?}",
         result.consequences,
     );
@@ -1347,9 +1169,7 @@ fn delins_cds_frameshift() {
     // Delete 4bp, insert 2bp at CDS offset 3. Net -2 -> frameshift.
     let result = annotate_complex_delins("chr1", 1503, b"CGTC", b"AT", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result, Consequence::FrameshiftVariant),
         "delins -2 should be frameshift: {:?}",
         result.consequences,
     );
@@ -1364,9 +1184,7 @@ fn delins_cds_inframe() {
     let result =
         annotate_complex_delins("chr1", 1503, b"CGT", b"AAAAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::ProteinAlteringVariant),
+        has(&result, Consequence::ProteinAlteringVariant),
         "inframe delins should be protein_altering: {:?}",
         result.consequences,
     );
@@ -1380,9 +1198,7 @@ fn delins_splice_overlap() {
     // Delete [1999, 2002), replace with 1bp. Overlaps donor +1/+2.
     let result = annotate_complex_delins("chr1", 1999, b"AAA", b"T", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant),
+        has(&result, Consequence::SpliceDonorVariant),
         "delins at donor: {:?}",
         result.consequences,
     );
@@ -1396,8 +1212,7 @@ fn mnv_single_codon_missense() {
     // 2-base MNV at CDS offset 3-4 (codon 2). REF=CG, ALT=TA.
     let result = annotate_mnv("chr1", 1503, b"CG", b"TA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::MissenseVariant)
-            || result.consequences.contains(&Consequence::StopGained),
+        has(&result, Consequence::MissenseVariant) || has(&result, Consequence::StopGained),
         "MNV in single codon: {:?}",
         result.consequences,
     );
@@ -1410,11 +1225,9 @@ fn mnv_two_codons() {
     let idx = build_index(&tx);
     // CDS offset 5-6 spans codon boundary between codon 1 (3-5) and codon 2 (6-8).
     let result = annotate_mnv("chr1", 1505, b"TC", b"AA", &tx, &idx, &fasta).unwrap();
-    let has_coding = result.consequences.contains(&Consequence::MissenseVariant)
-        || result.consequences.contains(&Consequence::StopGained)
-        || result
-            .consequences
-            .contains(&Consequence::SynonymousVariant);
+    let has_coding = has(&result, Consequence::MissenseVariant)
+        || has(&result, Consequence::StopGained)
+        || has(&result, Consequence::SynonymousVariant);
     assert!(
         has_coding,
         "MNV spanning codons should have coding consequence: {:?}",
@@ -1430,7 +1243,7 @@ fn mnv_creates_stop() {
     // CGT at 1503-1505 -> TAA (stop). 3-base MNV.
     let result = annotate_mnv("chr1", 1503, b"CGT", b"TAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result.consequences.contains(&Consequence::StopGained),
+        has(&result, Consequence::StopGained),
         "MNV creating stop: {:?}",
         result.consequences,
     );
@@ -1444,9 +1257,7 @@ fn mnv_synonymous() {
     // CGT -> AGA: all 3 bases change, both Arg. Synonymous 3-base MNV.
     let result = annotate_mnv("chr1", 1503, b"CGT", b"AGA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SynonymousVariant),
+        has(&result, Consequence::SynonymousVariant),
         "CGT->AGA (Arg->Arg) should be synonymous: {:?}",
         result.consequences,
     );
@@ -1460,9 +1271,7 @@ fn minus_strand_boundary_del() {
     // Delete [17998, 18002): 2 intronic donor bases + 2 exonic CDS bases.
     let result = annotate_deletion("chr17", 17998, 18002, b"AAAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant),
+        has(&result, Consequence::SpliceDonorVariant),
         "minus strand boundary del at donor: {:?}",
         result.consequences,
     );
@@ -1475,9 +1284,9 @@ fn minus_strand_mnv() {
     let idx = build_index(&tx);
     // 2-base MNV at 19498-19499 (CDS offset 0-1, codon 0)
     let result = annotate_mnv("chr17", 19498, b"AT", b"CC", &tx, &idx, &fasta).unwrap();
-    let has_coding = result.consequences.contains(&Consequence::MissenseVariant)
-        || result.consequences.contains(&Consequence::StartLost)
-        || result.consequences.contains(&Consequence::StopGained);
+    let has_coding = has(&result, Consequence::MissenseVariant)
+        || has(&result, Consequence::StartLost)
+        || has(&result, Consequence::StopGained);
     assert!(
         has_coding,
         "minus strand MNV should have coding consequence: {:?}",
@@ -1497,9 +1306,7 @@ fn incomplete_terminal_codon() {
     // SNV at the last CDS base (in the incomplete terminal codon)
     let result = annotate_snv("chr3", 1401, b'A', b'T', &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::IncompleteTerminalCodonVariant),
+        has(&result, Consequence::IncompleteTerminalCodonVariant),
         "variant in incomplete terminal codon: {:?}",
         result.consequences,
     );
@@ -1552,17 +1359,11 @@ fn mnv_into_the_partial_codon_is_coding_sequence_variant() {
         .collect();
     let result = annotate_mnv("chr3", 1400, &ref_bases, &alt, &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::CodingSequenceVariant),
+        has(&result, Consequence::CodingSequenceVariant),
         "{:?}",
         result.consequences,
     );
-    assert!(
-        !result
-            .consequences
-            .contains(&Consequence::IncompleteTerminalCodonVariant)
-    );
+    assert!(!has(&result, Consequence::IncompleteTerminalCodonVariant));
     assert_eq!(result.hgvs_p.as_deref(), Some("p.?"));
     assert_eq!(result.protein_start, Some(267));
     assert_eq!(result.protein_end, Some(268));
@@ -1579,9 +1380,7 @@ fn delins_into_the_partial_codon_is_frameshift() {
     let alt = if ref_bases[0] == b'A' { b"C" } else { b"A" };
     let result = annotate_complex_delins("chr3", 1400, &ref_bases, alt, &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result, Consequence::FrameshiftVariant),
         "{:?}",
         result.consequences,
     );
@@ -1647,16 +1446,12 @@ fn splice_donor_boundary_regression() {
     let idx = build_index(&tx);
     let result = annotate_deletion("chr1", 1999, 2002, b"AAA", &tx, &idx, &fasta).unwrap();
     assert!(
-        !result
-            .consequences
-            .contains(&Consequence::ProteinAlteringVariant),
+        !has(&result, Consequence::ProteinAlteringVariant),
         "should not return old placeholder: {:?}",
         result.consequences,
     );
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::SpliceDonorVariant),
+        has(&result, Consequence::SpliceDonorVariant),
         "should be splice_donor_variant: {:?}",
         result.consequences,
     );
@@ -1741,7 +1536,7 @@ fn stop_gained_single_exon_no_nmd() {
     let idx = build_index(&tx);
     // CGA->TGA: stop gained in a single-exon transcript.
     let result = annotate_snv("chr1", 103, b'C', b'T', &tx, &idx, &fasta).unwrap();
-    assert!(result.consequences.contains(&Consequence::StopGained));
+    assert!(has(&result, Consequence::StopGained));
     assert!(!result.predicts_nmd);
 }
 
@@ -1752,11 +1547,7 @@ fn frameshift_multi_exon_nmd() {
     let idx = build_index(&tx);
     // 1bp deletion at early CDS position: CDS offset 3, 3 exons -> NMD.
     let result = annotate_deletion("chr1", 1503, 1504, b"C", &tx, &idx, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert!(result.predicts_nmd);
 }
 
@@ -1770,14 +1561,12 @@ fn frameshift_immediate_stop_still_gets_nmd() {
     // still be predicted because the variant is far from the last junction.
     let result = annotate_deletion("chr1", 1503, 1505, b"CG", &tx, &idx, &fasta).unwrap();
     assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant),
+        has(&result, Consequence::FrameshiftVariant),
         "expected FrameshiftVariant, got: {:?}",
         result.consequences,
     );
     assert!(
-        !result.consequences.contains(&Consequence::StopGained),
+        !has(&result, Consequence::StopGained),
         "should not contain StopGained for a frameshift: {:?}",
         result.consequences,
     );
@@ -1799,11 +1588,7 @@ fn ptc_frameshift_escapes_nmd_while_variant_site_predicts_it() {
     // frame -> first stop at CDS 1150, i.e. alt residue 384.
     let result = annotate_deletion("chr4", 1600, 1601, b"G", &tx, &idx, &fasta).unwrap();
 
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert!(
         result.predicts_nmd,
         "the variant site is 900 nt upstream of the junction, so the \
@@ -1940,13 +1725,13 @@ fn inframe_deletion_across_the_terminator_is_not_stop_gained() {
     let result = annotate_deletion("chr4", 4495, 4498, b"ACT", &tx, &idx, &fasta).unwrap();
 
     assert!(
-        !result.consequences.contains(&Consequence::StopGained),
+        !has(&result, Consequence::StopGained),
         "the reference window still holds the normal terminator, so no \
          premature stop was gained; got {:?}",
         result.consequences,
     );
     assert!(
-        result.consequences.contains(&Consequence::InframeDeletion),
+        has(&result, Consequence::InframeDeletion),
         "expected the inframe-deletion term to stand alone, got {:?}",
         result.consequences,
     );
@@ -1989,21 +1774,17 @@ fn utr_spanning_deletion_into_the_start_codon_never_frameshifts() {
         ("4 CDS bases", four_cds_bases),
     ] {
         assert!(
-            result.consequences.contains(&Consequence::StartLost),
+            has(&result, Consequence::StartLost),
             "{label}: the deletion reaches the initiator codon, got {:?}",
             result.consequences,
         );
         assert!(
-            result
-                .consequences
-                .contains(&Consequence::FivePrimeUtrVariant),
+            has(&result, Consequence::FivePrimeUtrVariant),
             "{label}: the footprint extends into the 5'UTR, got {:?}",
             result.consequences,
         );
         assert!(
-            !result
-                .consequences
-                .contains(&Consequence::FrameshiftVariant),
+            !has(&result, Consequence::FrameshiftVariant),
             "{label}: VEP withholds the frameshift term on this geometry, got {:?}",
             result.consequences,
         );
@@ -2114,25 +1895,17 @@ mod incomplete_cds {
         let (tx, index) = padded_plus(2);
 
         let deletion = annotate_deletion("chr1", 1500, 1501, b"A", &tx, &index, &fasta).unwrap();
-        assert!(
-            deletion
-                .consequences
-                .contains(&Consequence::FrameshiftVariant)
-        );
-        assert!(!deletion.consequences.contains(&Consequence::StartLost));
+        assert!(has(&deletion, Consequence::FrameshiftVariant));
+        assert!(!has(&deletion, Consequence::StartLost));
         assert_ne!(deletion.hgvs_p.as_deref(), Some("p.Met1?"));
 
         let insertion = annotate_insertion("chr1", 1501, b"C", &tx, &index, &fasta).unwrap();
-        assert!(
-            insertion
-                .consequences
-                .contains(&Consequence::FrameshiftVariant)
-        );
-        assert!(!insertion.consequences.contains(&Consequence::StartLost));
+        assert!(has(&insertion, Consequence::FrameshiftVariant));
+        assert!(!has(&insertion, Consequence::StartLost));
 
         let inframe = annotate_deletion("chr1", 1500, 1503, b"ATG", &tx, &index, &fasta).unwrap();
-        assert!(inframe.consequences.contains(&Consequence::InframeDeletion));
-        assert!(!inframe.consequences.contains(&Consequence::StartLost));
+        assert!(has(&inframe, Consequence::InframeDeletion));
+        assert!(!has(&inframe, Consequence::StartLost));
     }
 
     #[test]
@@ -2190,12 +1963,8 @@ mod incomplete_cds {
         assert_eq!(snv.hgvs_p.as_deref(), Some("p.Met1Val"));
 
         let deletion = annotate_deletion("chr1", 1500, 1503, b"ATG", &tx, &index, &fasta).unwrap();
-        assert!(
-            deletion
-                .consequences
-                .contains(&Consequence::InframeDeletion)
-        );
-        assert!(!deletion.consequences.contains(&Consequence::StartLost));
+        assert!(has(&deletion, Consequence::InframeDeletion));
+        assert!(!has(&deletion, Consequence::StartLost));
         assert_ne!(deletion.hgvs_p.as_deref(), Some("p.Met1?"));
     }
 
@@ -2376,11 +2145,7 @@ mod incomplete_cds {
         let tx = transcript_with_gap(1);
         let index = LocateIndex::build(&tx).unwrap();
         let result = annotate_deletion("chr1", 1_999, 2_002, b"GAA", &tx, &index, &fasta).unwrap();
-        assert!(
-            result
-                .consequences
-                .contains(&Consequence::FrameshiftVariant)
-        );
+        assert!(has(&result, Consequence::FrameshiftVariant));
         assert!(!result.consequences.iter().any(|c| matches!(
             c,
             Consequence::SpliceDonorVariant | Consequence::SpliceAcceptorVariant
@@ -2415,28 +2180,12 @@ mod incomplete_cds {
         let tx = transcript_with_gap(1);
         let index = LocateIndex::build(&tx).unwrap();
         let before = annotate_snv("chr1", 1_999, b'G', b'A', &tx, &index, &fasta).unwrap();
-        assert!(
-            before
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant)
-        );
-        assert!(
-            !before
-                .consequences
-                .contains(&Consequence::SpliceRegionVariant)
-        );
+        assert!(has(&before, Consequence::SpliceAcceptorVariant));
+        assert!(!has(&before, Consequence::SpliceRegionVariant));
         assert_eq!(before.impact, Impact::High);
         let after = annotate_snv("chr1", 2_001, b'A', b'G', &tx, &index, &fasta).unwrap();
-        assert!(
-            after
-                .consequences
-                .contains(&Consequence::SpliceDonorVariant)
-        );
-        assert!(
-            !after
-                .consequences
-                .contains(&Consequence::SpliceRegionVariant)
-        );
+        assert!(has(&after, Consequence::SpliceDonorVariant));
+        assert!(!has(&after, Consequence::SpliceRegionVariant));
     }
 
     #[test]
@@ -2447,16 +2196,8 @@ mod incomplete_cds {
         let tx = transcript_with_gap(1);
         let index = LocateIndex::build(&tx).unwrap();
         let result = annotate_insertion("chr1", 2_000, b"C", &tx, &index, &fasta).unwrap();
-        assert!(
-            result
-                .consequences
-                .contains(&Consequence::FrameshiftVariant)
-        );
-        assert!(
-            result
-                .consequences
-                .contains(&Consequence::SpliceAcceptorVariant)
-        );
+        assert!(has(&result, Consequence::FrameshiftVariant));
+        assert!(has(&result, Consequence::SpliceAcceptorVariant));
         assert_eq!(result.exon, None);
     }
 
@@ -2506,7 +2247,7 @@ mod incomplete_cds {
         let (_tmp, fasta) = write_test_fasta();
         let (tx, index) = partial_last_codon();
         let result = annotate_insertion("chr1", 4_498, b"G", &tx, &index, &fasta).unwrap();
-        assert!(result.consequences.contains(&Consequence::StopGained));
+        assert!(has(&result, Consequence::StopGained));
         assert_eq!(result.codons.as_deref(), Some("ta/tGa"));
         assert_eq!(result.amino_acids.as_deref(), Some("X/*"));
         assert_eq!(result.cds_position, Some(1_498));
@@ -2647,7 +2388,7 @@ mod incomplete_cds {
         // Stays in the CDS: a frameshift of the complete codon it starts in
         // (VEP 116 NM_001424184.1 c.657_658del), protein effect unknown.
         let shift = annotate_deletion("chr1", 4_496, 4_498, b"GT", &tx, &index, &fasta).unwrap();
-        assert!(shift.consequences.contains(&Consequence::FrameshiftVariant));
+        assert!(has(&shift, Consequence::FrameshiftVariant));
         assert_eq!(shift.hgvs_p.as_deref(), Some("p.?"));
         assert_eq!(shift.ptc, PtcStatus::Indeterminate);
         // Removes the CDS end: no stop term (maintainer decision; VEP gives
@@ -2665,16 +2406,8 @@ mod incomplete_cds {
         // (VEP gives stop_retained_variant for c.656_*2del).
         let into_utr =
             annotate_deletion("chr1", 4_495, 4_502, b"CGTAAAA", &tx, &index, &fasta).unwrap();
-        assert!(
-            into_utr
-                .consequences
-                .contains(&Consequence::ThreePrimeUtrVariant)
-        );
-        assert!(
-            into_utr
-                .consequences
-                .contains(&Consequence::IncompleteTerminalCodonVariant)
-        );
+        assert!(has(&into_utr, Consequence::ThreePrimeUtrVariant));
+        assert!(has(&into_utr, Consequence::IncompleteTerminalCodonVariant));
         assert!(!into_utr.consequences.iter().any(|c| matches!(
             c,
             Consequence::StopLost
@@ -2694,10 +2427,7 @@ mod incomplete_cds {
         tx.cds_genomic_start = Some(11_001);
         let index = LocateIndex::build(&tx).unwrap();
         let result = annotate_insertion("chr17", 11_002, b"C", &tx, &index, &fasta).unwrap();
-        assert!(
-            result.consequences.contains(&Consequence::StopGained),
-            "{result:?}"
-        );
+        assert!(has(&result, Consequence::StopGained), "{result:?}");
         assert_eq!(result.codons.as_deref(), Some("ta/tGa"));
         assert_eq!(result.cds_position, Some(4_498));
         assert!(
@@ -2792,11 +2522,7 @@ mod incomplete_cds {
         assert_eq!(edge(b"TGAGGG").amino_acids.as_deref(), Some("-/*G"));
         let stop_then_partial = edge(b"GGGTGAG");
         assert_eq!(stop_then_partial.amino_acids.as_deref(), Some("-/G*X"));
-        assert!(
-            stop_then_partial
-                .consequences
-                .contains(&Consequence::CodingSequenceVariant)
-        );
+        assert!(has(&stop_then_partial, Consequence::CodingSequenceVariant));
 
         for bases in [&b"TGA"[..], b"TGAG"] {
             let stop = edge(bases);
@@ -2832,7 +2558,7 @@ mod incomplete_cds {
         let (_tmp, fasta) = write_test_fasta();
         let (tx, index) = partial_last_codon();
         let result = annotate_insertion("chr1", 4_498, b"GGTGA", &tx, &index, &fasta).unwrap();
-        assert!(result.consequences.contains(&Consequence::StopGained));
+        assert!(has(&result, Consequence::StopGained));
         assert_eq!(result.impact, Impact::High);
         assert_eq!(result.amino_acids.as_deref(), Some("X/W*X"));
         assert!(
@@ -2891,13 +2617,11 @@ mod incomplete_cds {
         let (tx, index) = minus_partial_last_codon();
         let result = annotate_insertion("chr17", 11_001, b"C", &tx, &index, &fasta).unwrap();
         assert!(
-            result
-                .consequences
-                .contains(&Consequence::ThreePrimeUtrVariant),
+            has(&result, Consequence::ThreePrimeUtrVariant),
             "{:?}",
             result.consequences
         );
-        assert!(!result.consequences.contains(&Consequence::StopGained));
+        assert!(!has(&result, Consequence::StopGained));
     }
 
     #[test]
@@ -2942,15 +2666,6 @@ mod incomplete_cds {
             ),
             "{normal_ptc:?}"
         );
-    }
-
-    #[test]
-    fn non_coding_transcript_variant_is_a_modifier() {
-        let term = Consequence::NonCodingTranscriptVariant;
-        assert_eq!(term.as_str(), "non_coding_transcript_variant");
-        assert_eq!(term.impact(), Impact::Modifier);
-        assert!(term.severity_rank() > Consequence::IntronVariant.severity_rank());
-        assert!(term.severity_rank() < Consequence::UpstreamGeneVariant.severity_rank());
     }
 
     #[test]
@@ -3321,6 +3036,7 @@ mod inframe_insertion_terms {
 fn unknown_alt_bases_are_detected_case_insensitively() {
     assert!(super::helpers::has_unknown_bases(b"N"));
     assert!(super::helpers::has_unknown_bases(b"ACNT"));
+    assert!(super::helpers::has_unknown_bases(b"acnt"));
     assert!(super::helpers::has_unknown_bases(b"R"));
     assert!(!super::helpers::has_unknown_bases(b"acgtACGT"));
     assert!(!super::helpers::has_unknown_bases(b""));
@@ -3368,10 +3084,7 @@ fn unknown_alt_mnv_and_delins_lose_peptide_terms() {
             );
             // CGTC>NG shortens the CDS by two bases: a frameshift whose stop
             // is undetermined.
-            let expected = if result
-                .consequences
-                .contains(&Consequence::FrameshiftVariant)
-            {
+            let expected = if has(result, Consequence::FrameshiftVariant) {
                 PtcStatus::Indeterminate
             } else {
                 PtcStatus::NotApplicable
@@ -3533,25 +3246,14 @@ fn deletion_shifting_the_start_into_a_two_exon_utr_is_start_retained() {
     let (_tmp, fasta, tx) = two_exon_utr_minus(b'A');
     let index = LocateIndex::build(&tx).unwrap();
     let kept = annotate_deletion("chrT", 123, 127, b"GCAT", &tx, &index, &fasta).unwrap();
-    assert!(
-        kept.consequences
-            .contains(&Consequence::StartRetainedVariant),
-        "{kept:?}"
-    );
-    assert!(kept.consequences.contains(&Consequence::StartLost));
+    assert!(has(&kept, Consequence::StartRetainedVariant), "{kept:?}");
+    assert!(has(&kept, Consequence::StartLost));
     // With a `G` before `TGC` the UTR no longer copies the start codon.
     let (_tmp, fasta, tx) = two_exon_utr_minus(b'G');
     let index = LocateIndex::build(&tx).unwrap();
     let lost = annotate_deletion("chrT", 123, 127, b"GCAT", &tx, &index, &fasta).unwrap();
-    assert!(
-        lost.consequences.contains(&Consequence::StartLost),
-        "{lost:?}"
-    );
-    assert!(
-        !lost
-            .consequences
-            .contains(&Consequence::StartRetainedVariant)
-    );
+    assert!(has(&lost, Consequence::StartLost), "{lost:?}");
+    assert!(!has(&lost, Consequence::StartRetainedVariant));
 }
 
 #[test]
@@ -3572,12 +3274,8 @@ fn frameshift_at_the_start_codon_follows_vep_start_rules() {
     );
     // Deleting the `G` leaves `ATC`: start lost, not retained.
     let deletion = annotate_deletion("chr1", 1502, 1503, b"G", &tx, &index, &fasta).unwrap();
-    assert!(deletion.consequences.contains(&Consequence::StartLost));
-    assert!(
-        !deletion
-            .consequences
-            .contains(&Consequence::StartRetainedVariant)
-    );
+    assert!(has(&deletion, Consequence::StartLost));
+    assert!(!has(&deletion, Consequence::StartRetainedVariant));
     // An insertion right after the start codon does not touch it.
     let after = annotate_insertion("chr1", 1503, b"T", &tx, &index, &fasta).unwrap();
     assert!(!after.consequences.iter().any(|c| matches!(
@@ -3652,11 +3350,7 @@ fn deletion_shifted_into_the_intron_has_no_hgvs_p() {
     let (_tmp, fasta, tx) = junction_shift_fixture();
     let index = LocateIndex::build(&tx).unwrap();
     let result = annotate_deletion("chrU", 39, 40, b"A", &tx, &index, &fasta).unwrap();
-    assert!(
-        result
-            .consequences
-            .contains(&Consequence::FrameshiftVariant)
-    );
+    assert!(has(&result, Consequence::FrameshiftVariant));
     assert_eq!(result.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.30+1del"));
     assert_eq!(result.hgvs_p, None);
 }
@@ -3669,9 +3363,7 @@ fn deletion_from_the_intron_shifted_into_the_cds_takes_its_hgvs_p() {
     // shifted deletion's HGVS p. (NM_000540.3 c.958_960del `p.Glu320del`).
     let spanning = annotate_deletion("chrU", 59, 61, b"GA", &tx, &index, &fasta).unwrap();
     assert!(
-        spanning
-            .consequences
-            .contains(&Consequence::CodingSequenceVariant),
+        has(&spanning, Consequence::CodingSequenceVariant),
         "{spanning:?}"
     );
     assert_eq!(spanning.hgvs_c.as_deref(), Some("NM_SHIFT.1:c.31_32del"));
@@ -3710,7 +3402,7 @@ fn sec_fixture(with_sec: bool) -> (TempDir, FastaReader, TranscriptModel, Locate
 }
 
 /// Expected values from VEP 116 REST on NM_000581.4 (GPX1, Sec49), recorded
-/// in `.vareffect-tasks/issue-13/vep_rest_wp5.tsv`: the reference codon is
+/// in `tests/data/tools/vep_rest/vep_rest_selenocysteine.tsv`: the reference codon is
 /// `U`, the alternate translates with the standard table.
 #[test]
 fn selenocysteine_snvs_follow_vep() {
@@ -3751,7 +3443,7 @@ fn selenocysteine_inserted_tga_is_a_stop() {
     // GPX1 insertion of TGA before or after Sec49: stop_gained +
     // inframe_insertion, -/TGA, -/*, p.Sec49_Gly50insTer.
     let r = annotate_insertion("chr4", 1803, b"TGA", &tx, &idx, &fasta).unwrap();
-    assert!(r.consequences.contains(&Consequence::StopGained), "{r:?}");
+    assert!(has(&r, Consequence::StopGained), "{r:?}");
     assert_eq!(r.amino_acids.as_deref(), Some("-/*"));
     assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101_Arg102insTer"));
 }
@@ -3827,7 +3519,7 @@ fn selenocysteine_kept_by_an_mnv_is_a_stop_in_the_alternate() {
     let (_tmp, fasta, tx, idx) = sec_fixture(true);
     // CGT TGA CGT -> CGC TGA CGC at genomic 1797..1806.
     let r = annotate_mnv("chr4", 1799, b"TTGACGT", b"CTGACGC", &tx, &idx, &fasta).unwrap();
-    assert!(r.consequences.contains(&Consequence::StopGained), "{r:?}");
+    assert!(has(&r, Consequence::StopGained), "{r:?}");
     assert_eq!(r.amino_acids.as_deref(), Some("RUR/R*R"));
     assert_eq!(r.hgvs_p.as_deref(), Some("p.Sec101Ter"));
 }

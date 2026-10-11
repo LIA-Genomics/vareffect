@@ -1,44 +1,22 @@
 use super::*;
-use crate::test_fixtures::{minus_strand_coding, noncoding_2_exon, plus_strand_coding};
-use crate::types::{Biotype, CdsSegment, Exon, TranscriptTier};
+use crate::test_fixtures::{minus_strand_coding, model, noncoding_2_exon, plus_strand_coding};
+use crate::types::{Biotype, TranscriptTier};
 
 // -- Test fixtures (module-specific) -----------------------------------------
 
 /// Single-exon coding transcript (no introns, no splice sites).
 fn single_exon_coding() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_TEST_SINGLE.1".into(),
-        protein_accession: Some("NP_TEST_SINGLE.1".into()),
-        gene_symbol: "TESTSINGLE".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr3".into(),
-        strand: Strand::Plus,
-        tx_start: 500,
-        tx_end: 1_500,
-        cds_genomic_start: Some(600),
-        cds_genomic_end: Some(1_400),
-        exons: vec![Exon {
-            exon_number: 1,
-            genomic_start: 500,
-            genomic_end: 1_500,
-        }],
-        cds_segments: vec![CdsSegment {
-            exon_index: 0,
-            genomic_start: 600,
-            genomic_end: 1_400,
-            phase: 0,
-        }],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 1,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NM_TEST_SINGLE.1",
+        "TESTSINGLE",
+        "chr3",
+        Strand::Plus,
+        &[(500, 1500)],
+        &[(600, 1400, 0)],
+    )
+    .with_protein_accession(Some("NP_TEST_SINGLE.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
 }
 
 fn locate_plus(pos: u64) -> VariantLocation {
@@ -797,126 +775,37 @@ fn minus_cds_first_base() {
 /// Exon 3: [5500, 6000)  entirely 3'UTR
 /// ```
 fn plus_strand_multi_exon_utr() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_TEST_PLUS_MUTR.1".into(),
-        protein_accession: Some("NP_TEST_PLUS_MUTR.1".into()),
-        gene_symbol: "TESTPMUTR".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr1".into(),
-        strand: Strand::Plus,
-        tx_start: 1_000,
-        tx_end: 6_000,
-        cds_genomic_start: Some(2_200),
-        cds_genomic_end: Some(4_800),
-        exons: vec![
-            Exon {
-                exon_number: 1,
-                genomic_start: 1_000,
-                genomic_end: 1_500,
-            },
-            Exon {
-                exon_number: 2,
-                genomic_start: 2_000,
-                genomic_end: 3_000,
-            },
-            Exon {
-                exon_number: 3,
-                genomic_start: 4_000,
-                genomic_end: 5_000,
-            },
-            Exon {
-                exon_number: 4,
-                genomic_start: 5_500,
-                genomic_end: 6_000,
-            },
-        ],
-        cds_segments: vec![
-            CdsSegment {
-                exon_index: 1,
-                genomic_start: 2_200,
-                genomic_end: 3_000,
-                phase: 0,
-            },
-            CdsSegment {
-                exon_index: 2,
-                genomic_start: 4_000,
-                genomic_end: 4_800,
-                phase: 0,
-            },
-        ],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 4,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NM_TEST_PLUS_MUTR.1",
+        "TESTPMUTR",
+        "chr1",
+        Strand::Plus,
+        &[(1000, 1500), (2000, 3000), (4000, 5000), (5500, 6000)],
+        &[(2200, 3000, 0), (4000, 4800, 0)],
+    )
+    .with_protein_accession(Some("NP_TEST_PLUS_MUTR.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
 }
 
 /// Minus-strand transcript with 5'UTR and 3'UTR each spanning 2 exons.
 fn minus_strand_multi_exon_utr() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NM_TEST_MINUS_MUTR.1".into(),
-        protein_accession: Some("NP_TEST_MINUS_MUTR.1".into()),
-        gene_symbol: "TESTMMUTR".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr17".into(),
-        strand: Strand::Minus,
-        tx_start: 13_000,
-        tx_end: 20_000,
-        cds_genomic_start: Some(15_200),
-        cds_genomic_end: Some(17_500),
-        exons: vec![
-            Exon {
-                exon_number: 1,
-                genomic_start: 19_000,
-                genomic_end: 20_000,
-            },
-            Exon {
-                exon_number: 2,
-                genomic_start: 17_000,
-                genomic_end: 18_000,
-            },
-            Exon {
-                exon_number: 3,
-                genomic_start: 15_000,
-                genomic_end: 16_000,
-            },
-            Exon {
-                exon_number: 4,
-                genomic_start: 13_000,
-                genomic_end: 14_000,
-            },
+    model(
+        "NM_TEST_MINUS_MUTR.1",
+        "TESTMMUTR",
+        "chr17",
+        Strand::Minus,
+        &[
+            (19000, 20000),
+            (17000, 18000),
+            (15000, 16000),
+            (13000, 14000),
         ],
-        cds_segments: vec![
-            CdsSegment {
-                exon_index: 1,
-                genomic_start: 17_000,
-                genomic_end: 17_500,
-                phase: 0,
-            },
-            CdsSegment {
-                exon_index: 2,
-                genomic_start: 15_200,
-                genomic_end: 16_000,
-                phase: 0,
-            },
-        ],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::ProteinCoding,
-        exon_count: 4,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+        &[(17000, 17500, 0), (15200, 16000, 0)],
+    )
+    .with_protein_accession(Some("NP_TEST_MINUS_MUTR.1".into()))
+    .with_biotype(Biotype::ProteinCoding)
+    .with_tier(TranscriptTier::ManeSelect)
 }
 
 #[test]

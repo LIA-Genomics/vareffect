@@ -1,4 +1,4 @@
-# Delins and MNVs from a complete codon into a 3' partial codon or to the end of a cds_end_NF CDS (GENCODE v50). Labels pcN/xN/yN as in .vareffect-tasks/partial-codon-errors.
+# Delins and MNVs from a complete codon into a 3' partial codon or to the end of a cds_end_NF CDS (GENCODE v50). Labels pcN, xN, yN, bio1N.
 partial_span_pc0	3:39266191-39266192	A	ENST00000412814	&numbers=1
 partial_span_pc1	7:142721158-142721159	C	ENST00000390400	&numbers=1
 partial_span_pc2	17:18865899-18865900	A	ENST00000575102	&numbers=1

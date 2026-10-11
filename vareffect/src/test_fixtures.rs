@@ -4,6 +4,43 @@
 
 use crate::types::{Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptTier};
 
+/// A model built with [`TranscriptModel::new`] from exon spans `(start,
+/// end)` and CDS segments `(start, end, phase)`, both 0-based half-open and
+/// in transcript order; each segment lies in the exon containing it.
+pub fn model(
+    accession: &str,
+    gene_symbol: &str,
+    chrom: &str,
+    strand: Strand,
+    exons: &[(u64, u64)],
+    cds: &[(u64, u64, u8)],
+) -> TranscriptModel {
+    let exons: Vec<Exon> = exons
+        .iter()
+        .zip(1..)
+        .map(|(&(genomic_start, genomic_end), exon_number)| Exon {
+            exon_number,
+            genomic_start,
+            genomic_end,
+        })
+        .collect();
+    let cds_segments = cds
+        .iter()
+        .map(|&(genomic_start, genomic_end, phase)| CdsSegment {
+            exon_index: exons
+                .iter()
+                .position(|e| e.genomic_start <= genomic_start && genomic_end <= e.genomic_end)
+                .and_then(|i| u16::try_from(i).ok())
+                .expect("CDS segment inside an exon"),
+            genomic_start,
+            genomic_end,
+            phase,
+        })
+        .collect();
+    TranscriptModel::new(accession, gene_symbol, chrom, strand, exons)
+        .with_cds_segments(cds_segments)
+}
+
 /// Plus-strand coding transcript (3 exons, chr1).
 ///
 /// ```text
@@ -198,39 +235,14 @@ pub fn single_exon_coding() -> TranscriptModel {
 
 /// Non-coding transcript (2 exons, chr2, no CDS).
 pub fn noncoding_2_exon() -> TranscriptModel {
-    TranscriptModel {
-        accession: "NR_TEST_NC.1".into(),
-        protein_accession: None,
-        gene_symbol: "TESTNC".into(),
-        hgnc_id: None,
-        ensembl_accession: None,
-        chrom: "chr2".into(),
-        strand: Strand::Plus,
-        tx_start: 100,
-        tx_end: 600,
-        cds_genomic_start: None,
-        cds_genomic_end: None,
-        exons: vec![
-            Exon {
-                exon_number: 1,
-                genomic_start: 100,
-                genomic_end: 300,
-            },
-            Exon {
-                exon_number: 2,
-                genomic_start: 400,
-                genomic_end: 600,
-            },
-        ],
-        cds_segments: vec![],
-        tier: Some(TranscriptTier::ManeSelect),
-        biotype: Biotype::NonCodingRna,
-        exon_count: 2,
-        cds_start_complete: true,
-        cds_end_complete: true,
-        genome_mismatch: false,
-        cds_alignment_gap: false,
-        utr_numbering_breaks: Default::default(),
-        selenocysteine_codons: Vec::new(),
-    }
+    model(
+        "NR_TEST_NC.1",
+        "TESTNC",
+        "chr2",
+        Strand::Plus,
+        &[(100, 300), (400, 600)],
+        &[],
+    )
+    .with_biotype(Biotype::NonCodingRna)
+    .with_tier(TranscriptTier::ManeSelect)
 }

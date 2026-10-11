@@ -1,0 +1,36 @@
+# Ensembl VEP REST, release 116 (/info/software), GRCh38, fetched 2026-10-09.
+# Region rows: POST /vep/human/region {variants: VCF lines, hgvs:1, refseq:1}, rows for NM_000581.4 (tool vep_post.py).
+# HGVS rows: GET /vep/human/hgvs/<notation>?hgvs=1&refseq=1. NM_000581.4 GPX1, Sec49 = c.145_147 = chr3:49358132-49358134 (minus).
+# label	vcf	transcript	consequence_terms	impact	hgvsc	hgvsp	cdna_start	cds_start	protein_start	codons	amino_acids	exon	intron	flags
+sec_T1C	3 49358134 sec_T1C A G . . .	NM_000581.4	missense_variant	MODERATE	NM_000581.4:c.145T>C	NP_000572.2:p.Sec49Arg	220	145	49	Tga/Cga	U/R	None	None	None
+sec_G2A_TAA	3 49358133 sec_G2A_TAA C T . . .	NM_000581.4	stop_gained	HIGH	NM_000581.4:c.146G>A	NP_000572.2:p.Sec49Ter	221	146	49	tGa/tAa	U/*	None	None	None
+sec_A3G_TGG	3 49358132 sec_A3G_TGG T C . . .	NM_000581.4	missense_variant	MODERATE	NM_000581.4:c.147A>G	NP_000572.2:p.Sec49Trp	222	147	49	tgA/tgG	U/W	None	None	None
+sec_A3T_TGT	3 49358132 sec_A3T_TGT T A . . .	NM_000581.4	missense_variant	MODERATE	NM_000581.4:c.147A>T	NP_000572.2:p.Sec49Cys	222	147	49	tgA/tgT	U/C	None	None	None
+sec_mnv_TAG	3 49358132 sec_mnv_TAG TC CT . . .	NM_000581.4	stop_gained	HIGH	NM_000581.4:c.146_147delinsAG	NP_000572.2:p.Sec49Ter	221	146	49	tGA/tAG	U/*	None	None	None
+sec_codon_del	3 49358131 sec_codon_del CTCA C . . .	NM_000581.4	inframe_deletion	MODERATE	NM_000581.4:c.145_147del	NP_000572.2:p.Sec49del	220	145	49	TGA/-	U/-	None	None	None
+sec_del_48_49	3 49358132 sec_del_48_49 TCAG T . . .	NM_000581.4	inframe_deletion	MODERATE	NM_000581.4:c.144_146del	NP_000572.2:p.Sec49del	219	144	48	ctCTGa/cta	LU/L	None	None	None
+sec_del_2codons	3 49358131 sec_del_2codons CTCAGAG C . . .	NM_000581.4	inframe_deletion	MODERATE	NM_000581.4:c.142_147del	NP_000572.2:p.Leu48_Sec49del	217	142	48	CTCTGA/-	LU/-	None	None	None
+sec_ins_before	3 49358134 sec_ins_before A AGGC . . .	NM_000581.4	inframe_insertion	MODERATE	NM_000581.4:c.144_145insGCC	NP_000572.2:p.Leu48_Sec49insAla	219	144	48	-/GCC	-/A	None	None	None
+fs_del_up	3 49358144 fs_del_up CA C . . .	NM_000581.4	frameshift_variant	HIGH	NM_000581.4:c.134del	NP_000572.2:p.Val45GlyfsTer15	209	134	45	gTg/gg	V/X	None	None	None
+fs_ins_up	3 49358145 fs_ins_up A AT . . .	NM_000581.4	frameshift_variant	HIGH	NM_000581.4:c.133_134insA	NP_000572.2:p.Val45AspfsTer121	208	133	45	gtg/gAtg	V/DX	None	None	None
+cod50_snv	3 49358131 cod50_snv C T . . .	NM_000581.4	missense_variant	MODERATE	NM_000581.4:c.148G>A	NP_000572.2:p.Gly50Ser	223	148	50	Ggc/Agc	G/S	None	None	None
+cod48_syn	3 49358135 cod48_syn G T . . .	NM_000581.4	synonymous_variant	LOW	NM_000581.4:c.144C>A	NP_000572.2:p.Leu48=	219	144	48	ctC/ctA	L	None	None	None
+ins_tga_before	3 49358134 ins_tga_before A ATCA . . .	NM_000581.4	stop_gained,inframe_insertion	HIGH	NM_000581.4:c.145_147dup	NP_000572.2:p.Sec49_Gly50insTer	219	144	48	-/TGA	-/*	None	None	None
+ins_tga_after	3 49358131 ins_tga_after C CTCA . . .	NM_000581.4	stop_gained,inframe_insertion	HIGH	NM_000581.4:c.145_147dup	NP_000572.2:p.Sec49_Gly50insTer	222	147	49	-/TGA	-/*	None	None	None
+fs_del_in_sec	3 49358132 fs_del_in_sec TC T . . .	NM_000581.4	frameshift_variant	HIGH	NM_000581.4:c.146del	NP_000572.2:p.Sec49Ter	221	146	49	tGa/ta	U/X	None	None	None
+# hgvs input	genomic	allele	transcript	consequence	hgvsc	hgvsp	codons	amino_acids
+NM_000581.4:c.610T>C	3:49357390-49357390	T/C	NM_000581.4	stop_lost	NM_000581.4:c.610T>C	NP_000572.2:p.Ter204GlnextTer?	Tag/Cag	*/Q
+NM_000581.4:c.611A>G	3:49357389-49357389	A/G	NM_000581.4	stop_lost	NM_000581.4:c.611A>G	NP_000572.2:p.Ter204TrpextTer?	tAg/tGg	*/W
+NM_000581.4:c.612G>C	3:49357388-49357388	G/C	NM_000581.4	stop_lost	NM_000581.4:c.612G>C	NP_000572.2:p.Ter204TyrextTer?	taG/taC	*/Y
+NM_000581.4:c.149del	3:49358130-49358130	G/-	NM_000581.4	frameshift_variant	NM_000581.4:c.149del	NP_000572.2:p.Gly50AlafsTer?	gGc/gc	G/X
+NM_000581.4:c.400del	3:49357600-49357600	C/-	NM_000581.4	frameshift_variant	NM_000581.4:c.401del	NP_000572.2:p.Pro134GlnfsTer?	Cca/ca	P/X
+NM_000581.4:c.100del	3:49358179-49358179	T/-	NM_000581.4	frameshift_variant	NM_000581.4:c.100del	NP_000572.2:p.Ser34ProfsTer26	Tcc/cc	S/X
+NM_000581.4:c.610_612del	3:49357388-49357390	TAG/-	NM_000581.4	stop_lost	NM_000581.4:c.610_612del	NP_000572.2:p.Ter204delextTer?	TAG/-	*/-
+NM_000581.4:c.611del	3:49357389-49357389	A/-	NM_000581.4	stop_lost	NM_000581.4:c.611del	NP_000572.2:p.Ter204=	tAg/tg	*/X
+NM_000581.4:c.610_611delinsCC	3:49357389-49357390	TA/CC	NM_000581.4	stop_lost	NM_000581.4:c.610_611delinsCC	NP_000572.2:p.Ter204ProextTer?	TAg/CCg	*/P
+NM_000581.4:c.609_610insGGG	3:49357391-49357390	-/GGG	NM_000581.4	inframe_insertion	NM_000581.4:c.609_610insGGG	None	-/GGG	-/G
+NM_000546.6:c.1179_1180insGGG	17:7669612-7669611	-/GGG	NM_000546.6	inframe_insertion	NM_000546.6:c.1179_1180insGGG	None	-/GGG	-/G
+NM_001093771.3:c.1942_1950del	12:104348413-104348421	TGAGGTTAA/-	NM_001093771.3	stop_lost,inframe_deletion	NM_001093771.3:c.1942_1950del	NP_001087240.1:p.Sec648_Ter650delextTer53	TGAGGTTAA/-	UG*/-
+NM_001093771.3:c.1945_1950del	12:104348416-104348421	GGTTAA/-	NM_001093771.3	stop_lost,inframe_deletion	NM_001093771.3:c.1946_*1del	None	GGTTAA/-	G*/-
+NM_001093771.3:c.1948_1950del	12:104348419-104348421	TAA/-	NM_001093771.3	stop_lost	NM_001093771.3:c.1948_1950del	NP_001087240.1:p.Ter650delextTer?	TAA/-	*/-
+chr3:49358129-49358135 GCCTCAG>ACCTCAT (reviewer GET /vep/human/region/3:49358129-49358135:1/ACCTCAT, 2026-10-09)	NM_000581.4	stop_gained	NM_000581.4:c.144_150delinsATGAGGT	NP_000572.2:p.Sec49Ter	LUG/L*G

@@ -9,7 +9,7 @@
 //!
 //! # Concordance
 //!
-//! Output matches VEP `--hgvs --shift_hgvs` (release 115).
+//! Output matches VEP `--hgvs --shift_hgvs` (release 115/116).
 
 use std::fmt;
 

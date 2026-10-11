@@ -433,13 +433,9 @@ pub(super) fn annotate_boundary_spanning_deletion(
         return Ok(result);
     }
 
-    // A deletion from the CDS into the 3'UTR of a CDS that does not end in a
-    // stop codon: there is no stop to lose and no reading frame left to
-    // shift, so it is only a coding and UTR change (VEP 116, NM_001424184.1
-    // c.658_*2del: incomplete_terminal_codon_variant, coding_sequence_variant,
-    // 3_prime_UTR_variant). VEP's `stop_retained_variant` for the same
-    // deletion starting one codon earlier (c.656_*2del) names a stop the
-    // transcript does not have (VEP_DIVERGENCES.md).
+    // A deletion from the CDS into the 3'UTR of a CDS without a stop codon has
+    // no stop to lose and no frame to shift: only a coding and UTR change
+    // (NM_001424184.1 c.658_*2del; VEP_DIVERGENCES.md 3.1).
     if extends_into_3utr && !ends_in_stop_codon(chrom, transcript, locate_index, fasta)? {
         let mut consequences = vec![
             Consequence::CodingSequenceVariant,
