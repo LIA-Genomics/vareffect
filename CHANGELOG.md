@@ -213,6 +213,16 @@ For releases before `0.5.0`, see the git history.
 
 ### Fixed
 
+- Variants near a 3' partial codon no longer fail with `Malformed`
+  ("sequence length N is not divisible by 3" or "CDS offsets outside the
+  CDS"), which dropped every transcript's annotation for the variant. An
+  in-frame deletion or deletion-insertion within 90 bases of a partial
+  codon now translates the protein 3' rule's window up to the last whole
+  codon, and a deletion-insertion or MNV running from a complete codon into
+  the partial codon gets VEP 116's terms, codons and amino acids, with
+  HGVS p. `p.?` and the PTC of a stop it creates in a complete codon. On GENCODE v50 this was 3.2% of synthetic indels near the
+  ends of its 30,255 incomplete CDSs, and one ClinVar variant
+  (chr12:57581526 ATCT>A, ENST00000675634.1).
 - Deletion HGVS follows VEP 116's 3' shift on the genome, as insertion HGVS
   already did: it crosses exon/intron junctions (NM_000632.4 `c.1497+1del`,
   was `c.1497del`; `c.410-1del` is written `c.410del`), deletions across a

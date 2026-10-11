@@ -34,7 +34,7 @@ for path in numbered:
         f = line.rstrip("\n").split("\t")
         add(f[0], f[1], f[2], f[6], f[4], f[5], f[7], f[8], f[9], f[10], f[11], f[12],
             f[3], f[13], f[14])
-print("# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-07 and 2026-10-09 (dates per record in vep_rest/); one row per (variant, transcript).")
+print("# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched on the date each record in vep_rest/ names; one row per (variant, transcript).")
 print("# pos is 1-based; ref/alt as VEP's allele_string (`-` = empty). `-` in any other column = field absent in VEP's JSON;")
 print("# `?` in exon/intron = not requested (rows queried without numbers=1).")
 print("# Built by tools/merge_vep_rows.py (next to this file) from the per-query REST records; see tools/README.md.")

@@ -1502,6 +1502,110 @@ fn incomplete_terminal_codon() {
     );
 }
 
+/// The single-exon transcript with an 802-base CDS: offsets 798..801 are the
+/// last complete codon (genomic 1398..1401), offset 801 the partial codon
+/// (genomic 1401).
+fn partial_codon_transcript() -> TranscriptModel {
+    let mut tx = single_exon_coding();
+    tx.cds_genomic_end = Some(1402);
+    tx.cds_segments[0].genomic_end = 1402;
+    tx
+}
+
+#[test]
+fn complete_codons_end_stops_before_the_partial_codon() {
+    let tx = partial_codon_transcript();
+    assert_eq!(super::helpers::complete_codons_end(&build_index(&tx)), 801);
+    let mut whole = single_exon_coding();
+    whole.cds_genomic_end = Some(1401);
+    whole.cds_segments[0].genomic_end = 1401;
+    let idx = build_index(&whole);
+    assert_eq!(idx.total_cds_length(), 801);
+    assert_eq!(super::helpers::complete_codons_end(&idx), 801);
+}
+
+#[test]
+fn inframe_deletion_near_a_partial_codon_translates() {
+    // The protein 3' rule's 90-base extension used to reach the partial
+    // codon (802 - 783 = 19 bases) and fail to translate.
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = partial_codon_transcript();
+    let idx = build_index(&tx);
+    let deleted = fasta.fetch_sequence("chr3", 1380, 1383).unwrap();
+    let result = annotate_deletion("chr3", 1380, 1383, &deleted, &tx, &idx, &fasta).unwrap();
+    assert_eq!(result.cds_position, Some(781));
+    assert_eq!(result.cds_position_end, Some(783));
+}
+
+#[test]
+fn mnv_into_the_partial_codon_is_coding_sequence_variant() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = partial_codon_transcript();
+    let idx = build_index(&tx);
+    let ref_bases = fasta.fetch_sequence("chr3", 1400, 1402).unwrap();
+    let alt: Vec<u8> = ref_bases
+        .iter()
+        .map(|&b| if b == b'A' { b'C' } else { b'A' })
+        .collect();
+    let result = annotate_mnv("chr3", 1400, &ref_bases, &alt, &tx, &idx, &fasta).unwrap();
+    assert!(
+        result
+            .consequences
+            .contains(&Consequence::CodingSequenceVariant),
+        "{:?}",
+        result.consequences,
+    );
+    assert!(
+        !result
+            .consequences
+            .contains(&Consequence::IncompleteTerminalCodonVariant)
+    );
+    assert_eq!(result.hgvs_p.as_deref(), Some("p.?"));
+    assert_eq!(result.protein_start, Some(267));
+    assert_eq!(result.protein_end, Some(268));
+    let amino_acids = result.amino_acids.unwrap();
+    assert!(amino_acids.ends_with('X'), "{amino_acids}");
+}
+
+#[test]
+fn delins_into_the_partial_codon_is_frameshift() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = partial_codon_transcript();
+    let idx = build_index(&tx);
+    let ref_bases = fasta.fetch_sequence("chr3", 1400, 1402).unwrap();
+    let alt = if ref_bases[0] == b'A' { b"C" } else { b"A" };
+    let result = annotate_complex_delins("chr3", 1400, &ref_bases, alt, &tx, &idx, &fasta).unwrap();
+    assert!(
+        result
+            .consequences
+            .contains(&Consequence::FrameshiftVariant),
+        "{:?}",
+        result.consequences,
+    );
+    assert_eq!(result.hgvs_p.as_deref(), Some("p.?"));
+    assert_eq!(result.ptc, PtcStatus::Indeterminate);
+    assert_eq!(result.cds_position, Some(801));
+    assert_eq!(result.cds_position_end, Some(802));
+}
+
+#[test]
+fn alt_extends_ref_matches_either_end() {
+    use super::indel::alt_extends_ref;
+    assert!(alt_extends_ref(b"LX", b"LLX"));
+    assert!(alt_extends_ref(b"LX", b"LXG"));
+    assert!(!alt_extends_ref(b"LX", b"*GX"));
+    assert!(!alt_extends_ref(b"NX", b"NPX"));
+    assert!(alt_extends_ref(b"L", b"L*GG"));
+}
+
+#[test]
+fn residue_changed_ignores_the_partial_codon() {
+    use super::indel::residue_changed;
+    assert!(residue_changed(b"FX", b"LX"));
+    assert!(!residue_changed(b"LX", b"LX"));
+    assert!(!residue_changed(b"LX", b"LK"));
+}
+
 #[test]
 fn splice_donor_boundary_regression() {
     let (_tmp, fasta) = write_test_fasta();

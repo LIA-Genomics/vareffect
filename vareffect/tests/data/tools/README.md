@@ -63,13 +63,15 @@ python3 -I vep_insertion_rows.py RAW_DIR < vep_rest/insertion_point_cases.tsv > 
 `../source_stores_vep116.tsv` adds VEP 116 rows for the stores built from
 RefSeq RS_2025_08 and GENCODE v50 (split stop codons on both strands, the
 chrY PAR copy of NM_178129.5, the `I`-gapped NM_002111.8, the non-MANE
-NM_001126113.3, and SHANK3 NM_001372044.2 / NBPF1 NM_001405693.2 at their
-coverage breaks). `tests/incomplete_cds_concordance.rs`
+NM_001126113.3, SHANK3 NM_001372044.2 / NBPF1 NM_001405693.2 at their
+coverage breaks, and deletion-insertions and MNVs from a complete codon into
+a GENCODE 3' partial codon). `tests/incomplete_cds_concordance.rs`
 (`built_stores_match_vep_116`) runs it and `../incomplete_cds_vep116.tsv`
 against `data/vareffect/transcript_models_{refseq,gencode}.bin`:
 
 ```bash
 python3 -I vep_rows.py < vep_rest/wp3_cases.tsv   # recorded as vep_rest/vep_rest_wp3.tsv (2026-10-09)
+python3 -I vep_rows.py < vep_rest/partial_span_cases.tsv   # recorded as vep_rest/vep_rest_partial_span.tsv (2026-10-11)
 python3 -I merge_vep_rows.py /dev/null /dev/null /dev/null vep_rest/vep_rest_wp3.tsv \
-  > ../source_stores_vep116.tsv
+  vep_rest/vep_rest_partial_span.tsv > ../source_stores_vep116.tsv
 ```

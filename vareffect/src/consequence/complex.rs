@@ -1,11 +1,14 @@
 //! Boundary-spanning deletions, complex delins, and MNV annotation.
 
 use super::helpers::{
-    add_splice_spill, build_base_result, compute_cdna_position_for_cds, ends_in_stop_codon,
-    fetch_cds_sequence, fetch_ref_codon, finalize_consequences, has_complete_start_codon,
-    is_incomplete_terminal_codon,
+    add_splice_spill, build_base_result, complete_codons_end, compute_cdna_position_for_cds,
+    ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
+    has_complete_start_codon, is_incomplete_terminal_codon,
 };
-use super::indel::{annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result};
+use super::indel::{
+    annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result,
+    indel_into_partial_codon_result,
+};
 use super::{Consequence, ConsequenceResult, Impact, PtcStatus};
 use crate::codon::{
     format_amino_acids_indel, format_codons_indel, reverse_complement, translate_reference_codon,
@@ -647,7 +650,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
     let cdna_end = compute_cdna_position_for_cds(global_cds_end.saturating_sub(1), locate_index);
 
     // Extend AA window with downstream context for the protein 3' rule.
-    let ext_codon_end = (codon_end + 90).min(total_cds);
+    let ext_codon_end = (codon_end + 90).min(complete_codons_end(locate_index));
     let (ref_aas_ext, alt_aas_ext) = if ext_codon_end > codon_end {
         let ext_seq = fetch_cds_sequence(
             codon_end,
@@ -861,6 +864,22 @@ fn annotate_complex_delins_core(
                 result.cds_position = Some(cds_offset_start + 1);
                 result.hgvs_c = hgvs;
                 result.hgvs_p = Some("p.?".to_string());
+                return Ok(result);
+            }
+
+            if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
+                let mut result = indel_into_partial_codon_result(
+                    chrom,
+                    *cds_offset_start,
+                    *cds_offset_end,
+                    trimmed_alt,
+                    transcript,
+                    locate_index,
+                    fasta,
+                    exon_index,
+                    location.overlaps_splice_region,
+                )?;
+                result.hgvs_c = hgvs;
                 return Ok(result);
             }
 
@@ -1132,6 +1151,22 @@ fn annotate_mnv_core(
                 result.cds_position = Some(cds_offset_start + 1);
                 result.hgvs_c = hgvs;
                 result.hgvs_p = Some("p.?".to_string());
+                return Ok(result);
+            }
+
+            if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
+                let mut result = indel_into_partial_codon_result(
+                    chrom,
+                    *cds_offset_start,
+                    *cds_offset_end,
+                    alt_bases,
+                    transcript,
+                    locate_index,
+                    fasta,
+                    exon_index,
+                    location.overlaps_splice_region,
+                )?;
+                result.hgvs_c = hgvs;
                 return Ok(result);
             }
 
