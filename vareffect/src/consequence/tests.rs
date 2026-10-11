@@ -2149,7 +2149,6 @@ mod incomplete_cds {
                 && r.protein_end.is_none()
                 && r.codons.is_none()
                 && r.amino_acids.is_none()
-                && !r.predicts_nmd
                 && matches!(r.ptc, PtcStatus::NotApplicable | PtcStatus::Indeterminate)
                 && r.exon.is_some()
         };
@@ -2159,6 +2158,9 @@ mod incomplete_cds {
         let deletion = annotate_deletion("chr1", 1503, 1504, b"C", &tx, &index, &fasta).unwrap();
         assert!(unnumbered(&deletion), "{deletion:?}");
         assert_eq!(deletion.ptc, PtcStatus::Indeterminate);
+        // The 50-nucleotide rule compares two genome-built positions, so it
+        // still holds far from the last junction.
+        assert!(deletion.predicts_nmd);
         let insertion = annotate_insertion("chr1", 1504, b"T", &tx, &index, &fasta).unwrap();
         assert!(unnumbered(&insertion), "{insertion:?}");
         // The dispatcher's MNV and delins paths.
@@ -3586,8 +3588,9 @@ fn deletion_before_the_stop_reads_on_into_the_utr() {
 }
 
 /// A frameshift that keeps the stop codon leaves the protein unchanged:
-/// `p.Ter{N}=` (VEP 116 NM_000969.5 c.890_893dup `p.Ter298=`, NM_000179.3
-/// c.4069_4082dup `p.Ter1361=`), never a residue past the stop.
+/// `stop_retained_variant`, `p.Ter{N}=`, no PTC when the insertion is inside
+/// the stop codon (VEP 116 NM_000527.5 c.2581_2582insA `p.Ter861=`), never a
+/// residue past the stop.
 #[test]
 fn frameshift_keeping_the_stop_is_unchanged() {
     let (_tmp, fasta) = write_ptc_fasta();
@@ -3596,9 +3599,11 @@ fn frameshift_keeping_the_stop_is_unchanged() {
     // ...TAC TAA AA: `AGCT` inserted after the stop's `T` (3'-shifted one
     // base to `GCTA`) reads TAC TAG CTA AAA..., a stop at codon 500 still.
     let r = annotate_insertion("chr4", 4498, b"AGCT", &tx, &idx, &fasta).unwrap();
-    // VEP 116 calls these `stop_retained_variant` (VEP_DIVERGENCES.md 8).
-    assert!(has(&r, Consequence::FrameshiftVariant), "{r:?}");
+    assert_eq!(r.consequences, vec![Consequence::StopRetainedVariant]);
+    assert_eq!(r.impact, Impact::Low);
     assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter500="));
+    assert_eq!(r.ptc, PtcStatus::NotApplicable);
+    assert!(!r.predicts_nmd);
 }
 
 /// An insertion inside the last sense codon reaches the 3'UTR through the
@@ -3645,6 +3650,56 @@ fn minus_strand_stop_frameshift_is_an_extension() {
     assert_eq!(r.hgvs_c.as_deref(), Some("NM_TEST_MINUS.1:c.4498del"));
     assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter1500AsnextTer?"));
     assert_eq!(r.ptc, PtcStatus::NoStopCodon);
+}
+
+/// Kept only 3' of the submitted position, the stop does not make the
+/// variant `stop_retained_variant`: VEP 116 calls an insertion before the
+/// stop codon `frameshift_variant` (NM_000969.5 c.890_893dup, `p.Ter298=`),
+/// and its termination codon stays undetermined.
+#[test]
+fn frameshift_before_the_stop_keeping_it_stays_a_frameshift() {
+    let mut chr4 = ptc_chr4();
+    // Last sense codon `AAA`; duplicating `AAAT` before it reads
+    // AAA TAA AAT..., the stop rebuilt at codon 500 through the repeat.
+    chr4[4494..4497].copy_from_slice(b"AAA");
+    let (_tmp, fasta) = write_chr4_fasta(&chr4);
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+    let r = annotate_insertion("chr4", 4494, b"AAAT", &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.consequences, vec![Consequence::FrameshiftVariant]);
+    assert_eq!(r.ptc, PtcStatus::Indeterminate);
+    // The HGVS 3' shift carries the duplication into the 3'UTR, so it has
+    // no HGVS p. (`c.1498_*1dup`).
+    assert_eq!(r.hgvs_c.as_deref(), Some("NM_TEST_PTC.1:c.1498_*1dup"));
+}
+
+#[test]
+fn retain_stop_terms_follows_vep_at_the_submitted_position() {
+    use super::indel::retain_stop_terms;
+    let mut terms = vec![Consequence::FrameshiftVariant];
+    let mut ptc = PtcStatus::NotApplicable;
+    assert!(!retain_stop_terms(false, true, &mut terms, &mut ptc));
+    assert_eq!(terms, vec![Consequence::FrameshiftVariant]);
+
+    // Kept only through a repeat 3' of the stop: VEP 116 NM_000969.5
+    // c.890_893dup is `frameshift_variant`.
+    assert!(!retain_stop_terms(true, false, &mut terms, &mut ptc));
+    assert_eq!(terms, vec![Consequence::FrameshiftVariant]);
+    assert_eq!(ptc, PtcStatus::Indeterminate);
+
+    let mut ptc = PtcStatus::NotApplicable;
+    assert!(retain_stop_terms(true, true, &mut terms, &mut ptc));
+    assert_eq!(terms, vec![Consequence::StopRetainedVariant]);
+    assert_eq!(ptc, PtcStatus::NotApplicable);
+
+    // VEP 116 NM_006739.4 c.2192_*5dup: `frameshift_variant,stop_gained`.
+    let mut terms = vec![Consequence::FrameshiftVariant, Consequence::StopGained];
+    assert!(!retain_stop_terms(true, true, &mut terms, &mut ptc));
+    assert_eq!(
+        terms,
+        vec![Consequence::FrameshiftVariant, Consequence::StopGained]
+    );
+    assert_eq!(ptc, PtcStatus::Indeterminate);
 }
 
 // -- Selenocysteine ---------------------------------------------------------

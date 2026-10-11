@@ -178,9 +178,11 @@ model keeps genomic bases the transcript lacks. Those
 models carry `TranscriptModel::cds_alignment_gap`, and `vareffect` reports
 no HGVS c. or p., no cDNA/CDS/protein positions and no codons or amino acids
 for them, and refuses to resolve HGVS c. on them (`CdsNumberingUnavailable`).
-A truncating variant's termination codon is `PtcStatus::Indeterminate` and
-`predicts_nmd` is false: the 50-nucleotide distances would be measured in the
-wrong frame. Consequence terms, impact and exon/intron numbers are reported.
+A truncating variant's termination codon is `PtcStatus::Indeterminate`: it
+would be located in the wrong frame. Consequence terms, impact, exon/intron
+numbers and `predicts_nmd` are reported; `predicts_nmd` compares the variant
+with the last junction in the genome-built numbering, which is off only by an
+alignment gap between the two.
 VEP 116 writes all of these in the transcript's numbering (NM_002111.8, HTT,
 `I` gap in exon 1: `c.311A>G`, `p.His104Arg`, CDS position 311); the
 consequence term matches, as it does for SHANK3 and NBPF1 past their coverage
@@ -407,13 +409,12 @@ for exon numbers) next to it.
   length before its stop-codon overlap test (`_overlaps_stop_codon_cil`)
   and calls even a frameshifting one `inframe_insertion,stop_retained_variant`
   (NM_000546.6 c.1179_1180insTAAG, `-/*`, `p.Ter394delinsTer`). `vareffect`
-  keeps `frameshift_variant` without `stop_gained`.
-- **A frameshift that keeps the stop codon.** A frameshifting indel at or
-  just before the stop codon whose alternate frame reads a stop at the same
-  residue is `stop_retained_variant` (LOW) in VEP 116 (NM_000179.3 c.4082del,
-  NM_000478.6 c.1574del, `p.Ter1361=`, `p.Ter525=`). `vareffect` writes the
-  same HGVS p. but keeps `frameshift_variant` (HIGH), with `ptc`
-  `Indeterminate`: an overcall for PVS1, to be fixed.
+  keeps `frameshift_variant` without `stop_gained`. Likewise a frameshifting
+  insertion inside the stop codon whose codon window reads the stop again
+  first is `inframe_insertion,coding_sequence_variant` (MODERATE) in VEP 116
+  (NM_003036.4 c.2186_*9dup `*/*IPCX`, NM_001365951.3 c.*1_*4dup `*/*VX`);
+  `vareffect` calls it `stop_retained_variant` (LOW), with `p.Ter{N}=`, as for
+  any frameshift reaching into the stop codon that keeps it.
 - **RefSeq and GENCODE stores, not fixed** (VEP 116 REST on the issue-13
   corpus, `.vareffect-tasks/source-concordance`): RefSeq biotype
   `non_coding_rna` where VEP writes `misc_RNA` (label only); GENCODE

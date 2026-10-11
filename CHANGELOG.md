@@ -159,8 +159,8 @@ For releases before `0.5.0`, see the git history.
   is `missense_variant` `p.Met1Val`). On `cds_end_complete = false` the CDS
   has no stop codon on the genome. A model flagged `cds_alignment_gap` gets
   no HGVS c. or p., cDNA / CDS / protein positions, codons or amino acids,
-  its termination codon is `PtcStatus::Indeterminate` and `predicts_nmd` is
-  false (consequence terms, impact and exon / intron numbers are kept), and
+  its termination codon is `PtcStatus::Indeterminate` (consequence
+  terms, impact, exon / intron numbers and `predicts_nmd` are kept), and
   `resolve_hgvs_c` refuses it with the new
   `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3).
   A RefSeq CDS open on the genome sets `cds_alignment_gap`. Past a
@@ -244,11 +244,12 @@ For releases before `0.5.0`, see the git history.
   frameshift that rebuilds the stop codon is `p.Ter298=` instead of naming a
   residue past the stop. `ptc` moves with it: the read-on cases now carry the
   located stop or `NoStopCodon` instead of `Indeterminate` (ClinVar on MANE:
-  80 transcript results), and a frameshift that keeps the stop is
-  `Indeterminate` instead of a residue past the stop (14); no result moves
-  into or out of a predicted NMD. Such a frameshift is still
-  `frameshift_variant` where VEP 116 has `stop_retained_variant`
-  (`VEP_DIVERGENCES.md` 8). The `vep_large_concordance` ground truth, from an
+  80 transcript results). A frameshift reaching into the stop codon that
+  keeps it is `stop_retained_variant` (LOW) instead of `frameshift_variant`
+  (HIGH), as in VEP 116, with `ptc` not applicable and no NMD prediction; one
+  that keeps it only through a repeat 3' of the submitted position stays
+  `frameshift_variant` with `p.Ter{N}=`, as VEP decides at that position. The
+  `vep_large_concordance` ground truth, from an
   earlier VEP release, still has `fsTer` for these extensions.
 - Variants near a 3' partial codon no longer fail with `Malformed`
   ("sequence length N is not divisible by 3" or "CDS offsets outside the

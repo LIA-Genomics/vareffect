@@ -415,8 +415,8 @@ impl PtcStatus {
 /// [`TranscriptModel::cds_alignment_gap`](crate::TranscriptModel::cds_alignment_gap)
 /// every field numbered along the transcript is `None` (HGVS, cDNA / CDS /
 /// protein positions, codons, amino acids), `ptc` is
-/// [`PtcStatus::Indeterminate`] for a truncating variant and `predicts_nmd`
-/// is `false`: the genome-built numbering is not the transcript's own.
+/// [`PtcStatus::Indeterminate`] for a truncating variant: the genome-built
+/// numbering is not the transcript's own. `predicts_nmd` is still computed.
 ///
 /// `#[non_exhaustive]` so future annotation fields can be added without a
 /// SemVer break for downstream construction sites.

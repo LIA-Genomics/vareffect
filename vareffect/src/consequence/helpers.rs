@@ -254,8 +254,8 @@ pub(super) fn add_splice_spill(
 /// Clear everything numbered along the transcript on a transcript flagged
 /// [`TranscriptModel::cds_alignment_gap`]: HGVS c. and p., cDNA/CDS/protein
 /// positions, codons and amino acids; `ptc` becomes
-/// [`PtcStatus::Indeterminate`] and `predicts_nmd` false. Terms, impact and
-/// exon/intron numbers are kept (`VEP_DIVERGENCES.md` 3.3).
+/// [`PtcStatus::Indeterminate`]. Terms, impact, exon/intron numbers and
+/// `predicts_nmd` are kept (`VEP_DIVERGENCES.md` 3.3).
 ///
 /// Past a [`TranscriptModel::utr_numbering_breaks`] bound only cDNA positions,
 /// and HGVS c. or n. naming such a position, are cleared.
@@ -277,7 +277,6 @@ pub(super) fn without_gapped_numbering(
         if result.ptc != PtcStatus::NotApplicable {
             result.ptc = PtcStatus::Indeterminate;
         }
-        result.predicts_nmd = false;
     } else {
         let breaks = &transcript.utr_numbering_breaks;
         let past_cdna = |position: Option<u32>| {
