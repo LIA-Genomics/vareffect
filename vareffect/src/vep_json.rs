@@ -60,6 +60,7 @@
 //! | `protein_start/end`  | `r.protein_start/protein_end` widened `u32 -> u64`        |
 //! | `cds_start/end`      | `r.cds_position/cds_position_end`                         |
 //! | `cdna_start/end`     | `r.cdna_position/cdna_position_end`                       |
+//! | `distance`           | `r.distance` (up/downstream results)                      |
 //! | `amino_acids`        | `r.amino_acids` (e.g. `"R/W"`)                            |
 //! | `codons`             | `r.codons` (e.g. `"Cgg/Tgg"`)                             |
 //! | `exon`               | `r.exon` (e.g. `"7/11"`)                                  |
@@ -247,6 +248,7 @@ fn build_transcript_consequence(r: &ConsequenceResult) -> Value {
     insert_opt_u64(&mut map, "cds_end", r.cds_position_end.map(u64::from));
     insert_opt_u64(&mut map, "cdna_start", r.cdna_position.map(u64::from));
     insert_opt_u64(&mut map, "cdna_end", r.cdna_position_end.map(u64::from));
+    insert_opt_u64(&mut map, "distance", r.distance);
 
     // --- Optional descriptive fields ---
     insert_opt_str(&mut map, "amino_acids", r.amino_acids.as_deref());
@@ -338,6 +340,7 @@ mod tests {
             cds_position_end: None,
             cdna_position: None,
             cdna_position_end: None,
+            distance: None,
             strand: Strand::Plus,
             biotype: Biotype::ProteinCoding,
             is_mane_select: false,
@@ -554,12 +557,32 @@ mod tests {
             "cds_end",
             "cdna_start",
             "cdna_end",
+            "distance",
         ] {
             assert!(
                 obj.get(missing_key).is_none(),
                 "{missing_key} should be omitted for an intron variant; got: {tc:?}"
             );
         }
+    }
+
+    /// Upstream result: `distance` is emitted as VEP REST's integer field.
+    #[test]
+    fn vep_json_upstream_emits_distance() {
+        // Arrange
+        let r = ConsequenceResult {
+            consequences: vec![Consequence::UpstreamGeneVariant],
+            distance: Some(1_234),
+            ..make_result("NM_000546.6", "TP53")
+        };
+
+        // Act
+        let json = to_vep_json_array("chr17", 7_690_000, b"A", b"G", "GRCh38", &[r]);
+
+        // Assert
+        let tc = &json[0]["transcript_consequences"][0];
+        assert_eq!(tc["distance"], 1_234);
+        assert_eq!(tc["consequence_terms"][0], "upstream_gene_variant");
     }
 
     /// Two transcripts, one synonymous (rank 16) and one missense (rank 10).

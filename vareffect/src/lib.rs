@@ -68,7 +68,8 @@
 //! # Variant consequence assignment
 //!
 //! [`VarEffect::annotate`] takes a variant's position and alleles, locates it
-//! within every overlapping transcript, extracts the reference codon(s) from
+//! within every overlapping transcript (transcripts within 5,000 bases get
+//! `upstream_gene_variant` / `downstream_gene_variant`), extracts the reference codon(s) from
 //! FASTA, translates ref and alt codons, and assigns SO consequence term(s)
 //! with VEP-concordant IMPACT ratings. The [`codon`] module provides the
 //! standard and mitochondrial genetic code translation tables.

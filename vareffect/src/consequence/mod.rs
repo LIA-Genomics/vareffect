@@ -54,8 +54,9 @@ pub(crate) use sv::{annotate_breakend, annotate_interval, annotate_sv_insertion}
 
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
+use crate::locate::{Flank, LocateIndex, UPSTREAM_DOWNSTREAM_LIMIT, classify_flank};
 use crate::transcript::TranscriptStore;
-use crate::types::Biotype;
+use crate::types::{Biotype, TranscriptModel};
 
 /// VEP-compatible severity rating for consequence terms.
 ///
@@ -461,6 +462,12 @@ pub struct ConsequenceResult {
     /// `cdna_position`. For indels this is the last affected cDNA position.
     /// `None` for the same locations as `cdna_position`.
     pub cdna_position_end: Option<u32>,
+    /// VEP `distance`: bases from the variant to the transcript, set on
+    /// `upstream_gene_variant` and `downstream_gene_variant` results from
+    /// [`VarEffect::annotate`](crate::VarEffect::annotate) (1 for an adjacent
+    /// substitution or deletion, 0 for an insertion at the transcript's end).
+    /// `None` otherwise.
+    pub distance: Option<u64>,
     /// Transcript strand.
     pub strand: crate::types::Strand,
     /// Transcript biotype.
@@ -557,6 +564,7 @@ impl ConsequenceResult {
             cds_position_end: None,
             cdna_position: None,
             cdna_position_end: None,
+            distance: None,
             strand,
             biotype,
             is_mane_select: false,
@@ -570,9 +578,59 @@ impl ConsequenceResult {
     }
 }
 
-/// Annotate a variant against all overlapping transcripts.
+/// Query the transcripts overlapping `[start, end)` or within
+/// [`UPSTREAM_DOWNSTREAM_LIMIT`] of it on either side.
 ///
-/// Returns one [`ConsequenceResult`] per transcript. Handles SNVs,
+/// Widening the variant type's own overlap window by the limit on both sides
+/// returns every transcript [`classify_flank`] places within the limit, plus
+/// the overlapping ones; an insertion's window also holds transcripts at
+/// distance exactly the limit, which `classify_flank` rejects.
+fn query_with_flanks<'a>(
+    store: &'a TranscriptStore,
+    chrom: &str,
+    start: u64,
+    end: u64,
+) -> Vec<(&'a TranscriptModel, &'a LocateIndex)> {
+    store.query_overlap(
+        chrom,
+        start.saturating_sub(UPSTREAM_DOWNSTREAM_LIMIT),
+        end + UPSTREAM_DOWNSTREAM_LIMIT,
+    )
+}
+
+/// Annotate a transcript the variant footprint `[start, end)` lies beside.
+///
+/// Pushes an `upstream_gene_variant` or `downstream_gene_variant` result with
+/// its [`ConsequenceResult::distance`] when the transcript is within
+/// [`UPSTREAM_DOWNSTREAM_LIMIT`], and nothing when it is farther, as VEP does.
+///
+/// # Returns
+///
+/// `true` when the footprint does not overlap the transcript, so the caller
+/// skips the per-variant-type annotation; `false` when it overlaps.
+fn push_flanking(
+    results: &mut Vec<ConsequenceResult>,
+    transcript: &TranscriptModel,
+    start: u64,
+    end: u64,
+) -> bool {
+    let (term, distance) = match classify_flank(start, end, transcript) {
+        Flank::Overlaps => return false,
+        Flank::Far => return true,
+        Flank::Upstream(distance) => (Consequence::UpstreamGeneVariant, distance),
+        Flank::Downstream(distance) => (Consequence::DownstreamGeneVariant, distance),
+    };
+    let mut result = helpers::build_base_result(transcript, vec![term]);
+    result.distance = Some(distance);
+    results.push(result);
+    true
+}
+
+/// Annotate a variant against all transcripts overlapping it or within
+/// [`UPSTREAM_DOWNSTREAM_LIMIT`] of it.
+///
+/// Returns one [`ConsequenceResult`] per transcript, or a single transcript-less
+/// `intergenic_variant` result when there is none. Handles SNVs,
 /// pure insertions/deletions, boundary-spanning deletions, complex
 /// delins, and MNVs.
 ///
@@ -619,9 +677,12 @@ pub(crate) fn annotate(
     let results = match (trimmed_ref.len(), trimmed_alt.len()) {
         // SNV
         (1, 1) => {
-            let overlaps = store.query_overlap(chrom, trimmed_pos, trimmed_pos + 1);
+            let overlaps = query_with_flanks(store, chrom, trimmed_pos, trimmed_pos + 1);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
+                if push_flanking(&mut results, tx, trimmed_pos, trimmed_pos + 1) {
+                    continue;
+                }
                 // REF already verified above; use the unchecked path to
                 // avoid a redundant FASTA seek per transcript.
                 results.push(helpers::without_unknown_alt_effects(
@@ -654,9 +715,12 @@ pub(crate) fn annotate(
         (0, _) => {
             let query_start = trimmed_pos.saturating_sub(1);
             let query_end = trimmed_pos + 1;
-            let overlaps = store.query_overlap(chrom, query_start, query_end);
+            let overlaps = query_with_flanks(store, chrom, query_start, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
+                if push_flanking(&mut results, tx, trimmed_pos, trimmed_pos) {
+                    continue;
+                }
                 results.push(annotate_insertion(
                     chrom,
                     trimmed_pos,
@@ -672,9 +736,12 @@ pub(crate) fn annotate(
         // Pure deletion
         (n, 0) if n > 0 => {
             let del_end = trimmed_pos + n as u64;
-            let overlaps = store.query_overlap(chrom, trimmed_pos, del_end);
+            let overlaps = query_with_flanks(store, chrom, trimmed_pos, del_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
+                if push_flanking(&mut results, tx, trimmed_pos, del_end) {
+                    continue;
+                }
                 results.push(annotate_deletion(
                     chrom,
                     trimmed_pos,
@@ -691,9 +758,12 @@ pub(crate) fn annotate(
         // MNV: same-length multi-base substitution
         (r, a) if r == a && r > 1 => {
             let query_end = trimmed_pos + r as u64;
-            let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
+            let overlaps = query_with_flanks(store, chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
+                if push_flanking(&mut results, tx, trimmed_pos, query_end) {
+                    continue;
+                }
                 results.push(helpers::without_unknown_alt_effects(
                     &helpers::AltSite {
                         alt: trimmed_alt,
@@ -723,9 +793,12 @@ pub(crate) fn annotate(
         // Complex delins: different-length substitution
         (r, a) if r > 0 && a > 0 => {
             let query_end = trimmed_pos + r as u64;
-            let overlaps = store.query_overlap(chrom, trimmed_pos, query_end);
+            let overlaps = query_with_flanks(store, chrom, trimmed_pos, query_end);
             let mut results = Vec::with_capacity(overlaps.len());
             for (tx, idx) in overlaps {
+                if push_flanking(&mut results, tx, trimmed_pos, query_end) {
+                    continue;
+                }
                 results.push(helpers::without_unknown_alt_effects(
                     &helpers::AltSite {
                         alt: trimmed_alt,
@@ -760,7 +833,7 @@ pub(crate) fn annotate(
         }
     };
 
-    // No overlapping transcripts -- intergenic variant.
+    // No transcript within the up/downstream distance -- intergenic variant.
     if results.is_empty() {
         return Ok(vec![ConsequenceResult {
             transcript: String::new(),
@@ -778,6 +851,7 @@ pub(crate) fn annotate(
             cds_position_end: None,
             cdna_position: None,
             cdna_position_end: None,
+            distance: None,
             strand: crate::types::Strand::Plus,
             biotype: Biotype::Unknown,
             is_mane_select: false,

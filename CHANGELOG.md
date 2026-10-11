@@ -10,6 +10,11 @@ For releases before `0.5.0`, see the git history.
 
 ### Added
 
+- `ConsequenceResult::distance`: VEP's `distance` for up/downstream results
+  (from the nearer variant edge to the nearer transcript end; 1 for an
+  adjacent substitution, 0 for an insertion at the transcript's end).
+  Substitutions and deletions are reported up to 5,000, insertions up to
+  4,999, as VEP 116 does.
 - A versioned transcript store format. `transcript_models.bin` now opens
   with a 12-byte header (magic `VEFXTXM\0` plus a `u32` little-endian format
   version, 3 in this release) followed by a MessagePack payload: the
@@ -111,6 +116,17 @@ For releases before `0.5.0`, see the git history.
 
 ### Changed
 
+- **Breaking (meaning):** `VarEffect::annotate` now also returns transcripts
+  within 5,000 bases of a variant it does not overlap, each with
+  `upstream_gene_variant` or `downstream_gene_variant` (MODIFIER), as VEP's
+  default `--distance 5000` does; `intergenic_variant` now means no transcript
+  in range. Before, the per-variant overlap query made these terms almost
+  unreachable. A consumer that picks one transcript per variant, or treats any
+  result as "in a gene", should drop results whose only terms are these two
+  to keep the earlier behavior. The CSQ field layout is unchanged, but VCF
+  output from `vareffect annotate` now carries these entries: records within
+  5,000 bases of a transcript they do not overlap gain a CSQ they lacked, and
+  genic records gain up/downstream entries. The VEP JSON gains `distance`. Structural-variant entry points are unchanged.
 - Selenocysteine, following VEP 116. The MANE build reads `aa:Sec` from
   `transl_except` (35 codons on 25 MANE 1.5 transcripts; other entries are
   counted in the manifest's `other_transl_except`), so the MANE store bytes
