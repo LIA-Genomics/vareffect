@@ -9,7 +9,7 @@
 //! ```
 //!
 //! All reference bases are derived from the GRCh38.p14 primary assembly
-//! and cross-checked against the Ensembl VEP REST API (POLH frameshift,
+//! and cross-checked against the Ensembl VEP REST API (SYNGAP1 deletion,
 //! BRCA1 insertion). If the reference genome changes, the expected anchor
 //! bases here must be updated.
 
@@ -36,20 +36,20 @@ fn open_var_effect() -> VarEffect {
     VarEffect::new(transcripts, fasta)
 }
 
-/// POLH deletion `NM_006772.2:c.1861_1862del` — VEP REST emits
-/// `pos=33409450` with alleles `TG/-` on chr6. The expected VCF form is
-/// `pos=33409449, ref="ATG", alt="A"` where the anchor base `A` lives at
-/// 1-based `chr6:33409449` (0-based `33409448`).
+/// SYNGAP1 deletion `NM_006772.3:c.1861_1862del` — VEP 116 REST emits
+/// `start=33440913` with alleles `CG/-` on chr6. The expected VCF form is
+/// `pos=33440912, ref="ACG", alt="A"`, the anchor base `A` at 1-based
+/// `chr6:33440912` (GRCh38 `chr6:33440910-33440916` reads `TCACGAA`).
 #[test]
 #[ignore]
-fn anchor_prepend_deletion_polh() {
+fn anchor_prepend_deletion_syngap1() {
     let ve = open_var_effect();
     let (pos, ref_a, alt_a) = ve
-        .anchor_prepend_indel("chr6", 33_409_450, "TG", "-")
+        .anchor_prepend_indel("chr6", 33_440_913, "CG", "-")
         .unwrap()
         .expect("pure deletion should be normalized");
-    assert_eq!(pos, 33_409_449);
-    assert_eq!(ref_a, "ATG");
+    assert_eq!(pos, 33_440_912);
+    assert_eq!(ref_a, "ACG");
     assert_eq!(alt_a, "A");
 }
 
