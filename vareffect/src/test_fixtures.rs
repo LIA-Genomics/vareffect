@@ -72,6 +72,7 @@ pub fn plus_strand_coding() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -144,6 +145,7 @@ pub fn minus_strand_coding() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -189,6 +191,7 @@ pub fn single_exon_coding() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -227,6 +230,7 @@ pub fn noncoding_2_exon() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }

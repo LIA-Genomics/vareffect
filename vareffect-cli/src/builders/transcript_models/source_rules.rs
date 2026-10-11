@@ -105,6 +105,100 @@ pub(super) fn gap_moves_cds_numbering(
     })
 }
 
+/// The 1-based model cDNA position of the first exonic base at or after
+/// genomic base `pos` in transcript order, or `None` past the last exon.
+///
+/// # Arguments
+///
+/// * `exons` - The model's exons in transcript order
+/// * `plus` - Transcript strand
+/// * `pos` - 0-based genomic base
+pub(super) fn cdna_at_or_after(exons: &[Exon], plus: bool, pos: u64) -> Option<u32> {
+    let mut before = 0u64;
+    for exon in exons {
+        if plus && pos < exon.genomic_end {
+            return u32::try_from(before + pos.saturating_sub(exon.genomic_start) + 1).ok();
+        }
+        if !plus && pos >= exon.genomic_start {
+            return u32::try_from(before + (exon.genomic_end - 1).saturating_sub(pos) + 1).ok();
+        }
+        before += exon.genomic_end - exon.genomic_start;
+    }
+    None
+}
+
+/// One alignment gap outside the CDS span, in model cDNA positions
+/// (1-based, transcript order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UtrGapBreak {
+    /// First position numbered differently from the transcript: the base
+    /// after an `I` gap, the first base of a `D` gap.
+    pub(super) shifted_from: u32,
+    /// Last position whose count back to a later base crosses the gap: the
+    /// base before an `I` gap (0 at the transcript start), the last base of a
+    /// `D` gap.
+    pub(super) crossed_through: u32,
+}
+
+/// The alignment gaps outside the CDS span (anywhere on a non-coding
+/// transcript) that move model numbering: an `I` gap at or inside the
+/// transcript's 5' end and before its 3' end, a `D` gap overlapping an exon.
+///
+/// # Arguments
+///
+/// * `ops` - The transcript's alignment gaps on this locus
+/// * `cds` - The CDS span, 0-based half-open, or `None` for a non-coding
+///   transcript
+/// * `exons` - The model's exons in transcript order
+/// * `plus` - Transcript strand
+pub(super) fn utr_gap_breaks(
+    ops: &[GapOp],
+    cds: Option<(u64, u64)>,
+    exons: &[Exon],
+    plus: bool,
+) -> Vec<UtrGapBreak> {
+    let tx_start = exons.iter().map(|e| e.genomic_start).min().unwrap_or(0);
+    let tx_end = exons.iter().map(|e| e.genomic_end).max().unwrap_or(0);
+    let outside_cds = |start: u64, end: u64| cds.is_none_or(|(cs, ce)| end <= cs || ce <= start);
+    ops.iter()
+        .filter_map(|op| match *op {
+            GapOp::Insertion { at } => {
+                let inside = if plus {
+                    tx_start <= at && at < tx_end
+                } else {
+                    tx_start < at && at <= tx_end
+                };
+                if !inside || !outside_cds(at, at) {
+                    return None;
+                }
+                let shifted_from = cdna_at_or_after(exons, plus, if plus { at } else { at - 1 })?;
+                Some(UtrGapBreak {
+                    shifted_from,
+                    crossed_through: shifted_from - 1,
+                })
+            }
+            GapOp::Deletion { start, end } => {
+                let exonic: u64 = exons
+                    .iter()
+                    .map(|e| {
+                        end.min(e.genomic_end)
+                            .saturating_sub(start.max(e.genomic_start))
+                    })
+                    .sum();
+                if exonic == 0 || !outside_cds(start, end) {
+                    return None;
+                }
+                let shifted_from =
+                    cdna_at_or_after(exons, plus, if plus { start } else { end - 1 })?;
+                Some(UtrGapBreak {
+                    shifted_from,
+                    crossed_through: shifted_from + u32::try_from(exonic).ok()? - 1,
+                })
+            }
+        })
+        .collect()
+}
+
 /// Selenocysteine codons and the count of other entries in a RefSeq
 /// `transl_except` attribute.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -282,6 +376,52 @@ mod tests {
         );
         let insertion = parse_gap_ops("M5 I1 M5", 0, 10, Strand::Minus).expect("minus I");
         assert_eq!(insertion, vec![GapOp::Insertion { at: 5 }]);
+    }
+
+    #[test]
+    fn utr_gap_breaks_bound_both_sides_of_each_gap() {
+        // Two exons 100..200 and 300..400, CDS 150..350.
+        let exons = [
+            Exon {
+                exon_number: 1,
+                genomic_start: 100,
+                genomic_end: 200,
+            },
+            Exon {
+                exon_number: 2,
+                genomic_start: 300,
+                genomic_end: 400,
+            },
+        ];
+        let cds = Some((150, 350));
+        let gap = |shifted_from, crossed_through| UtrGapBreak {
+            shifted_from,
+            crossed_through,
+        };
+        let ops = [
+            GapOp::Insertion { at: 100 },
+            GapOp::Insertion { at: 150 },
+            GapOp::Insertion { at: 200 },
+            GapOp::Deletion {
+                start: 380,
+                end: 382,
+            },
+        ];
+        // Before the first base; right at the CDS start (cDNA 51); the CDS
+        // insertion is no UTR break; a 2-base 3'UTR deletion at cDNA 181.
+        assert_eq!(
+            utr_gap_breaks(&ops, cds, &exons, true),
+            vec![gap(1, 0), gap(51, 50), gap(181, 182)]
+        );
+        let minus: Vec<Exon> = exons.iter().rev().cloned().collect();
+        assert_eq!(cdna_at_or_after(&minus, false, 399), Some(1));
+        assert_eq!(cdna_at_or_after(&minus, false, 250), Some(101));
+        // Minus strand, insertion at the CDS end (its 5' start): cDNA 51.
+        let minus_cds = [GapOp::Insertion { at: 350 }];
+        assert_eq!(
+            utr_gap_breaks(&minus_cds, cds, &minus, false),
+            vec![gap(51, 50)]
+        );
     }
 
     #[test]

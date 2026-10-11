@@ -25,7 +25,7 @@ cat out_gencode.jsonl out_refseq.jsonl out_mane.jsonl out_gencode_r4.jsonl out_g
   > ../incomplete_cds_transcripts.jsonl
 ```
 
-The models carry the store format 2 fields (see the extractor's docstring):
+The models carry the store format 2 fields (format 3 adds only `utr_numbering_breaks`, empty here) (see the extractor's docstring):
 `tier` from the MANE tag (`null` otherwise), CDS completeness from the GENCODE
 `cds_start_NF` / `cds_end_NF` tags or the RefSeq ranges, and the genome-mismatch
 flags. NM_001304717.5 has a `D` gap (a 1-base frameshift intron), so

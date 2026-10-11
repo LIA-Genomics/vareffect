@@ -31,6 +31,7 @@ Contents:
 | Deletion removing a CDS end with no stop | `stop_lost` / `stop_retained_variant` | no stop term | [3.1](#31-partial-first-and-last-codons) |
 | Splice-region windows near a frameshift intron | spill up to 7 exon bases (SNVs), stop at 8 (indels) | 3 exon bases (SNVs), up to 16 (indel acceptor side) | [3.2](#32-frameshift-introns) |
 | CDS alignment gap with transcript-only bases | HGVS c./p. (not measured) | no HGVS c./p. | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
+| UTR alignment gap | cDNA and UTR HGVS c. in the transcript's numbering; intronic anchors one off after a 5'UTR gap (decision open) | numbers past the gap not reported | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
 | NMD | `NMD.pm` rules, biotype term `NMD_transcript_variant` | last-junction rule only; `ptc` field for PVS1 | [4](#4-nmd) |
 | Structural variants | codon and splice terms at breakpoints | region-level terms only | [5](#5-structural-variants) |
 | HGVS 3' shift | `--shift_hgvs` toggle | always on | [6.2](#62-not-yet-implemented) |
@@ -180,14 +181,37 @@ wrong frame. Consequence terms, impact and exon/intron numbers are reported.
 VEP 116 writes all of these in the transcript's numbering (NM_002111.8, HTT,
 `I` gap in exon 1: `c.311A>G`, `p.His104Arg`, CDS position 311); the
 consequence term matches, as it does for SHANK3 and NBPF1 past their coverage
-breaks. RefSeq RS_2025_08 has 60 flagged coding transcripts. Of the
+breaks. RefSeq RS_2025_08 has 63 flagged coding transcripts. Of the
 53 with an in-row gap inside the CDS span, 38 are flagged (31 `I` only, 3 `I`
 and an in-exon `D`, 4 in-exon `D` only) and the 15 with only exon-split `D`
-gaps are not; coverage breaks add 22. An interior range is not an open CDS
+gaps are not; coverage breaks add 22, and a CDS open on the genome (a
+`start_range` / `end_range` at a CDS end) adds 3: a curated RefSeq CDS is
+whole on the transcript, so an open end means coding bases the alignment
+leaves out (RFLNB NM_182705.3 aligns from transcript base 367; VEP 116
+`c.665T>C` where the genome-built numbering gives `c.299T>C`). An interior range is not an open CDS
 end: the start and stop stay complete (VEP 116 calls `start_lost` on SHANK3).
 Accepted by maintainer decisions (issue 13, GAP-1): a missing HGVS string,
 position or codon is safer than one that names the wrong base or residue.
 MANE 1.5 has no such transcript.
+
+A gap outside the CDS moves only the numbers counted across it:
+`TranscriptModel::utr_numbering_breaks` records, from the RefSeq alignment,
+the first cDNA position past a UTR gap (1 when the transcript's first bases
+align nowhere), the `c.-N` from which counting back to the CDS crosses a
+5'UTR gap, and the `c.*N` past a 3'UTR gap. `vareffect` reports no cDNA
+position, HGVS c. or HGVS n. at or past these bounds and refuses to resolve
+such HGVS c.; CDS-relative numbering is unaffected. Not cleared: a stop-lost
+extension's or a frameshift's `Ter` count (and a termination codon found in
+the 3'UTR) is read from genome-built 3'UTR sequence, so a 3'UTR gap between
+the CDS end and that stop can move it. Unaligned bases at the 3' end (typically poly(A)) move no
+number. RefSeq RS_2025_08: 106 transcripts (PTEN NM_001304718.2, `D` gap in
+exon 1: cDNA one off, VEP 116 cDNA 1065 where the genome gives 1064 on
+VPS26C NM_001331018.1). Open for a maintainer decision: on transcripts with
+a 5'UTR gap, VEP 116 anchors intronic HGVS (CDS introns included) one base off
+from its own exonic numbering. It numbers the first base of VPS26C
+NM_001331018.1 exon 2 `c.58` and of KLHL5 NM_001007075.2 exon 8 `c.1301`,
+yet writes `c.57-963C>T` and `c.1302-268G>C` for the intron before them;
+`vareffect` writes `c.58-963C>T` and `c.1301-268G>C`.
 
 ## 4. NMD
 

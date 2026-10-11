@@ -12,7 +12,7 @@ For releases before `0.5.0`, see the git history.
 
 - A versioned transcript store format. `transcript_models.bin` now opens
   with a 12-byte header (magic `VEFXTXM\0` plus a `u32` little-endian format
-  version, 2 in this release) followed by a MessagePack payload: the
+  version, 3 in this release) followed by a MessagePack payload: the
   transcript source, its release and the `Vec<TranscriptModel>`. The version
   is checked before the payload is decoded.
 - `TranscriptSource` (`Mane`, `RefSeq`, `Gencode`; `#[non_exhaustive]`), and
@@ -22,8 +22,8 @@ For releases before `0.5.0`, see the git history.
 - `TranscriptModel::new` and `with_*` setters. New model fields:
   `cds_start_complete` / `cds_end_complete` (GENCODE `cds_start_NF` /
   `cds_end_NF`, RefSeq partial CDS ranges), `genome_mismatch`,
-  `cds_alignment_gap` and `selenocysteine_codons`. MANE models are complete
-  and genome-matching.
+  `cds_alignment_gap`, `utr_numbering_breaks` (`UtrNumberingBreaks`) and
+  `selenocysteine_codons`. MANE models are complete and genome-matching.
 - Multi-locus accessions: one chrX and one chrY copy of a pseudoautosomal
   transcript. `TranscriptStore::get_all_by_accession` returns every copy in
   canonical chromosome order (`chrom::canonical_order_key`, then
@@ -147,7 +147,10 @@ For releases before `0.5.0`, see the git history.
   false (consequence terms, impact and exon / intron numbers are kept), and
   `resolve_hgvs_c` refuses it with the new
   `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3).
-  No MANE 1.5 output changes.
+  A RefSeq CDS open on the genome sets `cds_alignment_gap`. Past a
+  `utr_numbering_breaks` bound (a RefSeq UTR alignment gap, or transcript
+  bases before the alignment), cDNA positions and HGVS c. or n. are not
+  reported, and such HGVS c. is not resolved. No MANE 1.5 output changes.
 - **Breaking.** Stores written by vareffect 0.5 and earlier are refused with
   `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`, and
   format 1 stores from development builds of 0.6 with

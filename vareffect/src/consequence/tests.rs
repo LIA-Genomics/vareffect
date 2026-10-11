@@ -280,6 +280,7 @@ fn mito_coding() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -317,6 +318,7 @@ fn single_exon_coding() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -403,6 +405,7 @@ fn stop_gained_transcript() -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
@@ -1596,6 +1599,37 @@ fn alt_extends_ref_matches_either_end() {
     assert!(!alt_extends_ref(b"LX", b"*GX"));
     assert!(!alt_extends_ref(b"NX", b"NPX"));
     assert!(alt_extends_ref(b"L", b"L*GG"));
+}
+
+#[test]
+fn names_broken_position_reads_both_range_ends() {
+    use super::helpers::names_broken_position;
+    let breaks = crate::UtrNumberingBreaks::new(Some(40), Some(10), Some(5));
+    assert!(names_broken_position("NM_1.1:c.-497+5G>A", &breaks));
+    assert!(!names_broken_position("c.-9G>A", &breaks));
+    assert!(names_broken_position("c.1230_*6del", &breaks));
+    assert!(!names_broken_position("c.*4G>A", &breaks));
+    assert!(names_broken_position("NR_1.1:n.40A>G", &breaks));
+    assert!(!names_broken_position("NM_1.1:c.100-5G>A", &breaks));
+}
+
+#[test]
+fn utr_numbering_breaks_clear_only_numbers_past_them() {
+    let tx = plus_strand_coding().with_utr_numbering_breaks(crate::UtrNumberingBreaks::new(
+        Some(40),
+        Some(10),
+        None,
+    ));
+    let mut result = super::helpers::build_base_result(&tx, vec![Consequence::MissenseVariant]);
+    result.hgvs_c = Some("NM_TEST_PLUS.1:c.10A>G".to_string());
+    result.cdna_position = Some(40);
+    let cds = super::helpers::without_gapped_numbering(&tx, result.clone());
+    assert_eq!(cds.hgvs_c.as_deref(), Some("NM_TEST_PLUS.1:c.10A>G"));
+    assert_eq!(cds.cdna_position, None);
+    result.hgvs_c = Some("NM_TEST_PLUS.1:c.-12A>G".to_string());
+    result.cdna_position = Some(3);
+    let utr = super::helpers::without_gapped_numbering(&tx, result);
+    assert_eq!((utr.hgvs_c, utr.cdna_position), (None, Some(3)));
 }
 
 #[test]
@@ -3017,6 +3051,7 @@ fn shift_transcript(strand: Strand) -> TranscriptModel {
         cds_end_complete: true,
         genome_mismatch: false,
         cds_alignment_gap: false,
+        utr_numbering_breaks: Default::default(),
         selenocysteine_codons: Vec::new(),
     }
 }
