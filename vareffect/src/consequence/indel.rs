@@ -1,10 +1,10 @@
 //! Indel (insertion and deletion) consequence annotation.
 
 use super::helpers::{
-    AltSite, add_splice_spill, build_base_result, compute_cdna_position_exonic,
-    compute_cdna_position_for_cds, ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon,
-    finalize_consequences, has_complete_start_codon, is_incomplete_terminal_codon,
-    without_gapped_numbering, without_unknown_alt_effects,
+    AltSite, add_splice_spill, build_base_result, complete_codons_end,
+    compute_cdna_position_exonic, compute_cdna_position_for_cds, ends_in_stop_codon,
+    fetch_cds_sequence, fetch_ref_codon, finalize_consequences, has_complete_start_codon,
+    is_incomplete_terminal_codon, without_gapped_numbering, without_unknown_alt_effects,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -173,10 +173,11 @@ fn annotate_deletion_core(
                         exon_index,
                     )
                 } else if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
-                    deletion_into_partial_codon_result(
+                    indel_into_partial_codon_result(
                         chrom,
                         *cds_offset_start,
                         *cds_offset_end,
+                        &[],
                         transcript,
                         locate_index,
                         fasta,
@@ -289,25 +290,61 @@ pub(super) fn translate_reference_with_partial_codon(
     Ok(aas)
 }
 
-/// Result for a deletion that starts in a complete codon and ends in the
-/// incomplete terminal codon of a CDS whose length is not a whole number of
-/// codons.
+/// Result for a deletion or deletion-insertion that starts in a complete
+/// codon and ends in the incomplete terminal codon of a CDS whose length is
+/// not a whole number of codons, or at the end of such a CDS.
 ///
-/// Ending inside the partial codon, it shifts or removes complete codons:
+/// Codons and amino acids run from the first changed codon to the CDS end,
+/// the partial codon read as `X`, and HGVS p. is `p.?`: the residue of the
+/// partial codon is unknown. A stop created in a complete codon gets its
+/// PTC as an SNV stop there does; a frameshift without one is
+/// [`super::PtcStatus::Indeterminate`]: the new frame runs past the
+/// annotated sequence. VEP 116 writes strings such as `p.LeuTer47=`
+/// and `p.Leu48LeufsTer?` there (VEP_DIVERGENCES.md).
+///
+/// A pure deletion (`replacement` empty) shifts or removes complete codons:
 /// `frameshift_variant` (or `inframe_deletion`), as VEP 116 gives for
 /// NM_001424184.1 `c.657_658del` (codons `tcATa/tca`, amino acids `SX/S`).
 /// Removing the CDS end itself leaves no reading frame to shift and no stop
 /// codon to lose: `incomplete_terminal_codon_variant` +
 /// `coding_sequence_variant`. VEP's `frameshift_variant` + `stop_lost` there
 /// (`c.656_659del`) names a stop the transcript does not have
-/// (VEP_DIVERGENCES.md), and has no HGVS p. Otherwise HGVS p. is `p.?` and
-/// the termination codon is undetermined: the new frame runs past the
-/// annotated sequence.
+/// (VEP_DIVERGENCES.md), and has no HGVS p.
+///
+/// A deletion-insertion or MNV follows VEP 116 (ENST00000229384.5,
+/// ENST00000237512.4, `.vareffect-tasks/partial-codon-errors`): a length
+/// change that is not a whole number of codons is `frameshift_variant`
+/// (`c.141_142delinsA`, also at the CDS end). A gain of whole codons whose
+/// alternate peptide starts or ends with the reference one is
+/// `inframe_insertion` (`c.141_142delinsACTGA`, `LX/LLX`); any other
+/// non-zero whole-codon change is `protein_altering_variant`
+/// (`c.138_142delinsAA`), unless the alternate peptide starts with a stop or,
+/// stop included, starts or ends with the reference one (`LX/Y*LX`).
+/// A new stop codon adds `stop_gained` (ENST00000456594.1
+/// `c.710_712delinsAG`, `SX/*`), an MNV that changes a complete codon's
+/// residue `missense_variant` (ENST00000568666.5 `c.1209_1210delinsGT`,
+/// `FX/LX`). `coding_sequence_variant` joins every result but a frameshift
+/// or `protein_altering_variant` (VEP's `coding_unknown`: the reference
+/// peptide ends in `X`), so an MNV is `coding_sequence_variant` and
+/// `c.140_142delinsAAGGGA` (`LX/*GX`) `stop_gained` +
+/// `coding_sequence_variant`.
+///
+/// # Arguments
+///
+/// * `cds_offset_start`, `cds_offset_end` - Padded CDS offsets of the
+///   replaced bases, half-open
+/// * `replacement` - The inserted bases in plus-strand genomic order (empty
+///   for a pure deletion)
+///
+/// # Errors
+///
+/// Returns an error if the CDS bases cannot be read from the reference.
 #[allow(clippy::too_many_arguments)]
-fn deletion_into_partial_codon_result(
+pub(super) fn indel_into_partial_codon_result(
     chrom: &str,
     cds_offset_start: u32,
     cds_offset_end: u32,
+    replacement: &[u8],
     transcript: &TranscriptModel,
     index: &LocateIndex,
     fasta: &FastaReader,
@@ -319,23 +356,13 @@ fn deletion_into_partial_codon_result(
     let ref_seq = fetch_cds_sequence(codon_start, total, chrom, transcript, index, fasta)?;
     let local_start = (cds_offset_start - codon_start) as usize;
     let local_end = (cds_offset_end - codon_start) as usize;
-    let mut alt_seq = ref_seq[..local_start].to_vec();
-    alt_seq.extend_from_slice(&ref_seq[local_end..]);
-
-    let mut consequences = if cds_offset_end >= total {
-        vec![
-            Consequence::IncompleteTerminalCodonVariant,
-            Consequence::CodingSequenceVariant,
-        ]
-    } else if (cds_offset_end - cds_offset_start).is_multiple_of(3) {
-        vec![Consequence::InframeDeletion]
-    } else {
-        vec![Consequence::FrameshiftVariant]
+    let coding_replacement = match transcript.strand {
+        Strand::Plus => replacement.to_vec(),
+        Strand::Minus => reverse_complement(replacement),
     };
-    if is_splice_region {
-        consequences.push(Consequence::SpliceRegionVariant);
-    }
-    let impact = finalize_consequences(&mut consequences);
+    let mut alt_seq = ref_seq[..local_start].to_vec();
+    alt_seq.extend_from_slice(&coding_replacement);
+    alt_seq.extend_from_slice(&ref_seq[local_end..]);
 
     let is_mito = transcript.chrom == "chrM";
     let ref_aas = translate_reference_with_partial_codon(
@@ -345,6 +372,59 @@ fn deletion_into_partial_codon_result(
         is_mito,
     )?;
     let alt_aas = translate_with_partial_codon(&alt_seq, is_mito)?;
+
+    let deleted = cds_offset_end - cds_offset_start;
+    let mut consequences = if replacement.is_empty() {
+        if cds_offset_end >= total {
+            vec![
+                Consequence::IncompleteTerminalCodonVariant,
+                Consequence::CodingSequenceVariant,
+            ]
+        } else if deleted.is_multiple_of(3) {
+            vec![Consequence::InframeDeletion]
+        } else {
+            vec![Consequence::FrameshiftVariant]
+        }
+    } else {
+        let inserted = coding_replacement.len() as u32;
+        let mut terms = Vec::new();
+        if !inserted.abs_diff(deleted).is_multiple_of(3) {
+            terms.push(Consequence::FrameshiftVariant);
+        } else if inserted > deleted && alt_extends_ref(&ref_aas, &alt_aas) {
+            terms.push(Consequence::InframeInsertion);
+        } else if inserted != deleted
+            && alt_aas.first() != Some(&b'*')
+            && !alt_aas.starts_with(&ref_aas)
+            && !alt_aas.ends_with(&ref_aas)
+        {
+            // VEP's `protein_altering_variant` matches the whole alternate
+            // peptide, stop included: `c.140_142delinsATTAATTGA` (`LX/Y*LX`)
+            // is `stop_gained` + `coding_sequence_variant`.
+            terms.push(Consequence::ProteinAlteringVariant);
+        }
+        let stop_gained = alt_aas.contains(&b'*') && !ref_aas.contains(&b'*');
+        if stop_gained {
+            terms.push(Consequence::StopGained);
+        } else if inserted == deleted && residue_changed(&ref_aas, &alt_aas) {
+            terms.push(Consequence::MissenseVariant);
+        }
+        // VEP's `coding_unknown`: the reference peptide ends in `X`, so
+        // `coding_sequence_variant` joins every term but frameshift and
+        // protein_altering_variant.
+        if !terms.iter().any(|t| {
+            matches!(
+                t,
+                Consequence::FrameshiftVariant | Consequence::ProteinAlteringVariant
+            )
+        }) {
+            terms.push(Consequence::CodingSequenceVariant);
+        }
+        terms
+    };
+    if is_splice_region {
+        consequences.push(Consequence::SpliceRegionVariant);
+    }
+    let impact = finalize_consequences(&mut consequences);
     let protein_start = codon_start / 3 + 1;
 
     let mut result = build_base_result(transcript, consequences);
@@ -364,16 +444,62 @@ fn deletion_into_partial_codon_result(
     result.cdna_position = Some(compute_cdna_position_for_cds(cds_offset_start, index));
     result.cdna_position_end = Some(compute_cdna_position_for_cds(cds_offset_end - 1, index));
     // A deletion removing the CDS end has no protein change to name (VEP 116
-    // NM_001424184.1 c.656_659del: no HGVS p.); one ending inside the partial
-    // codon has an unknown one.
-    result.hgvs_p = (cds_offset_end < total).then(|| "p.?".to_string());
-    if result
+    // NM_001424184.1 c.656_659del: no HGVS p.); every other change reaching
+    // the partial codon has an unknown one.
+    result.hgvs_p = (!replacement.is_empty() || cds_offset_end < total).then(|| "p.?".to_string());
+    // A new stop in the complete codons is located as for an SNV at that
+    // codon; a frameshift without one runs past the annotated sequence.
+    result.ptc = if result.consequences.contains(&Consequence::StopGained) {
+        super::nmd::ptc_for_window(
+            &result.consequences,
+            &alt_aas,
+            &ref_aas,
+            codon_start / 3,
+            &crate::hgvs_p::CdsEdit {
+                start: cds_offset_start,
+                del_len: deleted,
+                ins_len: coding_replacement.len() as u32,
+            },
+            index,
+        )
+    } else if result
         .consequences
         .contains(&Consequence::FrameshiftVariant)
     {
-        result.ptc = super::PtcStatus::Indeterminate;
-    }
+        super::PtcStatus::Indeterminate
+    } else {
+        super::PtcStatus::NotApplicable
+    };
     Ok(result)
+}
+
+/// `true` when the alternate peptide, cut after its first stop, starts or
+/// ends with the reference peptide: VEP's `inframe_insertion` test for a
+/// gain of whole codons (`VariationEffect.pm::inframe_insertion`, release
+/// 116).
+///
+/// # Arguments
+///
+/// * `ref_aas`, `alt_aas` - Reference and alternate peptides
+pub(super) fn alt_extends_ref(ref_aas: &[u8], alt_aas: &[u8]) -> bool {
+    let alt = match alt_aas.iter().position(|&a| a == b'*') {
+        Some(stop) => &alt_aas[..=stop],
+        None => alt_aas,
+    };
+    alt.starts_with(ref_aas) || alt.ends_with(ref_aas)
+}
+
+/// `true` when two equal-length peptides differ at a residue both of them
+/// know: the partial-codon `X` on either side is not a residue.
+///
+/// # Arguments
+///
+/// * `ref_aas`, `alt_aas` - Reference and alternate peptides
+pub(super) fn residue_changed(ref_aas: &[u8], alt_aas: &[u8]) -> bool {
+    ref_aas
+        .iter()
+        .zip(alt_aas)
+        .any(|(r, a)| r != a && *r != b'X' && *a != b'X')
 }
 
 /// Result for a deletion or insertion that starts in the incomplete terminal
@@ -1230,7 +1356,6 @@ fn annotate_cds_inframe_deletion(
 ) -> Result<ConsequenceResult, VarEffectError> {
     let is_mito = transcript.chrom == "chrM";
 
-    let total_cds = index.total_cds_length();
     let codon_start = (cds_offset_start / 3) * 3;
     let codon_end = ((cds_offset_end - 1) / 3 + 1) * 3;
 
@@ -1289,7 +1414,7 @@ fn annotate_cds_inframe_deletion(
     // For the protein-level 3' rule, extend the AA window with
     // downstream context so deletions in amino acid repeats are shifted
     // to the most C-terminal position.
-    let ext_codon_end = (codon_end + 90).min(total_cds);
+    let ext_codon_end = (codon_end + 90).min(complete_codons_end(index));
     let (ref_aas_ext, alt_aas_ext) = if ext_codon_end > codon_end {
         let ext_seq =
             fetch_cds_sequence(codon_end, ext_codon_end, chrom, transcript, index, fasta)?;

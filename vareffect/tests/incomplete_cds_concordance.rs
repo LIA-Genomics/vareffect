@@ -69,6 +69,11 @@
 //!     bases unrotated (NM_001424184.1 insTGA after c.657: vareffect
 //!     `c.658_659insTGA`, VEP 116 `c.658_659insGAT`). HGVS c. is not compared
 //!     on those rows (`INSERTION_ROTATION_ROWS`).
+//! 11. A deletion-insertion or MNV from a complete codon into the 3' partial
+//!     codon (rows `partial_span_*`, built GENCODE store) is `p.?` in
+//!     vareffect: VEP 116 writes `p.LeuTer47=`, `p.Leu48LeufsTer?`,
+//!     `p.Phe403Leu`, `p.Ser237Ter` or nothing there, though the partial
+//!     codon's residue is unknown.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -245,8 +250,11 @@ fn expected_terms(row: &VepRow) -> BTreeSet<String> {
         .collect()
 }
 
-/// VEP's HGVS p. with normalization 2 applied, without the accession.
+/// VEP's HGVS p. with normalizations 2 and 11 applied, without the accession.
 fn expected_hgvsp(row: &VepRow) -> Option<String> {
+    if row.label.starts_with("partial_span_") {
+        return Some("p.?".to_string());
+    }
     let has_term = |term: &str| row.consequences.iter().any(|t| t == term);
     // Only where VEP writes an HGVS c.: when its 3' shift moves an insertion
     // past the CDS (row partial3_ins_5p_edge_tag) neither tool writes a p.
@@ -521,8 +529,9 @@ fn load_built_stores() -> Option<(VarEffect, VarEffect)> {
     Some((refseq, gencode))
 }
 
-/// The same VEP rows, plus split stops, a chrY PAR copy, a gapped-CDS NM_
-/// and a non-MANE NM_ (`source_stores_vep116.tsv`), on the stores built from
+/// The same VEP rows, plus split stops, a chrY PAR copy, a gapped-CDS NM_,
+/// a non-MANE NM_ and deletion-insertions and MNVs reaching a 3' partial
+/// codon (`source_stores_vep116.tsv`), on the stores built from
 /// RefSeq RS_2025_08 and GENCODE v50 instead of the extracted fixture: an
 /// `ENST` row runs on the GENCODE store, any other on the RefSeq store.
 ///

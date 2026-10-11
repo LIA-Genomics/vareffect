@@ -1,4 +1,4 @@
-# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched 2026-10-07 and 2026-10-09 (dates per record in vep_rest/); one row per (variant, transcript).
+# Ensembl VEP REST release 116 (/info/software), GRCh38, fetched on the date each record in vep_rest/ names; one row per (variant, transcript).
 # pos is 1-based; ref/alt as VEP's allele_string (`-` = empty). `-` in any other column = field absent in VEP's JSON;
 # `?` in exon/intron = not requested (rows queried without numbers=1).
 # Built by tools/merge_vep_rows.py (next to this file) from the per-query REST records; see tools/README.md.

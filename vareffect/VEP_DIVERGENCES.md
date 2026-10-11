@@ -96,6 +96,7 @@ polyadenylation, as in MT-ND4 and TMEM247). `vareffect` follows VEP 116:
 | Insertion before the partial codon | `inframe_insertion` + `incomplete_terminal_codon_variant`, inserted bases translated on their own: `GGG` `-/G`; `G`, `GG` `-/X` + `coding_sequence_variant`; `TGA`, `TGAG` `-/*`, `TGAGGG` `-/*G`, `GGGTGAG` `-/G*X`, each with `stop_gained`. |
 | Minus-strand insertion after the last CDS base | `3_prime_UTR_variant` with a 3'UTR (ENST00000654733.1 `c.*1dup`), `downstream_gene_variant` without one (ENST00000518351.2). |
 | Deletion ending inside the partial codon | Frameshift or in-frame deletion (`c.658_659del` after 3' shifting). |
+| Deletion-insertion or MNV from a complete codon into the partial codon or to the CDS end | A length change that is not a whole number of codons is `frameshift_variant` (ENST00000229384.5 `c.141_142delinsA`). A gain of whole codons whose alternate peptide starts or ends with the reference one is `inframe_insertion` (`c.141_142delinsACTGA`, `LX/LLX`); any other whole-codon length change is `protein_altering_variant` (`c.138_142delinsAA`) unless the alternate peptide starts with a stop or, stop included, starts or ends with the reference one (`c.140_142delinsATTAATTGA`, `LX/Y*LX`: `stop_gained` + `coding_sequence_variant`). A new stop adds `stop_gained` (ENST00000456594.1 `c.710_712delinsAG`, `SX/*`), an MNV changing a complete codon's residue `missense_variant` (ENST00000568666.5 `c.1209_1210delinsGT`, `FX/LX`). `coding_sequence_variant` joins every result but a frameshift or `protein_altering_variant` (an MNV alone; `c.140_142delinsAAGGGA`, `LX/*GX`: `stop_gained` + `coding_sequence_variant`). |
 | Stop-codon terms | None on a CDS that does not end in a stop codon on the genome. |
 
 **Differences:**
@@ -103,7 +104,10 @@ polyadenylation, as in MT-ND4 and TMEM247). `vareffect` follows VEP 116:
 - **HGVS p. is `p.?`.** VEP prints `p.Ter1=`, `p.Ter309del`, `p.TerLeu1=`,
   naming a stop codon that is not there; for a stop an insertion creates at
   the partial codon it writes `p.Ter220=`, `p.Ter220delinsTer` or nothing.
-  The residue is unknown, so `vareffect` writes `p.?`.
+  The residue is unknown, so `vareffect` writes `p.?`. The same holds for
+  a deletion-insertion or MNV reaching the partial codon from a complete
+  one, where VEP writes `p.LeuTer47=`, `p.Leu48LeufsTer?`, `p.Phe403Leu`,
+  `p.Ser237Ter` or nothing.
 - **No stop term on a deletion that removes the CDS end** (maintainer
   decision, 2026-10-07). For a deletion starting before the partial codon
   VEP reports `frameshift_variant,stop_lost` (`c.656_659del`) or

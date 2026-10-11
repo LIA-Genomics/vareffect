@@ -481,6 +481,25 @@ pub(super) fn ends_in_stop_codon(
     Ok(crate::codon::translate_codon_for_transcript(&codon, is_mito) == b'*')
 }
 
+/// End of the last whole codon of the CDS, in VEP's padded frame.
+///
+/// Equals [`LocateIndex::total_cds_length`] when the CDS is a whole number
+/// of codons; otherwise it stops before the 1 or 2 bases of the incomplete
+/// terminal codon. A window clamped to it always translates.
+///
+/// # Arguments
+///
+/// * `index` - Locate index of the transcript
+///
+/// # Returns
+///
+/// The padded CDS offset one past the last whole codon (0 for a
+/// non-coding transcript).
+pub(super) fn complete_codons_end(index: &LocateIndex) -> u32 {
+    let total = index.total_cds_length();
+    total - total % 3
+}
+
 /// Check whether a CDS offset falls in the incomplete terminal codon of a
 /// transcript whose total CDS length is not divisible by 3.
 ///
