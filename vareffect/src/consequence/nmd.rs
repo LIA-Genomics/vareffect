@@ -223,12 +223,9 @@ pub(super) fn ptc_for_window(
 /// `first_codon`; `ref_aas` is the reference translation of the same window.
 ///
 /// Returns [`PtcStatus::Indeterminate`] when the reference window already
-/// contained a stop, because the `*` found in `alt_aas` may then be the
-/// transcript's normal termination codon rather than a premature one. Every
-/// caller now guards `StopGained` on `!ref_aas.contains(&b'*')` as well, so
-/// this is a second line of defence rather than the only one: a future caller
-/// that forgets the guard gets a withheld verdict instead of a false
-/// truncation claim.
+/// contains a stop: the `*` found in `alt_aas` may then be the transcript's
+/// normal termination codon. Callers also guard `StopGained` on
+/// `!ref_aas.contains(&b'*')`; this is a second line of defence.
 ///
 /// # Arguments
 ///
@@ -317,7 +314,9 @@ fn nmd_at_residue(residue: u32, edit: &CdsEdit, index: &LocateIndex) -> Option<b
 mod tests {
     use super::*;
     use crate::locate::LocateIndex;
-    use crate::test_fixtures::{minus_strand_coding, plus_strand_coding, single_exon_coding};
+    use crate::test_fixtures::{
+        minus_strand_coding, model, plus_strand_coding, single_exon_coding,
+    };
 
     /// Helper: build LocateIndex for a transcript fixture.
     fn build_index(tx: &crate::types::TranscriptModel) -> LocateIndex {
@@ -374,39 +373,17 @@ mod tests {
         // Inline a minimal single-exon transcript rather than importing
         // the test-only builder from consequence::tests.
         use crate::types::*;
-        let tx = TranscriptModel {
-            accession: "NM_SINGLE.1".into(),
-            protein_accession: Some("NP_SINGLE.1".into()),
-            gene_symbol: "SINGLE".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr1".into(),
-            strand: Strand::Plus,
-            tx_start: 0,
-            tx_end: 300,
-            cds_genomic_start: Some(100),
-            cds_genomic_end: Some(200),
-            exons: vec![Exon {
-                exon_number: 1,
-                genomic_start: 0,
-                genomic_end: 300,
-            }],
-            cds_segments: vec![CdsSegment {
-                exon_index: 0,
-                genomic_start: 100,
-                genomic_end: 200,
-                phase: 0,
-            }],
-            tier: Some(TranscriptTier::ManeSelect),
-            biotype: Biotype::ProteinCoding,
-            exon_count: 1,
-            cds_start_complete: true,
-            cds_end_complete: true,
-            genome_mismatch: false,
-            cds_alignment_gap: false,
-            utr_numbering_breaks: Default::default(),
-            selenocysteine_codons: Vec::new(),
-        };
+        let tx = model(
+            "NM_SINGLE.1",
+            "SINGLE",
+            "chr1",
+            Strand::Plus,
+            &[(0, 300)],
+            &[(100, 200, 0)],
+        )
+        .with_protein_accession(Some("NP_SINGLE.1".into()))
+        .with_biotype(Biotype::ProteinCoding)
+        .with_tier(TranscriptTier::ManeSelect);
         let idx = build_index(&tx);
         assert!(!predicts_nmd(10, &idx));
     }

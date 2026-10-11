@@ -294,12 +294,8 @@ pub fn locate_indel(
         return locate_indel_insertion(start, transcript, index, is_coding);
     }
 
-    // Splice overlap for the full footprint. A single `check_splice_overlap_detailed`
-    // call produces donor/acceptor/region overlap booleans using half-open
-    // interval intersection (the only correct way to match VEP's
-    // `_intron_effects` — a previous `check_splice_overlap_for_range`
-    // helper used a symmetric ±2 buffer around the footprint which
-    // over-claimed canonical at intronic +3 and the last exonic bases).
+    // Splice overlap for the whole footprint by half-open interval
+    // intersection, as VEP's `_intron_effects` does.
     let detail =
         check_splice_overlap_detailed(start, end, transcript, index.has_frameshift_intron());
     let splice_canonical = detail.overlaps_donor || detail.overlaps_acceptor;

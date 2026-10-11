@@ -258,8 +258,7 @@ pub fn format_intron_number(intron_index: u16, exon_count: u16) -> String {
 ///
 /// # Memory
 ///
-/// For TTN (~363 exons): ~2.5 KB. For a full MANE store (~6 000 transcripts):
-/// ~15 MB total.
+/// For TTN (~363 exons): ~2.5 KB per transcript.
 #[derive(Debug, Clone)]
 pub struct LocateIndex {
     /// `cumulative_cds[i]` = [`Self::cds_start_pad`] plus the sum of CDS

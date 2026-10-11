@@ -443,7 +443,7 @@ for exon numbers) next to it.
   difference: VEP writes `U` at a listed position whatever the genome codon;
   `vareffect` only for `TGA` (every selenocysteine codon in MANE 1.5, RefSeq
   RS_2025_08 and GENCODE 50 reads `TGA` on GRCh38, so no output differs).
-  VEP 116 REST rows: `.vareffect-tasks/issue-13/vep_rest_wp5.tsv`.
+  VEP 116 REST rows: `tests/data/tools/vep_rest/vep_rest_selenocysteine.tsv`.
 - **Mitochondrion.** `chrM` uses NCBI translation table 2; `chrMT` and `MT`
   resolve to `chrM` through the reader's alias table. VEP's in-frame
   insertion duplication check (`_check_for_peptide_duplication`) translates

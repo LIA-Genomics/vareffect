@@ -8,9 +8,9 @@
 //!
 //! # Transcript model store
 //!
-//! An in-memory store of MANE transcript models indexed by genomic interval
-//! for O(log n + k) overlap queries. Each [`TranscriptModel`] carries
-//! per-exon [`CdsSegment`]s with the GFF3 column-8 phase captured, so
+//! An in-memory store of transcript models (MANE, RefSeq or GENCODE) indexed by
+//! genomic interval for O(log n + k) overlap queries. Each [`TranscriptModel`]
+//! carries per-exon [`CdsSegment`]s with the GFF3 column-8 phase captured, so
 //! downstream codon walks and frameshift detection don't have to re-derive
 //! phase from scratch.
 //!

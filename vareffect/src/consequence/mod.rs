@@ -422,11 +422,12 @@ impl PtcStatus {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ConsequenceResult {
-    /// RefSeq transcript accession with version (e.g., `"NM_006772.2"`).
+    /// Transcript accession with version (`"NM_006772.2"`, or `ENST` for
+    /// GENCODE).
     pub transcript: String,
     /// HGNC gene symbol.
     pub gene_symbol: String,
-    /// RefSeq protein accession (e.g., `"NP_006763.2"`), `None` for
+    /// Protein accession (`"NP_006763.2"`, or `ENSP` for GENCODE), `None` for
     /// non-coding transcripts.
     pub protein_accession: Option<String>,
     /// SO consequence terms, ordered by severity (most severe first).
@@ -506,7 +507,7 @@ pub struct ConsequenceResult {
     /// codon, the two can disagree.
     ///
     /// Not a consequence term: VEP's `NMD_transcript_variant` (SO:0001621) is
-    /// biotype-based and irrelevant for MANE / RefSeq Select transcripts.
+    /// a transcript biotype term, which vareffect does not emit.
     pub predicts_nmd: bool,
     /// The premature termination codon's position and its own NMD verdict.
     ///
@@ -530,7 +531,7 @@ impl ConsequenceResult {
     ///
     /// # Arguments
     ///
-    /// * `transcript` -- RefSeq accession with version.
+    /// * `transcript` -- Transcript accession with version.
     /// * `gene_symbol` -- HGNC gene symbol.
     /// * `strand` -- transcript strand.
     /// * `biotype` -- transcript biotype.

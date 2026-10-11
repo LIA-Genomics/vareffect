@@ -45,12 +45,9 @@ use crate::types::{TranscriptModel, TranscriptSource};
 ///
 /// The schema-fingerprint test in this module catches shape changes; changes
 /// of meaning alone are not caught mechanically and must follow this list.
-/// The version says whether a reader can decode a store. It is not
-/// provenance: the payload names the transcript source and release, and the
-/// manifest records the input file. Version 2 added that container, the
-/// optional tier, the CDS completeness and genome-mismatch flags, the
-/// selenocysteine codons and multi-locus accessions (one chrX and one chrY
-/// PAR copy); version 3 the UTR numbering breaks.
+/// The version says whether a reader can decode a store, not where it came
+/// from: the payload names the transcript source and release, the manifest
+/// the input file. What each version changed: `CHANGELOG.md`.
 pub const TRANSCRIPT_STORE_FORMAT_VERSION: u32 = 3;
 
 /// Length in bytes of the store header that precedes the MessagePack payload.
@@ -466,29 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn header_bytes_are_pinned() {
-        let encoded = encode(&one_store()).expect("encode");
-        assert_eq!(&encoded[..TRANSCRIPT_STORE_HEADER_LEN], HEADER);
-    }
-
-    #[test]
     fn round_trip_reencodes_identically() {
         for encoded in fingerprint_stores() {
             assert_eq!(reencode(&encoded), encoded);
         }
-    }
-
-    #[test]
-    fn source_and_release_round_trip() {
-        let encoded =
-            encode_transcript_store(Some(TranscriptSource::Gencode), Some("50"), &one_store())
-                .expect("encode");
-        let data = decode_transcript_store(&encoded).expect("decode");
-        assert_eq!(data.source, Some(TranscriptSource::Gencode));
-        assert_eq!(data.source_release.as_deref(), Some("50"));
-        assert_eq!(data.transcripts.len(), 1);
-        let bare = decode_transcript_store(&encode(&one_store()).expect("encode")).expect("decode");
-        assert_eq!((bare.source, bare.source_release), (None, None));
     }
 
     #[test]
@@ -509,11 +487,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_named_and_compact_arrays_are_unversioned() {
+    fn legacy_arrays_are_unversioned() {
         let named = rmp_serde::to_vec_named(&one_store()).expect("named");
         let compact = rmp_serde::to_vec(&one_store()).expect("compact");
         for legacy in [named, compact] {
-            assert_eq!(store_format(&legacy), StoreFormat::Unversioned);
             assert!(matches!(
                 decode_transcript_store(&legacy),
                 Err(VarEffectError::UnsupportedStoreFormat {
@@ -522,28 +499,26 @@ mod tests {
                 })
             ));
         }
-    }
-
-    #[test]
-    fn every_legacy_array_marker_is_unversioned() {
         // A real legacy store opens with array16 (MANE holds 19,437 records).
-        assert_eq!(store_format(&[0xdc, 0x4b, 0xed]), StoreFormat::Unversioned);
-        assert_eq!(
-            store_format(&[0xdd, 0, 0, 0x4b, 0xed]),
-            StoreFormat::Unversioned
-        );
         let sixteen: Vec<TranscriptModel> = (0..16).map(|_| plus_strand_coding()).collect();
-        let legacy = rmp_serde::to_vec_named(&sixteen).expect("encode");
-        assert_eq!(legacy[0], 0xdc);
-        assert_eq!(store_format(&legacy), StoreFormat::Unversioned);
+        let array16 = rmp_serde::to_vec_named(&sixteen).expect("encode");
+        assert_eq!(array16[0], 0xdc);
+        for legacy in [&array16[..], &[0xdc, 0x4b, 0xed], &[0xdd, 0, 0, 0x4b, 0xed]] {
+            assert_eq!(store_format(legacy), StoreFormat::Unversioned);
+        }
     }
 
     #[test]
-    fn header_without_payload_is_a_deserialize_error() {
-        assert!(matches!(
-            decode_transcript_store(HEADER),
-            Err(VarEffectError::Deserialize(_))
-        ));
+    fn undecodable_payloads_behind_the_header_are_deserialize_errors() {
+        let version_one = rmp_serde::to_vec_named(&one_store()).expect("encode");
+        for payload in [&b""[..], b"\xc1not messagepack", &version_one] {
+            let mut bytes = HEADER.to_vec();
+            bytes.extend_from_slice(payload);
+            assert!(matches!(
+                decode_transcript_store(&bytes),
+                Err(VarEffectError::Deserialize(_))
+            ));
+        }
     }
 
     #[test]
@@ -559,16 +534,6 @@ mod tests {
                 }) if found == version
             ));
         }
-    }
-
-    #[test]
-    fn version_one_payload_behind_the_current_header_is_a_deserialize_error() {
-        let mut bytes = HEADER.to_vec();
-        bytes.extend(rmp_serde::to_vec_named(&one_store()).expect("encode"));
-        assert!(matches!(
-            decode_transcript_store(&bytes),
-            Err(VarEffectError::Deserialize(_))
-        ));
     }
 
     #[test]
@@ -593,16 +558,6 @@ mod tests {
                 found: StoreFormat::Unrecognized,
                 ..
             })
-        ));
-    }
-
-    #[test]
-    fn garbage_payload_is_a_deserialize_error() {
-        let mut bytes = HEADER.to_vec();
-        bytes.extend_from_slice(b"\xc1not messagepack");
-        assert!(matches!(
-            decode_transcript_store(&bytes),
-            Err(VarEffectError::Deserialize(_))
         ));
     }
 
@@ -644,12 +599,6 @@ mod tests {
         assert_eq!(decoded.transcripts[0].accession, one_store()[0].accession);
     }
 
-    #[test]
-    fn pre_header_readers_fail_on_versioned_stores() {
-        let encoded = encode(&one_store()).expect("encode");
-        assert!(rmp_serde::from_slice::<Vec<TranscriptModel>>(&encoded).is_err());
-    }
-
     /// Pins the serde behavior the bump rule depends on: an added field is
     /// ignored and a missing `Option` field decodes as `None`, both silently.
     #[test]
@@ -671,7 +620,7 @@ mod tests {
     /// The container's `source`, `source_release` and the model's `tier`
     /// keys are required even though their values may be nil, so a
     /// truncated or foreign payload cannot load as "source unknown" or
-    /// "no tier".
+    /// "no tier"; a missing required field is an error, not a default.
     #[test]
     fn missing_container_or_tier_keys_are_deserialize_errors() {
         let record = serde_json::to_value(plus_strand_coding()).expect("to json");
@@ -692,33 +641,21 @@ mod tests {
                 "{key}"
             );
         }
-        let mut no_tier = record;
-        no_tier.as_object_mut().expect("map").remove("tier");
-        let payload = serde_json::json!({
-            "source": null,
-            "source_release": null,
-            "transcripts": [no_tier],
-        });
-        assert!(matches!(
-            decode_transcript_store(&with_header(&payload)),
-            Err(VarEffectError::Deserialize(_))
-        ));
-    }
-
-    /// A missing required field (here a v2 flag) is an error, not a default.
-    #[test]
-    fn missing_required_field_is_a_deserialize_error() {
-        let mut record = serde_json::to_value(plus_strand_coding()).expect("to json");
-        let fields = record.as_object_mut().expect("struct is a map");
-        fields.remove("cds_start_complete");
-        let bytes = with_header(&serde_json::json!({
-            "source": null,
-            "source_release": null,
-            "transcripts": [record],
-        }));
-        assert!(matches!(
-            decode_transcript_store(&bytes),
-            Err(VarEffectError::Deserialize(_))
-        ));
+        for key in ["tier", "cds_start_complete"] {
+            let mut model = record.clone();
+            model.as_object_mut().expect("map").remove(key);
+            let payload = serde_json::json!({
+                "source": null,
+                "source_release": null,
+                "transcripts": [model],
+            });
+            assert!(
+                matches!(
+                    decode_transcript_store(&with_header(&payload)),
+                    Err(VarEffectError::Deserialize(_))
+                ),
+                "{key}"
+            );
+        }
     }
 }

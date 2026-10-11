@@ -125,15 +125,10 @@ const VEP_SHIFT_WINDOW: u64 = 1000;
 /// orientation (VCF convention). The shift direction changes per strand
 /// but the base comparison is always plus-strand vs plus-strand.
 ///
-/// The shift is on the genomic sequence, as VEP 116's `_genomic_shift` and
-/// `perform_shift`: it crosses exon/intron junctions (VEP NM_000548.5
-/// `c.336+1_336+2dup` for an insertion after `c.336`), reads at most
-/// [`VEP_SHIFT_WINDOW`] bases past the insertion point (clamped to the
-/// chromosome), and moves at most `VEP_SHIFT_WINDOW + 1 - len` bases (the
-/// whole window for a longer insertion, except a minus-strand one exactly
-/// `VEP_SHIFT_WINDOW + 1` long, which VEP's reverse loop never shifts):
-/// VEP 116 leaves an
-/// 812-base ALMS1 insertion at NM_001378454.1 `c.2427_2428ins`, which an
+/// The shift is on the genomic sequence and bounded as for deletions
+/// ([`compute_3prime_shift_deletion`], [`vep_max_shift`]): it crosses
+/// exon/intron junctions (VEP NM_000548.5 `c.336+1_336+2dup`). VEP 116 leaves
+/// an 812-base ALMS1 insertion at NM_001378454.1 `c.2427_2428ins`, which an
 /// uncapped shift would move to `c.2239_3050dup`. The bases at the shifted
 /// point are [`rotate_inserted_bases`].
 ///
@@ -222,7 +217,7 @@ pub(crate) fn rotate_inserted_bases(inserted_bases: &[u8], shift: u64, strand: S
 mod tests {
     use super::*;
     use crate::fasta::write_genome_binary;
-    use crate::types::TranscriptModel;
+    use tempfile::TempDir;
 
     #[test]
     fn vep_max_shift_follows_the_perform_shift_loop() {
@@ -234,8 +229,6 @@ mod tests {
         assert_eq!(vep_max_shift(1001, Strand::Minus), 0);
         assert_eq!(vep_max_shift(2000, Strand::Minus), 1000);
     }
-    use crate::types::{Biotype, CdsSegment, Exon, TranscriptTier};
-    use tempfile::TempDir;
 
     // -----------------------------------------------------------------------
     // Test FASTA helper
@@ -281,101 +274,6 @@ mod tests {
         (tmp, reader)
     }
 
-    /// Plus-strand transcript on chr1 with two exons separated by an intron.
-    ///
-    /// Exon 0: [0, 25)    covers the repeats and start of tandem
-    /// Exon 1: [30, 62)   covers end of tandem + GC tail
-    /// Intron: [25, 30)
-    fn chr1_plus_transcript() -> TranscriptModel {
-        TranscriptModel {
-            accession: "NM_SHIFT_PLUS.1".into(),
-            protein_accession: Some("NP_SHIFT_PLUS.1".into()),
-            gene_symbol: "SHIFTPLUS".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr1".into(),
-            strand: Strand::Plus,
-            tx_start: 0,
-            tx_end: 62,
-            cds_genomic_start: Some(0),
-            cds_genomic_end: Some(62),
-            exons: vec![
-                Exon {
-                    exon_number: 1,
-                    genomic_start: 0,
-                    genomic_end: 25,
-                },
-                Exon {
-                    exon_number: 2,
-                    genomic_start: 30,
-                    genomic_end: 62,
-                },
-            ],
-            cds_segments: vec![
-                CdsSegment {
-                    exon_index: 0,
-                    genomic_start: 0,
-                    genomic_end: 25,
-                    phase: 0,
-                },
-                CdsSegment {
-                    exon_index: 1,
-                    genomic_start: 30,
-                    genomic_end: 62,
-                    phase: 0,
-                },
-            ],
-            tier: Some(TranscriptTier::ManeSelect),
-            biotype: Biotype::ProteinCoding,
-            exon_count: 2,
-            cds_start_complete: true,
-            cds_end_complete: true,
-            genome_mismatch: false,
-            cds_alignment_gap: false,
-            utr_numbering_breaks: Default::default(),
-            selenocysteine_codons: Vec::new(),
-        }
-    }
-
-    /// Minus-strand transcript on chr17 with one exon covering the repeats.
-    ///
-    /// Exon 0: [8, 30)   covers the C repeat and ATG repeat
-    fn chr17_minus_transcript() -> TranscriptModel {
-        TranscriptModel {
-            accession: "NM_SHIFT_MINUS.1".into(),
-            protein_accession: Some("NP_SHIFT_MINUS.1".into()),
-            gene_symbol: "SHIFTMINUS".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr17".into(),
-            strand: Strand::Minus,
-            tx_start: 8,
-            tx_end: 30,
-            cds_genomic_start: Some(8),
-            cds_genomic_end: Some(30),
-            exons: vec![Exon {
-                exon_number: 1,
-                genomic_start: 8,
-                genomic_end: 30,
-            }],
-            cds_segments: vec![CdsSegment {
-                exon_index: 0,
-                genomic_start: 8,
-                genomic_end: 30,
-                phase: 0,
-            }],
-            tier: Some(TranscriptTier::ManeSelect),
-            biotype: Biotype::ProteinCoding,
-            exon_count: 1,
-            cds_start_complete: true,
-            cds_end_complete: true,
-            genome_mismatch: false,
-            cds_alignment_gap: false,
-            utr_numbering_breaks: Default::default(),
-            selenocysteine_codons: Vec::new(),
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Deletion shift — plus strand
     // -----------------------------------------------------------------------
@@ -396,8 +294,7 @@ mod tests {
         // s=4: ref[8]=A, ref[9]=G → stop
         // shift = 4
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 4, 5, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 4, 5, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 4);
     }
 
@@ -414,8 +311,7 @@ mod tests {
         // s=6: ref[16]=A, ref[18]=C → stop
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 10, 12, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 10, 12, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -424,28 +320,14 @@ mod tests {
         // chr1 pos 0..4: TCGA — no repeats.
         // Delete T at [0, 1). ref[0]=T, ref[1]=C → no match.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 0, 1, tx.strand, &fasta).unwrap();
-        assert_eq!(shift, 0);
-    }
-
-    #[test]
-    fn del_at_exon_boundary_plus() {
-        // chr1 exon 0 ends at 25. Delete A at [24, 25) — last base of exon.
-        // ref[24] is the last exonic base. ref[25] is intronic (beyond exon).
-        // Exon range is [0, 25), so fetch_end = 25. del_end = 25.
-        // fetch_end <= del_end → return 0.
-        let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 24, 25, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 0, 1, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
     #[test]
     fn del_zero_length() {
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 5, 5, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 5, 5, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -468,8 +350,7 @@ mod tests {
         // s=6: seq[0]=T, seq[1]=C → stop (pos 8 = T)
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 15, 16, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr17", 15, 16, Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -485,8 +366,7 @@ mod tests {
         // ref[5]=A (match), ref[6]=A (match), ref[7]=A (match), ref[8]=A (match), ref[9]=G (stop)
         // shift = 4
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 5, b"A", tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 5, b"A", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 4);
     }
 
@@ -501,8 +381,8 @@ mod tests {
         // ref[18]=C!=ins[0]=A (stop)
         // shift = 6
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 12, b"AT", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr1", 12, b"AT", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -511,8 +391,7 @@ mod tests {
         // chr1 pos 0: T. Insert G at pos 1 (between T and C).
         // ref[1] = C != G -> shift 0.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 1, b"G", tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 1, b"G", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -521,8 +400,8 @@ mod tests {
         // Exon 0 ends at 25; chr1[25..28] = CGT. CG inserted after the last
         // exon base slides two bases into the intron (VEP's genomic shift).
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 25, b"CG", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr1", 25, b"CG", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 2);
     }
 
@@ -531,16 +410,15 @@ mod tests {
         // Intron [25, 30), exon 1 from 30; chr1[28..33] = GATGG. GAT inserted
         // at 28 slides over GATG into the exon and stops at the second G.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 28, b"GAT", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr1", 28, b"GAT", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 4);
     }
 
     #[test]
     fn ins_zero_length() {
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 5, b"", tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 5, b"", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -553,8 +431,8 @@ mod tests {
         // chr17[9..16] = CCCCCCC, chr17[8] = T. Minus strand: 3' = decreasing
         // genomic. C inserted at 15 slides over chr17[14] .. chr17[9]: shift 6.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr17", 15, b"C", Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -577,8 +455,8 @@ mod tests {
         // s=9: seq[7]=C, ins[2]=G → stop
         // shift = 9
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 25, b"ATG", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr17", 25, b"ATG", Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 9);
     }
 
@@ -587,127 +465,13 @@ mod tests {
         // chr1 pos 27 is in the intron [25, 30).
         // No repeat at this position: chr1[27] differs from inserted A.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 27, b"A", tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_insertion("chr1", 27, b"A", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
     // -----------------------------------------------------------------------
     // Intronic shift — test transcripts
     // -----------------------------------------------------------------------
-
-    /// Plus-strand transcript on chr1 with intron placed over GC repeat.
-    ///
-    /// Exon 0: [0, 46)    covers everything up to the NN pad
-    /// Exon 1: [56, 62)   covers the last 6 bases of the GC tail
-    /// Intron: [46, 56)   = NN GCGCGCGC (GC repeat at positions 48-55)
-    fn chr1_plus_intron_repeat_transcript() -> TranscriptModel {
-        TranscriptModel {
-            accession: "NM_INTRON_PLUS.1".into(),
-            protein_accession: Some("NP_INTRON_PLUS.1".into()),
-            gene_symbol: "INTRONPLUS".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr1".into(),
-            strand: Strand::Plus,
-            tx_start: 0,
-            tx_end: 62,
-            cds_genomic_start: Some(0),
-            cds_genomic_end: Some(62),
-            exons: vec![
-                Exon {
-                    exon_number: 1,
-                    genomic_start: 0,
-                    genomic_end: 46,
-                },
-                Exon {
-                    exon_number: 2,
-                    genomic_start: 56,
-                    genomic_end: 62,
-                },
-            ],
-            cds_segments: vec![
-                CdsSegment {
-                    exon_index: 0,
-                    genomic_start: 0,
-                    genomic_end: 46,
-                    phase: 0,
-                },
-                CdsSegment {
-                    exon_index: 1,
-                    genomic_start: 56,
-                    genomic_end: 62,
-                    phase: 0,
-                },
-            ],
-            tier: Some(TranscriptTier::ManeSelect),
-            biotype: Biotype::ProteinCoding,
-            exon_count: 2,
-            cds_start_complete: true,
-            cds_end_complete: true,
-            genome_mismatch: false,
-            cds_alignment_gap: false,
-            utr_numbering_breaks: Default::default(),
-            selenocysteine_codons: Vec::new(),
-        }
-    }
-
-    /// Minus-strand transcript on chr17 with two exons flanking a large intron.
-    ///
-    /// Exons ordered 5'→3' on the transcript (descending genomic):
-    /// Exon 0: [30, 40)   (transcript 5' end, highest genomic coords)
-    /// Exon 1: [0, 10)    (transcript 3' end, lowest genomic coords)
-    /// Intron: [10, 30)   = CCCCCC ATGATGATGATGAT NNNNNNNNNN
-    fn chr17_minus_intron_transcript() -> TranscriptModel {
-        TranscriptModel {
-            accession: "NM_INTRON_MINUS.1".into(),
-            protein_accession: Some("NP_INTRON_MINUS.1".into()),
-            gene_symbol: "INTRONMINUS".into(),
-            hgnc_id: None,
-            ensembl_accession: None,
-            chrom: "chr17".into(),
-            strand: Strand::Minus,
-            tx_start: 0,
-            tx_end: 40,
-            cds_genomic_start: Some(0),
-            cds_genomic_end: Some(40),
-            exons: vec![
-                Exon {
-                    exon_number: 1,
-                    genomic_start: 30,
-                    genomic_end: 40,
-                },
-                Exon {
-                    exon_number: 2,
-                    genomic_start: 0,
-                    genomic_end: 10,
-                },
-            ],
-            cds_segments: vec![
-                CdsSegment {
-                    exon_index: 0,
-                    genomic_start: 30,
-                    genomic_end: 40,
-                    phase: 0,
-                },
-                CdsSegment {
-                    exon_index: 1,
-                    genomic_start: 0,
-                    genomic_end: 10,
-                    phase: 0,
-                },
-            ],
-            tier: Some(TranscriptTier::ManeSelect),
-            biotype: Biotype::ProteinCoding,
-            exon_count: 2,
-            cds_start_complete: true,
-            cds_end_complete: true,
-            genome_mismatch: false,
-            cds_alignment_gap: false,
-            utr_numbering_breaks: Default::default(),
-            selenocysteine_codons: Vec::new(),
-        }
-    }
 
     // -----------------------------------------------------------------------
     // Intronic deletion shift — plus strand
@@ -719,8 +483,7 @@ mod tests {
         // repeat to the chromosome end, so the genomic shift (VEP 116
         // `perform_shift`) crosses the junction at 56: 12 bases.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 48, 50, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 48, 50, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 12);
     }
 
@@ -729,8 +492,7 @@ mod tests {
         // Delete G at [48, 49) in intron [46, 56).
         // chr1[48] = G, chr1[49] = C → no match. shift = 0.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 48, 49, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 48, 49, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 0);
     }
 
@@ -739,8 +501,7 @@ mod tests {
         // Delete GC at [52, 54) in intron [46, 56): the repeat runs on past
         // the junction at 56 to the chromosome end (62), so shift = 8.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_deletion("chr1", 52, 54, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr1", 52, 54, Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 8);
     }
 
@@ -755,8 +516,8 @@ mod tests {
         // crosses the intron/exon junction at 56 and stops at the end of
         // chr1: shift = 12.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr1_plus_intron_repeat_transcript();
-        let shift = compute_3prime_shift_insertion("chr1", 50, b"GC", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr1", 50, b"GC", Strand::Plus, &fasta).unwrap();
         assert_eq!(shift, 12);
     }
 
@@ -770,8 +531,7 @@ mod tests {
         // [15, 16); minus strand, 3' = leftward. The genomic shift passes the
         // intron start at 10 and stops at chr17[8] = T: shift = 6.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 15, 16, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr17", 15, 16, Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -780,8 +540,7 @@ mod tests {
         // Delete C at [10, 11), the 3' end of intron [10, 30). chr17[9] = C
         // continues the run into the exon, so the shift crosses it: 1.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_deletion("chr17", 10, 11, tx.strand, &fasta).unwrap();
+        let shift = compute_3prime_shift_deletion("chr17", 10, 11, Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 1);
     }
 
@@ -795,8 +554,8 @@ mod tests {
         // Minus strand: 3' = decreasing genomic. C inserted at 15 slides over
         // the intronic Cs and the last exon base chr17[9]; chr17[8] = T stops it.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 15, b"C", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr17", 15, b"C", Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 6);
     }
 
@@ -806,8 +565,8 @@ mod tests {
         // chr17[27..30] = GAT. AT inserted at 30 slides over AT into the
         // intron and stops at G.
         let (_tmp, fasta) = write_test_fasta();
-        let tx = chr17_minus_intron_transcript();
-        let shift = compute_3prime_shift_insertion("chr17", 30, b"AT", tx.strand, &fasta).unwrap();
+        let shift =
+            compute_3prime_shift_insertion("chr17", 30, b"AT", Strand::Minus, &fasta).unwrap();
         assert_eq!(shift, 2);
     }
 

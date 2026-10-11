@@ -417,18 +417,14 @@ pub struct TranscriptModel {
     /// (a RefSeq `exception` or a gapped genome alignment). The model is
     /// built from the genome.
     pub genome_mismatch: bool,
-    /// `true` when, inside the CDS span, the genome-built numbering is not the
-    /// transcript's own: the transcript has bases the genome lacks (a RefSeq
-    /// `cDNA_match` `I` gap, or transcript bases aligned nowhere between two
-    /// blocks or at an interior CDS `start_range` / `end_range`), or the
-    /// genome has bases inside an exon that the transcript lacks (a `D` gap
-    /// that is not an exon split). No HGVS c. or p., cDNA / CDS / protein
-    /// position, codons, amino acids or termination-codon / NMD verdict are
-    /// then reported for it, and HGVS c. is not resolved on it; consequence
-    /// terms, impact and exon / intron numbers are (see
-    /// [`crate::ConsequenceResult`]). A `D` gap where RefSeq
-    /// splits the exon (a frameshift intron) does not set it: the numbering
-    /// stays the transcript's.
+    /// `true` when, inside the CDS, the genome-built numbering is not the
+    /// transcript's own: a RefSeq `cDNA_match` `I` gap, transcript bases
+    /// aligned nowhere (between blocks, at an interior CDS range marker, or
+    /// past a CDS end left open on the genome), or a `D` gap inside an exon.
+    /// A `D` gap where RefSeq splits the exon (a frameshift intron) does not
+    /// set it. Annotation then withholds everything numbered along the
+    /// transcript and HGVS c. is not resolved on it (`VEP_DIVERGENCES.md` 3.3,
+    /// [`crate::ConsequenceResult`]).
     pub cds_alignment_gap: bool,
     /// Where, outside the CDS, the genome-built numbering stops being the
     /// transcript's own (RefSeq alignment gaps in a UTR, or transcript bases
