@@ -1097,8 +1097,12 @@ pub(super) fn annotate_cds_frameshift(
     // When the start codon is destroyed there is no defined reading frame, so
     // the formatter is skipped and the termination codon is genuinely
     // undetermined -- consistent with `predicts_nmd` being forced false above.
-    let (hgvs_p, ptc) = if start_lost {
-        (Some("p.Met1?".to_string()), super::PtcStatus::Indeterminate)
+    let (hgvs_p, mut ptc, keeps_stop) = if start_lost {
+        (
+            Some("p.Met1?".to_string()),
+            super::PtcStatus::Indeterminate,
+            false,
+        )
     } else {
         let frameshift = crate::hgvs_p::format_hgvs_p_frameshift(
             cds_offset_start,
@@ -1111,8 +1115,18 @@ pub(super) fn annotate_cds_frameshift(
             dna_shift,
         )?;
         let ptc = super::nmd::resolve_ptc(frameshift.ptc, &frameshift.edit, index);
-        (frameshift.notation, ptc)
+        let keeps_stop = frameshift.ptc == crate::hgvs_p::PtcSite::ReferenceStop;
+        (frameshift.notation, ptc, keeps_stop)
     };
+    // VEP decides `stop_retained` at the submitted position: a deletion
+    // reaching into the stop codon, or an insertion inside it.
+    let stop_start = index.total_cds_length().saturating_sub(3);
+    let at_stop = if is_insertion {
+        cds_offset_start > stop_start && cds_offset_start < index.total_cds_length()
+    } else {
+        cds_offset_end > stop_start
+    };
+    let keeps_stop = retain_stop_terms(keeps_stop, at_stop, &mut consequences, &mut ptc);
 
     let mut result = build_base_result(transcript, consequences);
     result.protein_start = Some(codon_number);
@@ -1125,9 +1139,48 @@ pub(super) fn annotate_cds_frameshift(
     result.cdna_position = Some(cdna_position);
     result.cdna_position_end = Some(cdna_end);
     result.hgvs_p = hgvs_p;
-    result.predicts_nmd = predicts_nmd;
+    result.predicts_nmd = predicts_nmd && !keeps_stop;
     result.ptc = ptc;
     Ok(result)
+}
+
+/// Replace `frameshift_variant` with `stop_retained_variant` for a frameshift
+/// whose alternate frame keeps the reference stop codon, as VEP 116 does
+/// (NM_000179.3 c.4082del, NM_000527.5 c.2581_2582insA:
+/// `stop_retained_variant`, `p.Ter1361=`, `p.Ter861=`). VEP decides it at
+/// the submitted position, so a frameshift that keeps the stop only through
+/// a repeat 3' of it stays `frameshift_variant` (NM_000969.5 c.890_893dup,
+/// inserted before the stop codon: `frameshift_variant`, `p.Ter298=`), and
+/// so does one whose codon window reads a new stop (NM_006739.4
+/// c.2192_*5dup, `Y/YRLK*VAX`: `frameshift_variant,stop_gained`). Their
+/// termination codon stays undetermined.
+///
+/// # Arguments
+///
+/// * `keeps_stop` - The frameshift formatter found the reference stop kept
+/// * `at_stop` - The submitted variant reaches into the stop codon
+/// * `consequences` - The frameshift's terms
+/// * `ptc` - The frameshift's termination codon
+///
+/// # Returns
+///
+/// `true` when the terms were replaced.
+pub(super) fn retain_stop_terms(
+    keeps_stop: bool,
+    at_stop: bool,
+    consequences: &mut Vec<Consequence>,
+    ptc: &mut super::PtcStatus,
+) -> bool {
+    if !keeps_stop {
+        return false;
+    }
+    if !at_stop || consequences.contains(&Consequence::StopGained) {
+        *ptc = super::PtcStatus::Indeterminate;
+        return false;
+    }
+    consequences.retain(|c| *c != Consequence::FrameshiftVariant);
+    consequences.push(Consequence::StopRetainedVariant);
+    true
 }
 
 /// What an indel does to the start codon (`VariationEffect.pm`,

@@ -397,6 +397,9 @@ pub(crate) enum PtcSite {
     NoStopCodon,
     /// 1-based residue of the termination codon in the alternate protein.
     Residue(u32),
+    /// The alternate frame keeps the reference stop codon in place: the
+    /// protein is unchanged and no termination codon is created.
+    ReferenceStop,
 }
 
 /// Protein-level result of a frameshift: the HGVS notation, the located
@@ -545,7 +548,7 @@ pub(crate) fn format_hgvs_p_frameshift(
         let stop_pos = (codon_start / 3) + 1 + stop_idx as u32;
         return Ok(FrameshiftProtein {
             notation: Some(format!("p.Ter{stop_pos}=")),
-            ptc: PtcSite::Indeterminate,
+            ptc: PtcSite::ReferenceStop,
             edit,
         });
     }

@@ -492,8 +492,8 @@ pub(super) fn annotate_boundary_spanning_deletion(
         // With codon 1 destroyed there is no defined reading frame: HGVS names
         // that `p.Met1?`, and no termination codon may be claimed against a
         // frame that does not exist.
-        let (hgvs_p, ptc) = if start_lost {
-            (Some("p.Met1?".to_string()), PtcStatus::Indeterminate)
+        let (hgvs_p, mut ptc, keeps_stop) = if start_lost {
+            (Some("p.Met1?".to_string()), PtcStatus::Indeterminate, false)
         } else {
             let frameshift = crate::hgvs_p::format_hgvs_p_frameshift(
                 global_cds_start,
@@ -506,8 +506,12 @@ pub(super) fn annotate_boundary_spanning_deletion(
                 0, // no 3' shift for boundary-spanning deletions
             )?;
             let ptc = super::nmd::resolve_ptc(frameshift.ptc, &frameshift.edit, locate_index);
-            (frameshift.notation, ptc)
+            let keeps_stop = frameshift.ptc == crate::hgvs_p::PtcSite::ReferenceStop;
+            (frameshift.notation, ptc, keeps_stop)
         };
+        let at_stop = global_cds_end > total_cds.saturating_sub(3);
+        let keeps_stop =
+            super::indel::retain_stop_terms(keeps_stop, at_stop, &mut consequences, &mut ptc);
 
         // Codons and amino acids over the whole codon window, as for an
         // exonic frameshift (VEP 116, ENST00000400999.7 c.226_229del across a
@@ -558,8 +562,9 @@ pub(super) fn annotate_boundary_spanning_deletion(
             locate_index,
         ));
         result.hgvs_p = hgvs_p;
-        result.predicts_nmd =
-            !start_lost && super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
+        result.predicts_nmd = !start_lost
+            && !keeps_stop
+            && super::nmd::predicts_nmd(global_cds_start + 1, locate_index);
         result.ptc = ptc;
         let (exon, intron) = footprint_exon_intron_numbers(start, end, transcript);
         result.exon = exon;

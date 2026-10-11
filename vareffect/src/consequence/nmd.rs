@@ -176,6 +176,7 @@ pub(super) fn resolve_ptc(site: PtcSite, edit: &CdsEdit, index: &LocateIndex) ->
     let residue = match site {
         PtcSite::Indeterminate => return PtcStatus::Indeterminate,
         PtcSite::NoStopCodon => return PtcStatus::NoStopCodon,
+        PtcSite::ReferenceStop => return PtcStatus::NotApplicable,
         PtcSite::Residue(r) => r,
     };
 
