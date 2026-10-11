@@ -56,6 +56,7 @@ use sha2::{Digest, Sha256};
 use vareffect::chrom::{canonical_order_key, is_patch_sequence, refseq_to_ucsc};
 use vareffect::{
     Biotype, CdsSegment, Exon, Strand, TranscriptModel, TranscriptSource, TranscriptTier,
+    UtrNumberingBreaks,
 };
 
 use cross_validate::cross_validate_summary;
@@ -64,8 +65,8 @@ use gff3_attrs::{
     extract_protein_id_from_cds_attrs, extract_refseq_acc_from_dbxref, extract_transcript_from_id,
 };
 use source_rules::{
-    GapOp, gap_moves_cds_numbering, one_cds_per_exon, parse_gap_ops, parse_transl_except,
-    phases_consistent, refseq_biotype,
+    GapOp, cdna_at_or_after, gap_moves_cds_numbering, one_cds_per_exon, parse_gap_ops,
+    parse_transl_except, phases_consistent, refseq_biotype, utr_gap_breaks,
 };
 
 use crate::common::{BuildOutput, StoreWrite, store_stem, write_transcript_store};
@@ -408,6 +409,21 @@ struct Scan {
 }
 
 impl Scan {
+    /// `true` when a RefSeq alignment of the transcript on this locus starts
+    /// after transcript base 1: the genome-built model lacks the transcript's
+    /// first bases, so its cDNA numbering is short by that many.
+    fn unaligned_five_prime(&self, key: &(String, String)) -> bool {
+        let Some(blocks) = self.match_blocks.get(key) else {
+            return false;
+        };
+        let mut first: BTreeMap<&str, u64> = BTreeMap::new();
+        for block in blocks {
+            let start = first.entry(block.alignment_id.as_str()).or_insert(u64::MAX);
+            *start = (*start).min(block.target_start);
+        }
+        first.values().any(|&start| start > 1)
+    }
+
     fn skip(&mut self, reason: &'static str) {
         *self.skipped_rows.entry(reason).or_default() += 1;
     }
@@ -648,6 +664,62 @@ fn scan_line(scan: &mut Scan, line: &str, source: TranscriptSource) -> Result<()
         _ => scan_candidate(scan, &fields, source)?,
     }
     Ok(())
+}
+
+/// The [`UtrNumberingBreaks`] of a RefSeq transcript: the first cDNA
+/// position a UTR gap (or unaligned 5' transcript bases) shifts, and the
+/// 5'UTR and 3'UTR HGVS c. numbers from which counting from the CDS crosses
+/// a gap.
+///
+/// # Arguments
+///
+/// * `gaps` - The transcript's alignment gaps on this locus
+/// * `cds` - The CDS span, 0-based half-open, or `None` for a non-coding
+///   transcript
+/// * `exons` - The model's exons in transcript order
+/// * `plus` - Transcript strand
+/// * `unaligned_5p` - The alignment starts after transcript base 1
+fn utr_numbering_breaks(
+    gaps: &[GapOp],
+    cds: Option<(u64, u64)>,
+    exons: &[Exon],
+    plus: bool,
+    unaligned_5p: bool,
+) -> UtrNumberingBreaks {
+    let breaks = utr_gap_breaks(gaps, cds, exons, plus);
+    let cdna_from = if unaligned_5p {
+        Some(1)
+    } else {
+        breaks.iter().map(|b| b.shifted_from).min()
+    };
+    let cds_cdna = cds.and_then(|(start, end)| {
+        let (first, last) = if plus {
+            (start, end - 1)
+        } else {
+            (end - 1, start)
+        };
+        cdna_at_or_after(exons, plus, first).zip(cdna_at_or_after(exons, plus, last))
+    });
+    let (five_prime_from, three_prime_from) = match cds_cdna {
+        // `c.-N` is cDNA `first - N`: counting to the CDS crosses a gap whose
+        // `crossed_through` is at or past it, so `N >= first - crossed_through`.
+        // `c.*N` is cDNA `last + N`, shifted from `shifted_from`.
+        Some((first, last)) => (
+            breaks
+                .iter()
+                .filter(|b| b.crossed_through < first)
+                .map(|b| first - b.crossed_through)
+                .filter(|&n| n < first)
+                .min(),
+            breaks
+                .iter()
+                .filter(|b| b.shifted_from > last)
+                .map(|b| b.shifted_from - last)
+                .min(),
+        ),
+        None => (None, None),
+    };
+    UtrNumberingBreaks::new(cdna_from, five_prime_from, three_prime_from)
 }
 
 /// One RefSeq `cDNA_match` row: a block of a transcript-to-genome alignment.
@@ -1034,28 +1106,44 @@ fn assemble_one(
     // alignment's coverage inside the CDS (SHANK3 NM_001372044.2): the
     // transcript is not the genome there.
     let interior_range = source == TranscriptSource::RefSeq && CdsRanges::of(raw_cds).interior;
-    let (genome_mismatch, cds_alignment_gap) = if source == TranscriptSource::RefSeq {
-        let gaps = scan
-            .alignment_gaps
-            .get(&(accession.to_string(), chrom.to_string()));
+    let (genome_mismatch, cds_alignment_gap, utr_breaks) = if source == TranscriptSource::RefSeq {
+        let key = (accession.to_string(), chrom.to_string());
+        let gaps = scan.alignment_gaps.get(&key).map(Vec::as_slice);
         let mismatch_exception = notes.is_some_and(|notes| notes.mismatch_exception);
-        let cds_gap = match (gaps, cds_segments.iter().map(|s| s.genomic_start).min()) {
-            (Some(gaps), Some(cds_start)) => {
-                let cds_end = cds_segments
-                    .iter()
-                    .map(|s| s.genomic_end)
-                    .max()
-                    .unwrap_or(cds_start);
+        let cds_span = cds_segments
+            .iter()
+            .map(|s| s.genomic_start)
+            .min()
+            .zip(cds_segments.iter().map(|s| s.genomic_end).max());
+        let cds_gap = match (gaps, cds_span) {
+            (Some(gaps), Some((cds_start, cds_end))) => {
                 gap_moves_cds_numbering(gaps, cds_start, cds_end, &exons)
             }
             (Some(_), None) | (None, _) => false,
         };
+        // A curated RefSeq CDS is whole on the transcript: an open end on the
+        // genome means coding bases the alignment leaves out (NM_182705.3
+        // aligns from transcript base 367).
+        let cds_partial = has_cds && !(start_complete && end_complete);
+        let unaligned_5p = scan.unaligned_five_prime(&key);
+        let breaks = utr_numbering_breaks(
+            gaps.unwrap_or_default(),
+            cds_span,
+            &exons,
+            matches!(pending.strand, Strand::Plus),
+            unaligned_5p,
+        );
         (
-            pending.exception || mismatch_exception || gaps.is_some() || interior_range,
-            cds_gap || interior_range,
+            pending.exception
+                || mismatch_exception
+                || gaps.is_some()
+                || interior_range
+                || unaligned_5p,
+            cds_gap || interior_range || cds_partial,
+            breaks,
         )
     } else {
-        (false, false)
+        (false, false, UtrNumberingBreaks::default())
     };
 
     let selenocysteine: Vec<u64> = match source {
@@ -1139,6 +1227,7 @@ fn assemble_one(
         .with_biotype(biotype)
         .with_cds_completeness(start_complete, end_complete)
         .with_genome_mismatch(genome_mismatch, cds_alignment_gap)
+        .with_utr_numbering_breaks(utr_breaks)
         .with_selenocysteine_codons(selenocysteine);
     if let Some(tier) = pending.tier {
         model = model.with_tier(tier);
@@ -1642,7 +1731,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         assert_eq!(size, bin.len());
         assert_eq!(
             &bin[..vareffect::transcript::TRANSCRIPT_STORE_HEADER_LEN],
-            b"VEFXTXM\0\x02\x00\x00\x00"
+            b"VEFXTXM\0\x03\x00\x00\x00"
         );
         let store = vareffect::TranscriptStore::load_from_path(&bin_path).expect("load");
         assert_eq!(store.len() as u64, built.record_count);
@@ -1657,7 +1746,7 @@ chr1\tNCBI\texon\t10\t100\t.\t+\t.\tID=oe1;Parent=rna-XR_999.1
         let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
         assert_eq!(manifest["sha256"], sha(&bin));
         assert_eq!(manifest["payload_sha256"], sha(&bin[12..]));
-        assert_eq!(manifest["format_version"], 2);
+        assert_eq!(manifest["format_version"], 3);
         assert_eq!(
             manifest["source_file_sha256"],
             sha(&std::fs::read(input.path()).expect("read input"))
@@ -2176,6 +2265,40 @@ chrX\tNCBI\texon\t1000000\t1002000\t.\t+\t.\tID=xe1;Parent=rna-NM_123456.1
         ));
         let model = &contiguous.transcripts[0];
         assert!(!model.genome_mismatch && !model.cds_alignment_gap);
+    }
+
+    #[test]
+    fn utr_alignment_gaps_and_partial_cds_set_the_numbering_bounds() {
+        let model = |extra: &str| parse_refseq(&refseq_gff(extra)).transcripts.remove(0);
+        // Transcript bases 1..=5 aligned nowhere: cDNA numbering only.
+        let unaligned = model(
+            "NC_000001.11\tRefSeq\tcDNA_match\t1\t250\t.\t+\t.\tID=aln1;Target=NM_000001.1 6 255 +\n\
+             NC_000001.11\tRefSeq\tcDNA_match\t301\t500\t.\t+\t.\tID=aln1;Target=NM_000001.1 256 455 +\n",
+        );
+        assert!(unaligned.genome_mismatch && !unaligned.cds_alignment_gap);
+        assert_eq!(
+            unaligned.utr_numbering_breaks,
+            UtrNumberingBreaks::new(Some(1), None, None)
+        );
+        // Two transcript bases the genome lacks before genomic base 51
+        // (cDNA 51); the CDS starts at cDNA 101, so `c.-51` (cDNA 50) and
+        // beyond cross the gap.
+        let gapped = model(
+            "NC_000001.11\tRefSeq\tcDNA_match\t1\t250\t.\t+\t.\tID=aln1;Target=NM_000001.1 1 252 +;Gap=M50 I2 M200\n\
+             NC_000001.11\tRefSeq\tcDNA_match\t301\t500\t.\t+\t.\tID=aln1;Target=NM_000001.1 253 452 +\n",
+        );
+        assert!(!gapped.cds_alignment_gap);
+        assert_eq!(
+            gapped.utr_numbering_breaks,
+            UtrNumberingBreaks::new(Some(51), Some(51), None)
+        );
+        // A CDS open on the genome leaves coding bases unaligned.
+        let parsed = parse_refseq(&refseq_gff("").replace(
+            "\t101\t250\t.\t+\t0\tID=c1;",
+            "\t101\t250\t.\t+\t0\tID=c1;start_range=.,101;partial=true;",
+        ));
+        let model = &parsed.transcripts[0];
+        assert!(!model.cds_start_complete && model.cds_alignment_gap);
     }
 
     #[test]

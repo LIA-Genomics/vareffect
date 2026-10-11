@@ -4,7 +4,7 @@ use super::{Consequence, ConsequenceResult, Impact, PtcStatus};
 use crate::error::VarEffectError;
 use crate::fasta::FastaReader;
 use crate::locate::LocateIndex;
-use crate::types::{Strand, TranscriptModel, TranscriptTier};
+use crate::types::{Strand, TranscriptModel, TranscriptTier, UtrNumberingBreaks};
 
 /// Fetch the 3-base reference codon from FASTA for a given CDS codon
 /// start offset. Uses the batched [`fetch_cds_sequence`] internally so
@@ -259,6 +259,10 @@ pub(super) fn add_splice_spill(
 /// name the wrong base or residue, and the 50-nucleotide distances would be
 /// measured in the wrong frame (maintainer decisions, issue 13). Consequence
 /// terms, impact and exon / intron numbers are kept.
+///
+/// Past a [`TranscriptModel::utr_numbering_breaks`] bound only the numbering
+/// that bound covers is cleared: cDNA positions, and HGVS c. or n. naming
+/// such a position.
 pub(super) fn without_gapped_numbering(
     transcript: &TranscriptModel,
     mut result: ConsequenceResult,
@@ -278,8 +282,67 @@ pub(super) fn without_gapped_numbering(
             result.ptc = PtcStatus::Indeterminate;
         }
         result.predicts_nmd = false;
+    } else {
+        let breaks = &transcript.utr_numbering_breaks;
+        let past_cdna = |position: Option<u32>| {
+            position
+                .zip(breaks.cdna_from)
+                .is_some_and(|(p, from)| p >= from)
+        };
+        if past_cdna(result.cdna_position) || past_cdna(result.cdna_position_end) {
+            result.cdna_position = None;
+            result.cdna_position_end = None;
+        }
+        if result
+            .hgvs_c
+            .as_deref()
+            .is_some_and(|hgvs| names_broken_position(hgvs, breaks))
+        {
+            result.hgvs_c = None;
+        }
     }
     result
+}
+
+/// `true` when HGVS c. or n. names a position at or past one of `breaks`:
+/// `n.N` from `cdna_from`, `c.-N` (and `c.-N+M`) from `five_prime_from`,
+/// `c.*N` from `three_prime_from`, at either end of a range. An unreadable
+/// number counts as past.
+///
+/// # Arguments
+///
+/// * `hgvs` - HGVS c. or n., with or without the accession prefix
+/// * `breaks` - The transcript's UTR numbering breaks
+pub(super) fn names_broken_position(hgvs: &str, breaks: &UtrNumberingBreaks) -> bool {
+    if !breaks.any() {
+        return false;
+    }
+    let notation = hgvs.rsplit_once(':').map_or(hgvs, |(_, rest)| rest);
+    let (coding, positions) = match (notation.strip_prefix("c."), notation.strip_prefix("n.")) {
+        (Some(positions), _) => (true, positions),
+        (None, Some(positions)) => (false, positions),
+        (None, None) => return false,
+    };
+    positions
+        .split(|c: char| !matches!(c, '0'..='9' | '+' | '-' | '*' | '_'))
+        .next()
+        .unwrap_or_default()
+        .split('_')
+        .any(|position| {
+            let (bound, number) = match (coding, position.as_bytes().first()) {
+                (true, Some(b'-')) => (breaks.five_prime_from, &position[1..]),
+                (true, Some(b'*')) => (breaks.three_prime_from, &position[1..]),
+                (false, Some(b'0'..=b'9')) => (breaks.cdna_from, position),
+                _ => (None, position),
+            };
+            bound.is_some_and(|from| {
+                number
+                    .split(['+', '-'])
+                    .next()
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .is_none_or(|n| n >= from)
+            })
+        })
 }
 
 /// `true` when an alternate allele has a base other than A, C, G or T

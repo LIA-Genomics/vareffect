@@ -50,8 +50,8 @@ use crate::types::{TranscriptModel, TranscriptSource};
 /// manifest records the input file. Version 2 added that container, the
 /// optional tier, the CDS completeness and genome-mismatch flags, the
 /// selenocysteine codons and multi-locus accessions (one chrX and one chrY
-/// PAR copy).
-pub const TRANSCRIPT_STORE_FORMAT_VERSION: u32 = 2;
+/// PAR copy); version 3 the UTR numbering breaks.
+pub const TRANSCRIPT_STORE_FORMAT_VERSION: u32 = 3;
 
 /// Length in bytes of the store header that precedes the MessagePack payload.
 pub const TRANSCRIPT_STORE_HEADER_LEN: usize = 12;
@@ -265,10 +265,10 @@ mod tests {
     /// SHA-256 over [`fingerprint_fixture`] encoded once per source chain
     /// entry at the current version.
     const SCHEMA_FINGERPRINT: &str =
-        "fcd9c8c2272541e357f087c8acea5a4121c49aeded2f4e1cfee9a2480a31f058";
+        "3f5d61b863d31ab2ea0250cd596a37350c066d3bc3335860423230edec2a977a";
 
     /// The header of a current-version store.
-    const HEADER: &[u8; TRANSCRIPT_STORE_HEADER_LEN] = b"VEFXTXM\0\x02\x00\x00\x00";
+    const HEADER: &[u8; TRANSCRIPT_STORE_HEADER_LEN] = b"VEFXTXM\0\x03\x00\x00\x00";
 
     fn one_store() -> Vec<TranscriptModel> {
         vec![plus_strand_coding()]
@@ -407,6 +407,7 @@ mod tests {
             cds_end_complete: odd,
             genome_mismatch: odd,
             cds_alignment_gap: !odd,
+            utr_numbering_breaks: Default::default(),
             selenocysteine_codons: if odd {
                 vec![offset + 1_600, offset + 4_100]
             } else {
@@ -547,7 +548,7 @@ mod tests {
 
     #[test]
     fn other_versions_are_rejected() {
-        for version in [1u32, 3] {
+        for version in [1u32, 2, 4] {
             let mut encoded = encode(&one_store()).expect("encode");
             encoded[8..12].copy_from_slice(&version.to_le_bytes());
             assert!(matches!(

@@ -404,6 +404,7 @@ mod tests {
             cds_end_complete: true,
             genome_mismatch: false,
             cds_alignment_gap: false,
+            utr_numbering_breaks: Default::default(),
             selenocysteine_codons: Vec::new(),
         };
         let idx = build_index(&tx);

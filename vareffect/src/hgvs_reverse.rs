@@ -981,7 +981,19 @@ pub(crate) fn resolve_hgvs_c_with_meta(
     }
     // The forward path writes no HGVS for these transcripts; mapping a c.
     // position through the genome-built numbering would land past the gap.
-    if transcript.cds_alignment_gap {
+    let breaks = &transcript.utr_numbering_breaks;
+    let past_break = |position: &HgvsCPosition| {
+        let (bound, number) = if position.is_3utr {
+            (breaks.three_prime_from, position.base)
+        } else {
+            (breaks.five_prime_from, -position.base)
+        };
+        bound.is_some_and(|from| number >= i64::from(from))
+    };
+    if transcript.cds_alignment_gap
+        || past_break(&parsed.start)
+        || parsed.end.as_ref().is_some_and(past_break)
+    {
         return Err(VarEffectError::CdsNumberingUnavailable {
             accession: transcript.accession.clone(),
         });
@@ -1732,6 +1744,22 @@ mod tests {
             error,
             VarEffectError::CdsNumberingUnavailable { ref accession } if accession == "NM_TEST_PLUS.1"
         ));
+    }
+
+    #[test]
+    fn utr_numbering_break_refuses_positions_past_it_only() {
+        let tx = plus_strand_coding().with_utr_numbering_breaks(crate::UtrNumberingBreaks::new(
+            None,
+            Some(3),
+            None,
+        ));
+        let store = single_tx_store(tx);
+        let (_tmp, fasta) = build_test_fasta();
+        assert!(matches!(
+            resolve_hgvs_c("NM_TEST_PLUS.1:c.-3A>T", &store, &fasta),
+            Err(VarEffectError::CdsNumberingUnavailable { .. })
+        ));
+        assert!(resolve_hgvs_c("NM_TEST_PLUS.1:c.1A>T", &store, &fasta).is_ok());
     }
 
     // -- Integration tests (require real store + FASTA) ----------------------

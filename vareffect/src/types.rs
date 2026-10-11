@@ -81,6 +81,48 @@ pub struct Exon {
     pub genomic_end: u64,
 }
 
+/// Where a transcript's genome-built numbering, outside its CDS, stops
+/// matching the transcript's own (see
+/// [`TranscriptModel::utr_numbering_breaks`]). Each bound is the first
+/// wrong number; `None` means every number of that kind is right.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct UtrNumberingBreaks {
+    /// cDNA positions (HGVS n. on a non-coding transcript) from this one on.
+    pub cdna_from: Option<u32>,
+    /// HGVS c. 5'UTR positions `c.-N` (and their intronic offsets) with `N`
+    /// at least this.
+    pub five_prime_from: Option<u32>,
+    /// HGVS c. 3'UTR positions `c.*N` with `N` at least this.
+    pub three_prime_from: Option<u32>,
+}
+
+impl UtrNumberingBreaks {
+    /// Breaks with the given bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `cdna_from`, `five_prime_from`, `three_prime_from` - See the fields
+    pub fn new(
+        cdna_from: Option<u32>,
+        five_prime_from: Option<u32>,
+        three_prime_from: Option<u32>,
+    ) -> Self {
+        Self {
+            cdna_from,
+            five_prime_from,
+            three_prime_from,
+        }
+    }
+
+    /// `true` when some numbering is affected.
+    pub fn any(&self) -> bool {
+        self.cdna_from.is_some()
+            || self.five_prime_from.is_some()
+            || self.three_prime_from.is_some()
+    }
+}
+
 /// A single CDS segment within a [`TranscriptModel`].
 ///
 /// One `CdsSegment` corresponds to one GFF3 `CDS` row. Segments are ordered
@@ -388,6 +430,13 @@ pub struct TranscriptModel {
     /// splits the exon (a frameshift intron) does not set it: the numbering
     /// stays the transcript's.
     pub cds_alignment_gap: bool,
+    /// Where, outside the CDS, the genome-built numbering stops being the
+    /// transcript's own (RefSeq alignment gaps in a UTR, or transcript bases
+    /// before the alignment's first block). Numbers past a break are not
+    /// reported nor resolved; CDS-relative numbering is unaffected. Defaults to
+    /// empty when absent (the JSON test fixtures).
+    #[serde(default)]
+    pub utr_numbering_breaks: UtrNumberingBreaks,
     /// 0-based genomic start of each selenocysteine codon (the lowest base of
     /// the codon on either strand), in ascending order. Empty when the
     /// source names none. `TGA` there reads as `U` in the reference peptide;
@@ -448,6 +497,7 @@ impl TranscriptModel {
             cds_end_complete: true,
             genome_mismatch: false,
             cds_alignment_gap: false,
+            utr_numbering_breaks: UtrNumberingBreaks::default(),
             selenocysteine_codons: Vec::new(),
         }
     }
@@ -536,6 +586,17 @@ impl TranscriptModel {
     pub fn with_genome_mismatch(mut self, genome_mismatch: bool, cds_alignment_gap: bool) -> Self {
         self.genome_mismatch = genome_mismatch;
         self.cds_alignment_gap = cds_alignment_gap;
+        self
+    }
+
+    /// Set [`Self::utr_numbering_breaks`].
+    ///
+    /// # Arguments
+    ///
+    /// * `breaks` - Where the cDNA and UTR numbering built from the genome
+    ///   stops being the transcript's own
+    pub fn with_utr_numbering_breaks(mut self, breaks: UtrNumberingBreaks) -> Self {
+        self.utr_numbering_breaks = breaks;
         self
     }
 
