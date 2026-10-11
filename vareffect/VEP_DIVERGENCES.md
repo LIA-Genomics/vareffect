@@ -355,29 +355,31 @@ no translation):
 
 ## 7. Validation
 
-Expected values come from the Ensembl VEP REST API on real transcripts. The
-suites are `#[ignore]`-gated because they need the store and genome:
+Expected values come from the Ensembl VEP REST API (release 116 unless a file
+says otherwise) on real transcripts. The suites are `#[ignore]`-gated because
+they need the built genome and store:
 
 ```bash
-FASTA_PATH=/absolute/path/to/GRCh38.bin \
-    cargo test -p vareffect --release -- --ignored
+FASTA_PATH="$PWD/data/vareffect/GRCh38.bin" \
+    cargo test -p vareffect --release --no-fail-fast --test '*' -- --ignored
 ```
 
-| Test file | Variants | Focus |
-|---|---:|---|
-| `vep_concordance_snv.rs` | 20 | SNV consequences, splice sites and regions |
-| `vep_concordance_indel.rs` | 28 | Frameshift, in-frame, boundary and splice indels |
-| `vep_concordance_hgvs.rs` | 20 | HGVS c. formatting |
-| `vep_concordance_hgvs_p.rs` | 30 | HGVS p. formatting |
-| `vep_concordance_hgvs_reverse.rs` | 20 | HGVS c. to genomic coordinates |
-| `vep_concordance_normalization.rs` | 18 | 3' normalization, intergenic, NMD rule |
-| `incomplete_cds_concordance.rs` | 224 | Sections 3.1 and 3.2, on GENCODE, RefSeq and MANE models in `tests/data/` |
+| Test file | Focus |
+|---|---|
+| `vep_concordance_snv.rs` | SNV terms, splice sites and regions |
+| `vep_concordance_indel.rs` | Frameshift, in-frame, boundary and splice indels |
+| `vep_concordance_hgvs.rs`, `vep_concordance_hgvs_p.rs` | HGVS c. and p. |
+| `vep_concordance_hgvs_reverse.rs`, `vep_concordance_hgvs_g_reverse.rs` | HGVS c. and g. back to coordinates |
+| `vep_concordance_normalization.rs` | 3' normalization, intergenic, NMD rule |
+| `vep_concordance_sv.rs` | Structural variants |
+| `incomplete_cds_concordance.rs` | 3.1 and 3.2, on GENCODE, RefSeq and MANE models recorded in `tests/data/` |
+| `insertion_point_concordance.rs` | Insertions at exon, intron, UTR and CDS edges, both strands |
+| `vep_large_concordance.rs` | 50,000 ClinVar variants; skipped when its ground-truth TSV is absent |
 
-The first six (TP53, BRCA1, BRCA2, APC, BRAF, EGFR, CFTR, ERBB2, PRNP and
-others) all passed on 2026-04-11, 136 / 136 variants. The incomplete-CDS
-suite passed on 2026-10-07 with the normalizations listed in its header.
-When adding a variant, record VEP's output (`refseq=1&hgvs=1`, `&numbers=1`
-for exon numbers) next to it.
+All pass except nine of the 28 cases in `vep_concordance_indel.rs`: six
+splice-site or exon-boundary deletions and three insertions, open defects.
+When adding a case, record VEP's output (`refseq=1&hgvs=1&numbers=1`) and the
+release next to it.
 
 ## 8. Known edge cases
 

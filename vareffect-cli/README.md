@@ -3,113 +3,79 @@
 [![crates.io](https://img.shields.io/crates/v/vareffect-cli.svg)](https://crates.io/crates/vareffect-cli)
 [![CI status](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-genomics/vareffect/actions/workflows/ci.yml)
 
-CLI for the [`vareffect`](https://crates.io/crates/vareffect) variant
-consequence prediction engine. Installs as a single binary named
-`vareffect` with four capabilities:
-
-1. **`init`** -- scaffold a `vareffect_build.toml` config file at a
-   discoverable location
-2. **`check`** -- validate that config and reference data files are in
-   place and readable
-3. **`setup`** -- download GRCh38 and the configured transcript source (MANE by default) and build the runtime data
-   files that `vareffect` needs
-4. **`annotate`** -- annotate a VCF with VEP-compatible CSQ fields
-   (multi-threaded by default; `.vcf.gz` output is parallel, tabix-indexable
-   BGZF)
-
-## Install
+The command-line tool for the [`vareffect`](https://crates.io/crates/vareffect)
+consequence predictor. It builds the runtime data the library needs and
+annotates VCFs.
 
 ```bash
-cargo install vareffect-cli
+cargo install vareffect-cli    # installs a binary named `vareffect`
 ```
 
-The binary is named `vareffect`.
+| Command | What it does |
+|---|---|
+| `vareffect init` | Write a `vareffect_build.toml` config file |
+| `vareffect setup` | Download the genome and transcripts and build the stores |
+| `vareffect check` | Validate the config and the built files |
+| `vareffect annotate` | Annotate a VCF with VEP-style `CSQ` fields |
+| `vareffect build-transcripts` | Build a transcript store from a GFF3 you already have |
 
-## Initialize configuration
-
-Scaffold a `vareffect_build.toml` configuration file:
+## First run
 
 ```bash
-vareffect init
+vareffect init     # writes vareffect_build.toml to your user config directory
+vareffect setup    # ~10 minutes, ~7 GB peak disk, ~3 GB afterwards
+vareffect check    # exit code 0 when everything is in place
 ```
 
-Writes the default config to `~/.config/vareffect/vareffect_build.toml`
-(Linux/macOS). Auto-discovery means `setup`, `check`, and other
-subcommands will find it without `--config`.
-
-### Custom locations
+`setup` runs three steps: the GRCh38 genome (NCBI GRCh38.p14, converted to
+a memory-mappable flat binary), the patch-contig alias table, and the
+transcript store for the configured source. Downloads are cached in
+`data/raw/`, so a rerun skips them; the transcript store is rebuilt every
+time.
 
 ```bash
-# Write to a specific path:
-vareffect init --config /path/to/vareffect_build.toml
-
-# Override the data directory in the generated config:
-vareffect init --data-dir /data/genomes/vareffect
-
-# Overwrite an existing config without prompting:
-vareffect init --force
+vareffect setup --output /data/vareffect   # write somewhere other than the config's output_dir
+vareffect setup --fasta-only               # genome only
+vareffect setup --models-only              # transcript store only (reuses the genome)
 ```
 
-## Validate setup
+After setup, `data/vareffect/` holds:
 
-Check that config and all reference data files are in place:
+| File | Contents |
+|---|---|
+| `GRCh38.bin`, `GRCh38.bin.idx` | Flat-binary genome and its contig index |
+| `transcript_models*.bin` | Transcript store (name depends on the source, below) |
+| `*.manifest.json`, `*.sha256`, `*.excluded.tsv` | Build provenance: source, release, checksums, counts, transcripts not admitted and why |
+| `patch_chrom_aliases.csv` | UCSC to RefSeq names for patch contigs |
 
-```bash
-vareffect check
+`vareffect init` options: `--config <PATH>` to write elsewhere,
+`--data-dir <DIR>` to set the output directory, `--force` to overwrite.
+
+## Choosing a transcript source
+
+Set the source in the config before running `setup`:
+
+```toml
+[vareffect.transcripts]
+source = "mane"    # or "refseq" or "gencode"
 ```
 
-Reports pass/fail status for the config file, data directory, genome
-binary, genome index, and transcript model store. Exit code 0 if all
-pass, 1 if any fail.
+| Source | Transcripts | Store file | Store size |
+|---|---|---|---:|
+| `mane` (default) | MANE Select and Plus Clinical, v1.5 (19,437) | `transcript_models.bin` | 30 MB |
+| `refseq` | Curated `NM_`/`NR_` on the primary assembly, RS_2025_08 (93,432) | `transcript_models_refseq.bin` | 135 MB |
+| `gencode` | GENCODE comprehensive, v50 (644,292) | `transcript_models_gencode.bin` | 714 MB |
 
-## Setup runtime data
+The RefSeq and GENCODE files are pinned in the config's `[vareffect.refseq]`
+and `[vareffect.gencode]` tables (`url`, `release`, `sha256`). `setup` refuses
+a download whose SHA-256, release or genome build does not match the pin, so an
+upstream change cannot silently alter your store. `check` fails when the
+config, the store and its manifest disagree on the source or release.
 
-Run this first -- it builds the genome and transcript files that
-`annotate` requires.
+GENCODE is large: annotating ClinVar with it peaks at about 2.4 GB of memory,
+against about 1 GB for MANE.
 
-```bash
-vareffect setup
-```
-
-Downloads GRCh38 and the configured transcript source (MANE by default),
-builds both stores, writes everything to
-`data/vareffect/` (the default from `vareffect_build.toml`). Takes
-~10 minutes on broadband. Idempotent -- source archives are cached
-in `data/raw/`, so repeated runs skip downloads.
-
-### Custom output directory
-
-Use `--output` to override the output directory from the config file:
-
-```bash
-vareffect setup --output /data/genomes/vareffect
-```
-
-Runtime files (genome binary, transcript models, patch aliases) are
-written to the given directory instead of `[vareffect].output_dir`.
-
-After setup, `data/vareffect/` contains:
-
-| File | Purpose |
-|------|---------|
-| `GRCh38.bin` + `.idx` | Flat-binary genome + MessagePack contig index |
-| `transcript_models.bin` | Transcript models of the configured source (versioned store: 12-byte header + MessagePack) |
-| `patch_chrom_aliases.csv` | UCSC <-> RefSeq patch-contig mapping |
-
-### Partial runs
-
-```bash
-vareffect setup --fasta-only     # skip transcript model build
-vareffect setup --models-only    # skip reference FASTA download
-```
-
-Both flags can be combined with `--output`:
-
-```bash
-vareffect setup --fasta-only --output /data/genomes/vareffect
-```
-
-## Annotate a VCF
+## Annotating a VCF
 
 ```bash
 vareffect annotate \
@@ -119,89 +85,46 @@ vareffect annotate \
   --transcripts data/vareffect/transcript_models.bin
 ```
 
-Annotation uses all logical cores by default; add `--threads N` to limit it.
-
-Reads a VCF (`.vcf` or `.vcf.gz`), runs consequence prediction on every
-variant, and writes an annotated VCF with a `CSQ` INFO field whose
-pipe-delimited layout matches VEP's `--vcf` output:
-
-```
-Allele|Consequence|IMPACT|SYMBOL|Feature|Feature_type|BIOTYPE|EXON|INTRON|
-HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|
-STRAND|MANE_SELECT|MANE_PLUS_CLINICAL
-```
-
-Downstream tools that parse VEP CSQ fields (SnpSift, bcftools, GEMINI)
-work unchanged.
-
-A 100-variant test VCF is included at `tests/data/clinvar_100.vcf`
-(sampled from ClinVar across 10 chromosomes):
-
-```bash
-vareffect annotate \
-  --input tests/data/clinvar_100.vcf \
-  --output /tmp/annotated.vcf \
-  --fasta data/vareffect/GRCh38.bin \
-  --transcripts data/vareffect/transcript_models.bin
-```
-
-### Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
+| Flag | Default | Meaning |
+|---|---|---|
 | `--input` | required | Input VCF (`.vcf` or `.vcf.gz`) |
-| `--output` | required | Output VCF (`.vcf` or `.vcf.gz`) |
-| `--fasta` | required | `GRCh38.bin` flat-binary genome |
-| `--transcripts` | required | `transcript_models.bin` |
-| `--threads` | `0` | Worker threads (`0` = all logical cores) |
-| `--patch-aliases` | none | `patch_chrom_aliases.csv` for patch contigs |
+| `--output` | required | Output VCF; `.vcf.gz` is written as BGZF |
+| `--fasta` | required | `GRCh38.bin` |
+| `--transcripts` | required | The store to annotate against |
+| `--threads` | `0` | Worker threads; `0` uses every core |
+| `--patch-aliases` | none | `patch_chrom_aliases.csv`, for patch contigs |
 
-### Behaviour
+The output adds two header lines and a `CSQ` INFO field per record:
 
-- Chromosome names are normalized automatically (`1` -> `chr1`,
-  `MT` -> `chrM`). Both UCSC-prefixed and Ensembl/ClinVar bare names
-  work.
-- Multi-allelic ALT alleles are annotated independently; CSQ entries are
-  comma-separated with the `Allele` field identifying each ALT.
-- Intergenic variants pass through without a CSQ field (matching VEP).
-- Malformed lines, annotation errors, and panics are logged at WARN and
-  the original line is passed through unchanged. The pipeline never
-  drops a line.
-- `RUST_LOG=debug` enables per-variant reason logging for unannotated
-  variants.
-- Annotation is multi-threaded by default (`--threads 0` = all logical
-  cores); pass a number to limit it.
-- Output `.vcf.gz` is **BGZF** (block gzip), compressed in parallel and
-  written as a valid gzip stream with the BGZF EOF marker. It is directly
-  indexable with `tabix -p vcf` and queryable with `bcftools`. Plain `.vcf`
-  output is also supported (choose by extension).
+```text
+##vareffect_transcripts=mane 1.5
+##INFO=<ID=CSQ,...,Format: Allele|Consequence|IMPACT|SYMBOL|Feature|Feature_type|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|STRAND|MANE_SELECT|MANE_PLUS_CLINICAL">
+```
 
-## Configuration
+- Each `CSQ` entry is one transcript, with the same fields as VEP's `--vcf`
+  output, so bcftools, SnpSift and GEMINI read it unchanged.
+- Transcripts within 5 kb of a variant that they do not overlap get an
+  `upstream_gene_variant` or `downstream_gene_variant` entry. A record with no
+  transcript in range is written without `CSQ`.
+- Chromosome names are normalized (`1` to `chr1`, `MT` to `chrM`).
+- Multi-allelic records are annotated per ALT; the `Allele` field says which.
+- No record is dropped. A malformed line or an annotation error is logged as a
+  warning and the line is written unchanged (so, without `CSQ`).
+  `RUST_LOG=debug` logs the reason for every unannotated variant.
+- `.vcf.gz` output is BGZF, compressed in parallel and indexable with
+  `tabix -p vcf`.
 
-URLs and output paths live in `vareffect_build.toml`. Run `vareffect init`
-to scaffold one, or it is auto-discovered from:
+## Building a store from your own GFF3
 
-1. `--config <PATH>`
-2. `VAREFFECT_BUILD_CONFIG` env var
-3. `crates/vareffect-cli/vareffect_build.toml` (repo checkout)
-4. `/etc/vareffect/vareffect_build.toml`
-5. `~/.config/vareffect/vareffect_build.toml`
-
-Update `transcript_models_version` and the MANE URLs to target a newer
-MANE release.
-
-## `build-transcripts`
-
-Standalone transcript model builder. `--source` selects the GFF3 and the
-admission rules (default `mane`):
+`build-transcripts` builds a store without downloading anything. `--source`
+selects the admission rules:
 
 ```bash
-vareffect build-transcripts \
-  --input data/raw/mane_grch38.gff.gz \
-  --summary-input data/raw/mane_transcript_models_v1.5.summary.tsv.gz \
+vareffect build-transcripts --source mane \
+  --input MANE.GRCh38.v1.5.refseq_genomic.gff.gz \
+  --summary-input MANE.GRCh38.v1.5.summary.txt.gz \
   --patch-chrom-aliases data/vareffect/patch_chrom_aliases.csv \
-  --output data/vareffect \
-  --version 1.5
+  --output data/vareffect --version 1.5
 
 vareffect build-transcripts --source refseq \
   --input GCF_000001405.40_GRCh38.p14_genomic.gff.gz \
@@ -212,28 +135,27 @@ vareffect build-transcripts --source gencode \
   --output data/vareffect --version 50
 ```
 
-| Source | Candidates | Store |
-|--------|------------|-------|
-| `mane` | rows tagged `MANE Select` / `MANE Plus Clinical` | `transcript_models.bin` |
-| `refseq` | rows with a curated `transcript_id` (`NM_` / `NR_`); only `NC_` (primary assembly) rows are admitted | `transcript_models_refseq.bin` |
-| `gencode` | every `transcript` row | `transcript_models_gencode.bin` |
+For MANE, `--summary-input` cross-checks every transcript against the MANE
+summary file and fails the build on a mismatch. Every build writes the
+manifest and `excluded.tsv` listed above.
 
-Each build also writes `<stem>.excluded.tsv` (accession, chromosome, 0-based
-start and reason for every candidate not admitted) and records the counts in
-the manifest. GENCODE v50 gives 644,292 models (about 640 MB, 1.7 GB resident
-when loaded); RefSeq RS_2025_08 gives 93,432.
+## Configuration file
 
-## Disk requirements
+`vareffect_build.toml` holds the download URLs, the transcript source and the
+output directory. Commands look for it in this order:
 
-| Phase | Disk |
-|-------|------|
-| During first `setup` | ~7 GB peak |
-| After `setup` (runtime only) | ~3 GB |
+1. `--config <PATH>`
+2. the `VAREFFECT_BUILD_CONFIG` environment variable
+3. `vareffect-cli/vareffect_build.toml` (in a repository checkout)
+4. `/etc/vareffect/vareffect_build.toml`
+5. `vareffect/vareffect_build.toml` in the user config directory
+   (`~/.config` on Linux, `~/Library/Application Support` on macOS)
 
-Delete `data/raw/` after setup if disk is tight.
+The file written by `vareffect init` documents every key. Unknown keys inside
+`[vareffect]` are an error, so a misspelled table cannot fall back to a
+default.
 
 ## License
 
-Apache License, Version 2.0
-([LICENSE-APACHE](LICENSE-APACHE) or
-<https://www.apache.org/licenses/LICENSE-2.0>)
+Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+<https://www.apache.org/licenses/LICENSE-2.0>).

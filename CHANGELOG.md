@@ -8,356 +8,129 @@ For releases before `0.5.0`, see the git history.
 
 ## [0.6.0]
 
+RefSeq and GENCODE transcript stores, upstream/downstream gene variants, and
+a broad pass of VEP 116 concordance fixes. Stores from 0.5 must be rebuilt
+with `vareffect setup`.
+
+### Highlights
+
+- **Three transcript sources.** `vareffect setup` builds MANE (default), the
+  full curated RefSeq set (RS_2025_08, 93,432 transcripts) or GENCODE
+  comprehensive (v50, 644,292), chosen with
+  `[vareffect.transcripts] source = "mane" | "refseq" | "gencode"`. RefSeq and
+  GENCODE downloads are pinned by SHA-256, release and genome build. Every
+  store records its source and release, which `vareffect check` validates and
+  `vareffect annotate` writes as `##vareffect_transcripts=<source> <release>`.
+- **Upstream and downstream gene variants.** `annotate` also returns
+  transcripts within 5,000 bases of a variant, as VEP's default
+  `--distance 5000` does, with the new `ConsequenceResult::distance`.
+- **Transcripts MANE never had.** Incomplete CDSs, short frameshift introns,
+  RefSeq transcripts that differ from the genome, selenocysteine codons and
+  pseudoautosomal copies are annotated as VEP 116 does (see
+  `VEP_DIVERGENCES.md` 3).
+
+### Breaking changes
+
+- **Store format.** `transcript_models.bin` now starts with a 12-byte header
+  (magic `VEFXTXM\0`, `u32` format version 3) before a MessagePack payload
+  holding the source, release and models. Stores from 0.5 and earlier are
+  refused with `UnsupportedStoreFormat`; a 0.5 reader fails on a 0.6 store, so
+  the CLI and library upgrade together. Empty stores and stores with trailing
+  bytes are refused. Identify a store by (`format_version`, `payload_sha256`)
+  from its manifest; the file SHA-256 changes.
+- **`annotate` returns more results.** Transcripts within 5 kb that the
+  variant does not overlap now appear with `upstream_gene_variant` or
+  `downstream_gene_variant` (MODIFIER), and `intergenic_variant` means no
+  transcript in range. A consumer that picks one transcript per variant, or
+  treats any result as "in a gene", should drop results whose only terms are
+  these two. In `vareffect annotate` output the CSQ layout is unchanged, but
+  records near a transcript gain entries. The structural-variant entry points
+  are unchanged.
+- **`TranscriptModel`** is `#[non_exhaustive]` (build it with
+  `TranscriptModel::new` and the `with_*` setters), `tier` is
+  `Option<TranscriptTier>`, and `encode_transcript_store` takes the source and
+  release: `encode_transcript_store(source, source_release, transcripts)`.
+- **`TranscriptStore`** allows one accession on chrX and chrY
+  (pseudoautosomal copies); `get_by_accession` returns the chrX copy. Building
+  a store fails on an `exon_count` that disagrees with `exons`, a CDS phase
+  above 2, two CDS segments in one exon (ribosomal slippage), or a non-zero
+  first phase on a CDS marked start-complete.
+- **Enums.** `VariantLocation`, `IndelLocation` and `IndelRegion` are
+  `#[non_exhaustive]`. New variants break exhaustive matches:
+  `Consequence::NonCodingTranscriptVariant` (`severity_rank` from
+  `UpstreamGeneVariant` on moves up by one),
+  `VariantLocation::FrameshiftIntron`, and `VarEffectError::UnsupportedStoreFormat`,
+  `Serialize`, `EmptyStore` and `CdsNumberingUnavailable`.
+- **Coordinates on incomplete CDSs.** On a 5'-incomplete CDS, CDS offsets,
+  codon numbers and `resolve_hgvs_c` use VEP's padded frame (the first coding
+  base is offset `LocateIndex::cds_start_pad()`). Unchanged for complete
+  CDSs, which includes all of MANE.
+- **Insertions** are located at their insertion point: on the minus strand
+  `IndelRegion::Cds` offsets move one base later, an insertion at an
+  exon/intron junction has no exon or intron number, and
+  `crosses_exon_boundary` is always `false` for an insertion.
+- **Config.** An unknown key inside `[vareffect]` or its tables is an error,
+  so a misspelled table cannot silently fall back to MANE.
+
 ### Added
 
-- `ConsequenceResult::distance`: VEP's `distance` for up/downstream results
-  (from the nearer variant edge to the nearer transcript end; 1 for an
-  adjacent substitution, 0 for an insertion at the transcript's end).
-  Substitutions and deletions are reported up to 5,000, insertions up to
-  4,999, as VEP 116 does.
-- A versioned transcript store format. `transcript_models.bin` now opens
-  with a 12-byte header (magic `VEFXTXM\0` plus a `u32` little-endian format
-  version, 3 in this release) followed by a MessagePack payload: the
-  transcript source, its release and the `Vec<TranscriptModel>`. The version
-  is checked before the payload is decoded.
-- `TranscriptSource` (`Mane`, `RefSeq`, `Gencode`; `#[non_exhaustive]`), and
-  `TranscriptStore::source`, `TranscriptStore::source_release` and
-  `TranscriptStore::try_from_data`. `vareffect setup` records MANE and its
-  release in the store.
-- `TranscriptModel::new` and `with_*` setters. New model fields:
-  `cds_start_complete` / `cds_end_complete` (GENCODE `cds_start_NF` /
-  `cds_end_NF`, RefSeq partial CDS ranges), `genome_mismatch`,
-  `cds_alignment_gap`, `utr_numbering_breaks` (`UtrNumberingBreaks`) and
-  `selenocysteine_codons`. MANE models are complete and genome-matching.
-- Multi-locus accessions: one chrX and one chrY copy of a pseudoautosomal
-  transcript. `TranscriptStore::get_all_by_accession` returns every copy in
-  canonical chromosome order (`chrom::canonical_order_key`, then
-  `tx_start`). The builder admits a repeated accession only as one chrX and
-  one chrY copy, each overlapping a pseudoautosomal region, and refuses any
-  other.
-- `TranscriptStore::from_bytes`, for callers that read the file themselves
-  (for example to hash exactly the bytes they load).
-  `TranscriptStore::load_from_path` now reads the file and calls it.
-- `encode_transcript_store`, the one supported way to write a store, and
-  `StoreFormat` (both re-exported at the crate root), plus
+- `TranscriptSource` (`Mane`, `RefSeq`, `Gencode`),
+  `TranscriptStore::{source, source_release, try_from_data, from_bytes,
+  get_all_by_accession}`, `encode_transcript_store`, `StoreFormat` and
   `transcript::{store_format, TRANSCRIPT_STORE_FORMAT_VERSION,
   TRANSCRIPT_STORE_HEADER_LEN}`.
-- `VarEffectError::UnsupportedStoreFormat`, `VarEffectError::Serialize` and
-  `VarEffectError::EmptyStore`.
-- Store manifests record `format_version`, `payload_sha256` (SHA-256 of the
-  bytes after the header) and `source_file_sha256` (SHA-256 of the GFF3 the
-  store was built from).
-- `vareffect check` loads the transcript store the way `annotate` does and
-  reports its format version and record count, so an unversioned,
-  other-version, truncated or empty store fails the check.
-- Incomplete CDS support in the engine, following VEP 116. GFF3 phase on
-  the first CDS row is read: `LocateIndex::cds_start_pad` gives the bases
-  missing from a 5'-incomplete first codon. CDS positions, codon numbers and
-  protein positions count them; cDNA positions do not; HGVS `c.` counts them
-  only for the exonic position of a substitution, as VEP does. Variants in a
-  partial first or last codon (SNVs, MNVs, deletions, insertions) get VEP's
-  terms, codons and amino acid `X`, with HGVS p. `p.?`. A deletion that
-  removes the end of a CDS without a stop codon gets no stop term. It has no
-  HGVS p. when it starts before the partial codon (`c.656_659del`) or runs
-  from the partial codon into the 3'UTR (`c.658_*2del`); deleting exactly
-  the partial codon is `protein_altering_variant` with `p.?`. An insertion
-  inside the partial codon translates every codon it completes
-  (`stop_gained` for `X/W*X`). An
-  insertion between the last complete codon and the partial codon is VEP's
-  `inframe_insertion` + `incomplete_terminal_codon_variant` with the
-  inserted bases translated (`stop_gained` when they contain a stop,
-  `coding_sequence_variant` when the translation has an `X`). A
-  minus-strand insertion after the last CDS base is `3_prime_UTR_variant`,
-  or `downstream_gene_variant` when the transcript has no 3'UTR (see
-  `VEP_DIVERGENCES.md`).
-- Frameshift introns (exon gaps of `locate::FRAMESHIFT_INTRON_MAX_GAP` = 13
-  bases or fewer), following VEP 116: a variant inside one is
-  `coding_sequence_variant` or `non_coding_transcript_variant`, a deletion
-  across one is a normal coding change, and on a one-base gap the splice
-  windows spill onto the flanking coding bases.
-- `Consequence::NonCodingTranscriptVariant`,
-  `VariantLocation::FrameshiftIntron` and `locate::FRAMESHIFT_INTRON_MAX_GAP`.
-- `vareffect build-transcripts --source mane|refseq|gencode` builds a store
-  from the MANE GFF3 (default, unchanged output), NCBI RefSeq's full GRCh38
-  annotation (curated `NM_` / `NR_` on the primary assembly, written as
-  `transcript_models_refseq.bin`) or GENCODE comprehensive
-  (`transcript_models_gencode.bin`). The CDS rows are taken as they are:
-  `stop_codon` rows are never added to them (GENCODE's CDS already contains
-  the stop). RefSeq and GENCODE models record CDS completeness (a RefSeq range marker
-  counts only on the CDS's first or last row; an interior one is a coverage
-  break), RefSeq's genome-mismatch flags (in-row `Gap` operations and
-  transcript stretches aligned nowhere between `cDNA_match` blocks) and both
-  sources' selenocysteine codons (MANE's come from `transl_except`, see
-  Changed). Every
-  build writes `<stem>.excluded.tsv`, the candidate transcripts not
-  admitted and why (RefSeq alternate loci and patches, ribosomal-slippage
-  CDSs with two segments in one exon, ...), and the manifest gains
-  `source`, `counts`, `skipped_rows`, `anomalies`, `excluded_file` and
-  `excluded_sha256`. The builder loads the encoded store back before
-  writing it.
-- `vareffect setup` builds the source chosen by the new
-  `[vareffect.transcripts] source = "mane" | "refseq" | "gencode"` config
-  key (`mane` when absent, so existing configs are unchanged; an unknown
-  value is an error, as is now any unknown key inside `[vareffect]` or its
-  tables, so a misspelled table cannot fall back to MANE). RefSeq and
-  GENCODE come from the new
-  `[vareffect.refseq]` / `[vareffect.gencode]` tables (`url`, `release`,
-  `sha256`), pinned to RefSeq RS_2025_08 and GENCODE 50 in the default
-  config. The cached file is named after source, build and release, and
-  setup refuses it unless its SHA-256, header release and header genome
-  build match the pin and `fasta_build` (patch suffixes such as `.p14`
-  ignored).
-- `vareffect check` validates the configured source's store and fails when
-  the config, the store's manifest and the store disagree on source or
-  release (a manifest that records no source fails: rerun setup).
-- `vareffect annotate` writes `##vareffect_transcripts=<source> <release>`
-  (from the loaded store, `unknown` for a store without provenance) before
-  the CSQ header line, and drops such a line from the input.
+- `TranscriptModel` fields `cds_start_complete`, `cds_end_complete`,
+  `genome_mismatch`, `cds_alignment_gap`, `utr_numbering_breaks` and
+  `selenocysteine_codons`; `ConsequenceResult::distance` (also in the VEP JSON
+  as `distance`); `locate::FRAMESHIFT_INTRON_MAX_GAP`.
+- `vareffect build-transcripts --source mane|refseq|gencode`. Every build
+  writes `<store>.excluded.tsv` (transcripts not admitted, and why) and a
+  manifest with the source, counts, skipped rows, `format_version`,
+  `payload_sha256` and `source_file_sha256`.
+- `vareffect check` loads the store as `annotate` does and fails when the
+  config, the store and its manifest disagree on source or release.
 
-### Changed
+### Changed: annotation output, following VEP 116
 
-- **Breaking (meaning):** `VarEffect::annotate` now also returns transcripts
-  within 5,000 bases of a variant it does not overlap, each with
-  `upstream_gene_variant` or `downstream_gene_variant` (MODIFIER), as VEP's
-  default `--distance 5000` does; `intergenic_variant` now means no transcript
-  in range. Before, the per-variant overlap query made these terms almost
-  unreachable. A consumer that picks one transcript per variant, or treats any
-  result as "in a gene", should drop results whose only terms are these two
-  to keep the earlier behavior. The CSQ field layout is unchanged, but VCF
-  output from `vareffect annotate` now carries these entries: records within
-  5,000 bases of a transcript they do not overlap gain a CSQ they lacked, and
-  genic records gain up/downstream entries. The VEP JSON gains `distance`. Structural-variant entry points are unchanged.
-- Selenocysteine, following VEP 116. The MANE build reads `aa:Sec` from
-  `transl_except` (35 codons on 25 MANE 1.5 transcripts; other entries are
-  counted in the manifest's `other_transl_except`), so the MANE store bytes
-  change. In the reference peptide `TGA` at a selenocysteine codon is `U`;
-  alternate alleles translate with the standard table. A Sec codon SNV is
-  now `missense_variant` (`U/R`, `p.Sec428Arg`) or `stop_gained` (`U/*`,
-  `p.Sec49Ter`) instead of `stop_lost` or `stop_retained_variant`, and a
-  deletion of the codon is `inframe_deletion` `p.Sec49del`. As in VEP, which
-  counts the new stop from the start of the whole alternate translation, a
-  stop-lost that leaves a selenocysteine upstream is `extTer?` and a
-  frameshift after a selenocysteine `fsTer?`; the `ptc` field keeps the
-  located termination codon. A store whose selenocysteine codon lies outside
-  the CDS fails to load (`LocateIndex::build`). `codon::aa_three_letter` maps `U` to `"Sec"`. On ClinVar against
-  MANE 1.5, 17 CSQ entries on 5 transcripts change, all matching VEP 116
-  REST.
-- **Breaking.** `TranscriptModel` is `#[non_exhaustive]` (build it with
-  `TranscriptModel::new`), `TranscriptModel::tier` is an
-  `Option<TranscriptTier>` (`None` for a transcript without a MANE or RefSeq
-  Select tag), and `encode_transcript_store` takes the source and release:
-  `encode_transcript_store(source, source_release, transcripts)`.
-- **Breaking.** `TranscriptStore` accepts an accession on two chromosomes;
-  the uniqueness rule is now per (accession, chromosome).
-  `get_by_accession`, and with it HGVS c. resolution, returns the first copy
-  in canonical chromosome order (chrX for a PAR transcript). Construction
-  also fails when `exon_count` disagrees with `exons`, or when a CDS with a
-  non-zero first phase is marked `cds_start_complete`.
-- **Breaking.** On a CDS marked `cds_start_complete = false`, codon 1 is not a
-  start codon even when it reads ATG: no `start_lost`,
-  `start_retained_variant` or `p.Met1?` (VEP 116 ENST00000616125.5 `c.1A>G`
-  is `missense_variant` `p.Met1Val`). On `cds_end_complete = false` the CDS
-  has no stop codon on the genome. A model flagged `cds_alignment_gap` gets
-  no HGVS c. or p., cDNA / CDS / protein positions, codons or amino acids,
-  its termination codon is `PtcStatus::Indeterminate` (consequence
-  terms, impact, exon / intron numbers and `predicts_nmd` are kept), and
-  `resolve_hgvs_c` refuses it with the new
-  `VarEffectError::CdsNumberingUnavailable` (see `VEP_DIVERGENCES.md` 3.3).
-  A RefSeq CDS open on the genome sets `cds_alignment_gap`. Past a
-  `utr_numbering_breaks` bound (a RefSeq UTR alignment gap, or transcript
-  bases before the alignment), cDNA positions and HGVS c. or n. are not
-  reported, and such HGVS c. is not resolved. No MANE 1.5 output changes.
-- **Breaking.** Stores written by vareffect 0.5 and earlier are refused with
-  `UnsupportedStoreFormat { found: StoreFormat::Unversioned, .. }`, and
-  format 1 stores from development builds of 0.6 with
-  `found: StoreFormat::Version(1)`. Rebuild
-  them with `vareffect setup` (the transcript store rebuilds in seconds from
-  cached sources). A 0.5 reader given a 0.6 store fails at byte 0, so the CLI
-  and every library consumer upgrade together.
-- **Breaking.** The new `VarEffectError` variants break exhaustive matches on
-  the error type. The enum stays exhaustive on purpose, so downstream code is
-  told about every new failure mode at compile time.
-- **Breaking.** `VariantLocation::CdsExon::cds_offset` (and `codon_number`,
-  `codon_position`, `IndelRegion::Cds` offsets) count in VEP's padded frame:
-  on a 5'-incomplete CDS the first genomic coding base is offset
-  `cds_start_pad()`, not 0. `resolve_hgvs_c` maps `c.N` on such a transcript
-  as VEP numbers it, which differs by the pad between substitutions and
-  other variant types, and refuses a substitution inside the pad. Unchanged
-  for every complete CDS, which includes all of MANE 1.5.
-- **Breaking.** `locate_variant` returns `VariantLocation::FrameshiftIntron`
-  instead of a splice or intron location inside an exon gap of 13 bases or
-  fewer, and indels touching such a gap change terms as described under
-  Added. MANE 1.5 has no such gap.
-- **Breaking.** `VariantLocation`, `IndelLocation` and `IndelRegion` are now
-  `#[non_exhaustive]`. The new `Consequence` variant breaks exhaustive
-  matches on `Consequence`, and `Consequence::severity_rank` values from
-  `UpstreamGeneVariant` on move up by one.
-- **Breaking.** `start_lost`, `start_retained_variant` and `p.Met1?` are no
-  longer emitted on a CDS without a complete first codon, and the
-  stop-codon deletion pattern (`stop_lost` + `3_prime_UTR_variant`) needs a
-  CDS that ends in a stop codon on the genome. A variant in a 3' partial
-  codon now reports VEP's terms, codons, amino acid `X`, protein position
-  and `p.?`; before, SNVs, MNVs and delins got only
-  `incomplete_terminal_codon_variant`, and deletions and insertions a
-  frameshift call. In MANE 1.5 this changes only NM_001424184.1 (TMEM247),
-  whose stop is completed by polyadenylation; no ClinVar GRCh38 record
-  moves.
-- `ConsequenceResult::ptc` skips frameshift introns when it locates the last
-  exon-exon junction: no exon-junction complex sits at a sequence
-  correction. `predicts_nmd` keeps VEP's NMD plugin behavior and counts
-  them. Unchanged on MANE 1.5, which has none.
-- **Breaking.** `LocateIndex::build` returns `Malformed` for a transcript
-  with more than one CDS segment in one exon (a ribosomal-slippage CDS), a
-  CDS phase above 2 or a CDS segment pointing at a missing exon, and
-  `TranscriptStore` construction fails with it, instead of keeping only the
-  last segment, computing with the bad phase or panicking. MANE 1.5 has
-  none of these.
-- **Breaking.** `locate_indel` classifies an insertion at its insertion
-  point, as VEP 116 does: on the minus strand `IndelRegion::Cds` offsets move
-  one base later (the insertion goes before `cds_offset_start` on both
-  strands); an insertion at an exon/intron junction is the mRNA insertion
-  between the two exons, with no exon or intron number; one next to a UTR
-  base is a UTR insertion; the splice flags follow VEP's two-flank rule; and
-  `crosses_exon_boundary` is always `false` for an insertion.
-- **Breaking.** A store with no transcripts, or with bytes after the payload,
-  is an error at load time. The builder refuses a GFF3 that admits no
-  transcripts instead of writing an empty store, which would annotate every
-  variant as overlapping nothing.
-- The SHA-256 of a rebuilt store changes: the payload now holds the source,
-  the release and the new model fields. Identify a store by
-  (`format_version`, `payload_sha256`) from its manifest, never by
-  `payload_sha256` alone; the 0.5 file SHA does not link to any 0.6 value.
-  The MANE 1.5 GRCh38 models themselves are unchanged: every 0.5 field
-  holds the same value, with `tier` wrapped in `Some`.
+- **Incomplete CDSs** (GENCODE `cds_start_NF`/`cds_end_NF`, partial RefSeq
+  CDSs): a partial first or last codon gets VEP's terms, amino acid `X` and
+  `p.?`; no start terms without a complete start codon; no stop terms without
+  a stop codon on the genome.
+- **Frameshift introns** (exon gaps of 13 bases or fewer): a variant inside one
+  is `coding_sequence_variant` or `non_coding_transcript_variant`, with no
+  splice or intron term. `ptc` skips them when it locates the last junction.
+- **RefSeq transcripts that differ from the genome**: on a model flagged
+  `cds_alignment_gap`, HGVS, positions, codons and amino acids are withheld
+  and `ptc` is `Indeterminate`; past a `utr_numbering_breaks` bound, cDNA
+  positions and HGVS naming them are withheld. Terms, impact, exon numbers and
+  `predicts_nmd` are kept.
+- **Selenocysteine**: `TGA` at a listed codon reads as `U` (`Sec`) in the
+  reference peptide (MANE reads them from `transl_except`). A Sec codon SNV is
+  `missense_variant` or `stop_gained` instead of `stop_lost`, and
+  `codon::aa_three_letter` maps `U` to `"Sec"`.
+- **Insertions** are classified at their insertion point (fixing a one-base
+  error on the minus strand, TP53 `c.523_524insT` `p.Arg175LeufsTer6`).
+  HGVS is 3'-shifted on the genome, across exon/intron junctions, with the
+  inserted bases rotated. In-frame insertions follow VEP's codon window,
+  terms and HGVS p. (`p.Gln52_Trp53insTer`, `p.Pro626_Gly628dup`).
+- **Deletions**: HGVS is 3'-shifted on the genome, across exon/intron
+  junctions (`c.1497+1del`); a coding deletion shifted out of the CDS has no
+  HGVS p.
+- **Frameshifts** show VEP's codon window (`gat/gaTt`, `D/DX`), add
+  `stop_gained` when the window reads a new stop, and follow VEP's
+  start-codon rules (`start_retained_variant` when `ATG` is kept). Through the
+  stop codon they are extensions (`p.Ter426CysextTer4`, `p.Ter362AsnextTer?`);
+  one that keeps the stop is `p.Ter298=`, and `stop_retained_variant` (LOW,
+  no PTC) when the submitted variant reaches into the stop codon.
+- **Alleles with `N`**: no HGVS or amino acids, and peptide terms become
+  `coding_sequence_variant`, as in VEP.
 
 ### Fixed
 
-- HGVS p. of a frameshift through the stop codon follows VEP 116. A
-  frameshift whose first changed residue is the stop is an extension,
-  `p.Ter362AsnextTer?` or `p.Ter426CysextTer4` (counted from the first codon
-  after the old stop, one less than the former `fsTer`), instead of
-  `p.Ter426CysfsTer5`. A deletion just before the stop codon now reads on
-  into the 3'UTR to find its first changed residue instead of writing the
-  malformed `p.Ter362?fsTer?` or `p.Lys141?fsTer?` (or no HGVS p.) where the
-  transcript has a 3'UTR to read (without one, as on 38 GENCODE ClinVar
-  results, `p.Xxx{N}?fsTer?` stays), and a
-  frameshift that rebuilds the stop codon is `p.Ter298=` instead of naming a
-  residue past the stop. `ptc` moves with it: the read-on cases now carry the
-  located stop or `NoStopCodon` instead of `Indeterminate` (ClinVar on MANE:
-  80 transcript results). A frameshift reaching into the stop codon that
-  keeps it is `stop_retained_variant` (LOW) instead of `frameshift_variant`
-  (HIGH), as in VEP 116, with `ptc` not applicable and no NMD prediction; one
-  that keeps it only through a repeat 3' of the submitted position stays
-  `frameshift_variant` with `p.Ter{N}=`, as VEP decides at that position. The
-  `vep_large_concordance` ground truth, from an
-  earlier VEP release, still has `fsTer` for these extensions.
-- Variants near a 3' partial codon no longer fail with `Malformed`
-  ("sequence length N is not divisible by 3" or "CDS offsets outside the
-  CDS"), which dropped every transcript's annotation for the variant. An
-  in-frame deletion or deletion-insertion within 90 bases of a partial
-  codon now translates the protein 3' rule's window up to the last whole
-  codon, and a deletion-insertion or MNV running from a complete codon into
-  the partial codon gets VEP 116's terms, codons and amino acids, with
-  HGVS p. `p.?` and the PTC of a stop it creates in a complete codon. On GENCODE v50 this was 3.2% of synthetic indels near the
-  ends of its 30,255 incomplete CDSs, and one ClinVar variant
-  (chr12:57581526 ATCT>A, ENST00000675634.1).
-- Deletion HGVS follows VEP 116's 3' shift on the genome, as insertion HGVS
-  already did: it crosses exon/intron junctions (NM_000632.4 `c.1497+1del`,
-  was `c.1497del`; `c.410-1del` is written `c.410del`), deletions across a
-  junction shift too, and the shift reads at most 1000 bases. HGVS p. is
-  written from the shifted deletion: none when a coding deletion shifts out
-  of the CDS (into the intron or past the stop codon), and the shifted
-  deletion's when one reaching from an intron into the CDS shifts wholly into
-  it (NM_000540.3 `c.958_960del` `p.Glu320del`, was none). Consequences, NMD
-  and PTC stay on the unshifted deletion. Over GRCh38 ClinVar on MANE 1.5,
-  4,281 transcript entries move, all deletions: HGVS c. on 4,251, HGVS p.
-  dropped on 877 and added on 291; no consequence term moves.
-- Frameshifts follow VEP 116's codon window (`TranscriptVariationAllele`
-  `codon` / `peptide`): an insertion inside a codon shows that codon and its
-  peptide (`gat/gaTt`, `D/DX`), one between codons shows no reference codon
-  (`-/T`, `-/X`), and a peptide that is a lone stop gets no `X` (`CE/*`).
-  A frameshift whose window reads a new stop is also `stop_gained` (2,713
-  ClinVar x MANE 1.5 entries), except a stop inserted right before the
-  stop codon. At the start codon the frameshift path now
-  applies VEP's `_ins_del_start_altered` and `_inv_start_altered`: an indel
-  that keeps or rebuilds `ATG`, or only shifts it into the 5'UTR, is
-  `start_retained_variant` (with `start_lost` when `ATG` no longer opens the
-  CDS), and only an insertion inside codon 1 touches it (84 entries).
-- An alternate allele with an `N` (or another base outside A, C, G, T) is
-  annotated as VEP 116 does: the terms read from the peptide (`missense`,
-  `stop_gained`, `protein_altering`, ...) become `coding_sequence_variant`,
-  `frameshift_variant` stays, and there is no HGVS c., HGVS p. or amino acid
-  change. Codons and positions are kept, for SNVs too. Before, such alleles could
-  be called `stop_gained`, `missense_variant` or `protein_altering_variant`
-  (6 of 668 ClinVar N alleles) and got an HGVS c. A frameshift's
-  termination codon is `PtcStatus::Indeterminate`.
-- Insertions are annotated at their insertion point (VEP 116). Before, an
-  insertion was classified by a single genomic base, which on the minus
-  strand lies on the wrong side of it: minus-strand coding insertions were one
-  base early (TP53 `c.523_524insT` was `p.Arg175SerfsTer6`, VEP
-  `p.Arg175LeufsTer6`), and each exon/intron or UTR/CDS edge was wrong on one
-  strand (plus: `splice_donor_variant` at the donor junction,
-  `frameshift_variant` + `start_lost` before the first coding base; minus:
-  `splice_acceptor_variant` at the acceptor junction, a frameshift after the
-  last coding base). Canonical-site insertions no longer carry
-  `coding_sequence_variant` and `intron_variant`, and splice terms follow
-  VEP's insertion predicates. In-frame insertion HGVS p. now sees the residue
-  before a split codon (NM_006231.4 `c.2465_2467dup`:
-  `p.Lys822_Gly823insGlu`). Over GRCh38 ClinVar on MANE 1.5, 15,549 of
-  4,667,273 transcript rows move, all insertions; no HGVS c. changes. In a
-  stratified sample (up to 20 variants per term-change bucket; 484 variants,
-  517 transcript rows), terms and HGVS p. both match VEP 116 in 390 rows,
-  against none before.
-- Insertion HGVS follows VEP 116's 3' shift. The shift is on the genome, so
-  it crosses exon/intron junctions (NM_000548.5 `c.336+1_336+2dup`, was
-  `c.336_336+1insGT`), reads at most 1000 bases and moves at most 1001 minus
-  the insertion length, as VEP's. The inserted bases rotate with the shift,
-  which also finds duplications the unrotated bases hid (NM_000051.4
-  `c.-32_-31dup`, was `c.-31_-31+1insGT`), and a duplication of the bases 3'
-  of the insertion is checked before one of the 5' bases, as VEP does. HGVS
-  p. is written at the shifted point: none when a coding insertion shifts
-  out of the CDS, into the intron or past the stop codon (VEP; NM_003036.4
-  `c.2152_*3dup`), and an in-frame insertion translates the rotated bases
-  (NM_001378454.1 `p.His2513_Ala2514insAsn`, was `insIle`). Consequences,
-  NMD and PTC stay on the unshifted insertion. Over GRCh38 ClinVar on MANE
-  1.5, 12,634 of 4,667,273 transcript rows move, all insertions, in HGVS c.
-  (12,605) and HGVS p. (4,437) only; the 63 rows shifted past the stop codon
-  all match VEP 116. In a stratified sample (up to 20 per change bucket, 385
-  rows), HGVS c. matches VEP 116 in
-  all 385 (none before) and HGVS p. in 371 (232 before); the other 14 are
-  in-frame protein duplications and stop insertions VEP writes differently
-  (a separate fix) and one frameshift at the stop codon, none of which
-  matched before either.
-- In-frame insertions follow VEP 116's codon window, terms and HGVS p.
-  Between two codons only the inserted codon is shown (NM_000059.4
-  `c.44_45insATT`: `-/TTA`, `-/L`, was `attttt/attTTAttt`, `IF/ILF`) and the
-  protein position spans both flanking residues. An insertion inside a codon
-  whose peptide neither starts nor ends with the reference residue is
-  `protein_altering_variant` (NM_000546.6 `c.523_524insTTT`, was
-  `inframe_insertion`), and a stop-carrying one may be `stop_gained` alone;
-  a stop inserted just before the native stop is `stop_retained_variant`
-  (NM_003036.4 `c.2152_*3dup`, was `stop_gained`), and an insertion before
-  the stop codon whose bases carry a stop is now `stop_gained` with the
-  termination codon past the native one (NM_000546.6
-  `c.1179_1180insCTGTAA`). Inside codon 1, VEP's start-codon rules apply
-  (`c.2_3insGAT`: `start_retained_variant`, was `inframe_insertion`;
-  `c.1_2insCGA`: `start_lost,start_retained_variant`). HGVS p. shifts the
-  inserted peptide C-terminal across the whole protein before checking for a
-  duplication (NM_001854.4 `p.Pro626_Gly628dup`, was `p.Gly625_Pro627dup`),
-  writes a stop insertion as an insertion (NM_000546.6
-  `p.Gln52_Trp53insTer`, was `p.Gln53Ter`), gives a stop-codon insertion
-  VEP's `delins` (`p.Ter394delinsTrpGly`, was none) and no notation for a
-  non-duplicating insertion just before the stop codon. An insertion with
-  an `N` is `coding_sequence_variant` with no amino acids or HGVS p., as in
-  VEP (was translated, e.g. a false `stop_gained`). Over GRCh38 ClinVar
-  insertions on MANE 1.5, 4,113 transcript rows move, all in-frame CDS
-  insertions: codons and protein position (4,013), amino acids (4,113),
-  HGVS p. (2,062), terms (562). In a stratified VEP 116 sample (up to 20 per
-  change bucket, 460 rows) codons, amino acids and protein position match
-  in all 460 (330, 285 and 330 before), terms in 458 (177 before) and HGVS
-  p. in 453 (157 before); the others are `start_lost` HGVS p. and two
-  `N`-containing minus-strand insertions VEP calls `stop_retained_variant`
-  (see `VEP_DIVERGENCES.md`).
+- Variants near a 3' partial codon no longer fail with `Malformed`, which
+  dropped every transcript's annotation for the variant.
+- HGVS p. of a frameshift deletion just before the stop codon is no longer the
+  malformed `p.Ter362?fsTer?` when the transcript has a 3'UTR to read.
 
 ## [0.5.0]
 

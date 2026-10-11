@@ -214,9 +214,9 @@ pub struct VareffectSection {
 /// Resolution order:
 /// 1. Explicit `--config` flag
 /// 2. `VAREFFECT_BUILD_CONFIG` environment variable
-/// 3. Well-known paths: `crates/vareffect-cli/vareffect_build.toml` (repo
-///    root), `/etc/vareffect/vareffect_build.toml` (system),
-///    `~/.config/vareffect/vareffect_build.toml` (user)
+/// 3. Well-known paths: `vareffect-cli/vareffect_build.toml` (repo root),
+///    `/etc/vareffect/vareffect_build.toml` (system),
+///    `vareffect/vareffect_build.toml` in the user config directory
 ///
 /// # Errors
 ///
