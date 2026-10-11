@@ -10,7 +10,7 @@
 
 Variant consequence prediction and HGVS notation in Rust, concordant with [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/).
 
-vareffect takes a variant (chromosome, position, ref, alt) and returns Sequence Ontology consequence terms, HGVS c./p. notation, and NMD prediction for every overlapping transcript -- the same questions VEP answers, at 100--400x the speed, with zero runtime dependencies. The engine is thread-safe (`Send + Sync`), memory-mapped, and designed to embed directly into Rust pipelines.
+vareffect takes a variant (chromosome, position, ref, alt) and returns Sequence Ontology consequence terms, HGVS c./p. notation, and NMD prediction for every overlapping transcript (and up/downstream terms within 5 kb) -- the same questions VEP answers, at 100--400x the speed, with zero runtime dependencies. The engine is thread-safe (`Send + Sync`), memory-mapped, and designed to embed directly into Rust pipelines.
 
 This repository contains two crates:
 
@@ -29,7 +29,8 @@ cargo install vareffect-cli
 # Scaffold a config file (one-time):
 vareffect init
 
-# Downloads GRCh38 + MANE, builds genome binary and transcript store.
+# Downloads GRCh38 and the configured transcript source (MANE by default),
+# builds genome binary and transcript store.
 # One-time, ~10 minutes, ~3 GB disk. Idempotent.
 vareffect setup
 
@@ -97,7 +98,7 @@ let ve = Arc::new(VarEffect::open(transcripts, genome)?);
   variant site (`predicts_nmd`, VEP parity) and at the termination codon (`ptc`,
   what ACMG PVS1 asks for)
 - **IMPACT ranking** -- HIGH / MODERATE / LOW / MODIFIER, matching VEP's severity scale
-- **Multi-transcript annotation** -- one result per overlapping transcript with MANE Select / MANE Plus Clinical / RefSeq Select tier metadata
+- **Multi-transcript annotation** -- one result per overlapping transcript, plus `upstream_gene_variant` / `downstream_gene_variant` for transcripts within 5 kb, with MANE Select / MANE Plus Clinical / RefSeq Select tier metadata
 - **Memory-mapped genome** -- ~5 ns base fetches via mmap'd flat binary
 - **Thread-safe** -- `VarEffect`, `TranscriptStore`, and `FastaReader` are `Send + Sync` with a compile-time assertion
 - **Standard + mitochondrial genetic codes** -- `chrM` uses NCBI table 2 automatically
@@ -119,7 +120,7 @@ All coordinates are 0-based half-open (BED convention). Chromosome names are UCS
 
 | Method | Description |
 |--------|-------------|
-| `annotate(chrom, pos, ref, alt)` | Returns `Vec<ConsequenceResult>` -- one per overlapping transcript |
+| `annotate(chrom, pos, ref, alt)` | Returns `Vec<ConsequenceResult>` -- one per transcript overlapping the variant or within 5 kb of it |
 | `annotate_to_vep_json(chrom, pos, ref, alt, assembly)` | Same, serialized as VEP REST-compatible JSON |
 | `resolve_hgvs_c(hgvs)` | Parse HGVS c. string to `GenomicVariant` (genomic coordinates + alleles) |
 

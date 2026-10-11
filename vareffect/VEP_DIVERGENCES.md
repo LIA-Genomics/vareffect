@@ -5,9 +5,11 @@ it does not cover.
 
 - **Target:** VEP releases 115 and 116, GRCh38. GRCh37 and CHM13 are not
   validated (the transcript and genome binaries would need rebuilding).
-- **Transcripts:** MANE Select, MANE Plus Clinical and RefSeq Select. A
-  variant overlapping only transcripts outside the loaded store, and none of
-  the store's within 5,000 bases, is `intergenic_variant`.
+- **Transcripts:** the loaded store's: MANE (default), full RefSeq
+  (RS_2025_08) or GENCODE (v50); differences specific to the RefSeq and
+  GENCODE stores are in 8. A variant overlapping only transcripts outside the
+  loaded store, and none of the store's within 5,000 bases, is
+  `intergenic_variant`.
 
 Contents:
 
@@ -66,7 +68,8 @@ deletion starting in the 5'UTR or running into the 3'UTR never draws
 `frameshift_variant`. `vareffect` matches: `{5_prime_UTR_variant,
 start_lost}` and `{stop_lost, 3_prime_UTR_variant}`, with no NMD prediction
 or termination codon. A deletion starting at CDS offset 1 or 2 does draw
-`frameshift_variant` with `start_lost`.
+`frameshift_variant`, with `start_lost` unless it keeps the start codon
+(`start_retained_variant`; NM_021922.3 c.3_12del rebuilds `ATG`).
 
 **Difference:** VEP writes `p.Met1_?5`-style HGVS p. and no
 `protein_start`; `vareffect` writes no HGVS p. and `protein_start` 1.
@@ -411,6 +414,14 @@ for exon numbers) next to it.
   NM_000478.6 c.1574del, `p.Ter1361=`, `p.Ter525=`). `vareffect` writes the
   same HGVS p. but keeps `frameshift_variant` (HIGH), with `ptc`
   `Indeterminate`: an overcall for PVS1, to be fixed.
+- **RefSeq and GENCODE stores, not fixed** (VEP 116 REST on the issue-13
+  corpus, `.vareffect-tasks/source-concordance`): RefSeq biotype
+  `non_coding_rna` where VEP writes `misc_RNA` (label only); GENCODE
+  `readthrough_transcript` models are annotated, while VEP REST reports none
+  of them; `non_coding_transcript_variant` is not added beside a splice
+  donor or acceptor term on a non-coding transcript (2.2 covers the intronic
+  case); a few GENCODE non-coding deletions get no HGVS n. where VEP writes
+  one (ENST00000417121.2 `n.4del`), not investigated.
 - **Unknown bases in the alternate allele.** An `N` (or any base other than
   A, C, G, T) gives VEP 116 no peptide, so every term read from the peptide
   becomes `coding_sequence_variant` (`coding_unknown`), and VEP writes no

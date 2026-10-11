@@ -289,7 +289,7 @@ impl VarEffect {
     /// The breakpoint at 0-based genomic `pos` truncates any transcript it lands
     /// inside (`feature_truncation`), reported alongside the sub-region term at
     /// that base. Nearby transcripts the breakpoint does not enter are not
-    /// returned (the store overlap query is exact, like [`Self::annotate`]).
+    /// returned (unlike [`Self::annotate`], no up/downstream results).
     ///
     /// A translocation is two linked breakends; annotate each end with this
     /// method (or [`Self::annotate_breakend_pair`]). Mate pairing (MATEID /

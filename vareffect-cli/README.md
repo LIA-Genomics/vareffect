@@ -11,7 +11,7 @@ consequence prediction engine. Installs as a single binary named
    discoverable location
 2. **`check`** -- validate that config and reference data files are in
    place and readable
-3. **`setup`** -- download GRCh38 + MANE and build the runtime data
+3. **`setup`** -- download GRCh38 and the configured transcript source (MANE by default) and build the runtime data
    files that `vareffect` needs
 4. **`annotate`** -- annotate a VCF with VEP-compatible CSQ fields
    (multi-threaded by default; `.vcf.gz` output is parallel, tabix-indexable
@@ -71,7 +71,8 @@ Run this first -- it builds the genome and transcript files that
 vareffect setup
 ```
 
-Downloads GRCh38 + MANE, builds both stores, writes everything to
+Downloads GRCh38 and the configured transcript source (MANE by default),
+builds both stores, writes everything to
 `data/vareffect/` (the default from `vareffect_build.toml`). Takes
 ~10 minutes on broadband. Idempotent -- source archives are cached
 in `data/raw/`, so repeated runs skip downloads.
@@ -92,7 +93,7 @@ After setup, `data/vareffect/` contains:
 | File | Purpose |
 |------|---------|
 | `GRCh38.bin` + `.idx` | Flat-binary genome + MessagePack contig index |
-| `transcript_models.bin` | MANE transcript models (versioned store: 12-byte header + MessagePack) |
+| `transcript_models.bin` | Transcript models of the configured source (versioned store: 12-byte header + MessagePack) |
 | `patch_chrom_aliases.csv` | UCSC <-> RefSeq patch-contig mapping |
 
 ### Partial runs

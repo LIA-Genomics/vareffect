@@ -429,9 +429,7 @@ pub struct TranscriptModel {
     /// Where, outside the CDS, the genome-built numbering stops being the
     /// transcript's own (RefSeq alignment gaps in a UTR, or transcript bases
     /// before the alignment's first block). Numbers past a break are not
-    /// reported nor resolved; CDS-relative numbering is unaffected. Defaults to
-    /// empty when absent (the JSON test fixtures).
-    #[serde(default)]
+    /// reported nor resolved; CDS-relative numbering is unaffected.
     pub utr_numbering_breaks: UtrNumberingBreaks,
     /// 0-based genomic start of each selenocysteine codon (the lowest base of
     /// the codon on either strand), in ascending order. Empty when the

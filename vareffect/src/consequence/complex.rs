@@ -2,8 +2,8 @@
 
 use super::helpers::{
     add_splice_spill, build_base_result, complete_codons_end, compute_cdna_position_for_cds,
-    ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
-    has_complete_start_codon, is_incomplete_terminal_codon,
+    ends_in_stop_codon, fetch_cds_sequence, fetch_ref_codon, has_complete_start_codon,
+    is_incomplete_terminal_codon,
 };
 use super::indel::{
     annotate_cds_frameshift, build_noncds_indel_result, build_splice_indel_result,
@@ -21,7 +21,7 @@ use crate::locate::helpers::{exonic_splice_spill, frameshift_intron_endpoint};
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
 };
-use crate::types::{Strand, TranscriptModel, TranscriptTier};
+use crate::types::{Strand, TranscriptModel};
 
 /// Compute the number of CDS bases deleted by a genomic range `[del_start, del_end)`.
 ///
@@ -111,9 +111,7 @@ pub(super) fn frameshift_intron_indel_result(
             consequences.push(Consequence::SpliceAcceptorVariant);
         }
     }
-    let impact = finalize_consequences(&mut consequences);
     let mut result = build_base_result(transcript, consequences);
-    result.impact = impact;
     if start < end {
         let (exon, intron) = footprint_exon_intron_numbers(start, end, transcript);
         result.exon = exon;
@@ -249,9 +247,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         let first_exonic = (start..end).find_map(|pos| {
             crate::consequence::helpers::compute_cdna_position_exonic(pos, transcript)
         });
@@ -276,9 +272,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         if let Some(intron_idx) = location.intron_index {
             result.intron = Some(format_intron_number(intron_idx, transcript.exon_count));
         }
@@ -362,9 +356,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         result.cds_position = Some(global_cds_start + 1);
         result.cds_position_end = Some(global_cds_end);
         if let Some(exon_idx) = location.exon_index {
@@ -380,9 +372,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         result.protein_start = Some(1);
         result.cds_position = Some(global_cds_start + 1);
         result.cds_position_end = Some(global_cds_end);
@@ -418,9 +408,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         // Stop codon is the last CDS codon; protein position = total_cds / 3.
         let stop_codon_number = (total_cds / 3).max(1);
         result.protein_start = Some(stop_codon_number);
@@ -447,9 +435,7 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         let protein = global_cds_start / 3 + 1;
         result.protein_start = Some(protein);
         result.protein_end = Some(protein);
@@ -488,7 +474,6 @@ pub(super) fn annotate_boundary_spanning_deletion(
         if location.overlaps_splice_region {
             consequences.push(Consequence::SpliceRegionVariant);
         }
-        let impact = finalize_consequences(&mut consequences);
 
         let codon_start_offset = first_codon * 3;
         let ref_aa = if codon_start_offset + 3 <= total_cds {
@@ -553,7 +538,6 @@ pub(super) fn annotate_boundary_spanning_deletion(
         let ref_aa_str: String = ref_window_aas.iter().map(|&aa| char::from(aa)).collect();
 
         let mut result = build_base_result(transcript, consequences);
-        result.impact = impact;
         result.protein_start = Some(first_codon + 1);
         result.protein_end = Some(first_codon + 1);
         result.codons = Some(format_codons_indel(
@@ -639,7 +623,6 @@ pub(super) fn annotate_boundary_spanning_deletion(
         consequences.push(Consequence::SpliceRegionVariant);
     }
 
-    let impact = finalize_consequences(&mut consequences);
     let protein_start = first_codon + 1;
     let protein_end = codon_end / 3;
     let cdna_start = compute_cdna_position_for_cds(global_cds_start, locate_index);
@@ -711,38 +694,26 @@ pub(super) fn annotate_boundary_spanning_deletion(
     );
     let footprint_numbers = footprint_exon_intron_numbers(start, end, transcript);
 
-    Ok(ConsequenceResult {
-        transcript: transcript.accession.clone(),
-        gene_symbol: transcript.gene_symbol.clone(),
-        protein_accession: transcript.protein_accession.clone(),
-        consequences,
-        impact,
-        protein_start: Some(protein_start),
-        protein_end: Some(protein_end),
-        codons: Some(format_codons_indel(
-            &ref_seq,
-            &alt_seq,
-            local_del_start,
-            local_del_end,
-        )),
-        amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
-        exon: footprint_numbers.0,
-        intron: footprint_numbers.1,
-        cds_position: Some(global_cds_start + 1),
-        cds_position_end: Some(global_cds_end),
-        cdna_position: Some(cdna_start),
-        cdna_position_end: Some(cdna_end),
-        distance: None,
-        strand: transcript.strand,
-        biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-        hgvs_c: None,
-        hgvs_p,
-        predicts_nmd,
-        ptc,
-    })
+    let mut result = build_base_result(transcript, consequences);
+    result.protein_start = Some(protein_start);
+    result.protein_end = Some(protein_end);
+    result.codons = Some(format_codons_indel(
+        &ref_seq,
+        &alt_seq,
+        local_del_start,
+        local_del_end,
+    ));
+    result.amino_acids = Some(format_amino_acids_indel(&ref_aas, &alt_aas));
+    result.exon = footprint_numbers.0;
+    result.intron = footprint_numbers.1;
+    result.cds_position = Some(global_cds_start + 1);
+    result.cds_position_end = Some(global_cds_end);
+    result.cdna_position = Some(cdna_start);
+    result.cdna_position_end = Some(cdna_end);
+    result.hgvs_p = hgvs_p;
+    result.predicts_nmd = predicts_nmd;
+    result.ptc = ptc;
+    Ok(result)
 }
 
 /// Annotate a complex delins (deletion + insertion where both trimmed_ref
@@ -754,6 +725,33 @@ pub(super) fn annotate_boundary_spanning_deletion(
 /// `ProteinAlteringVariant` (VEP convention for delins that change both
 /// sequence and length).
 #[allow(clippy::too_many_arguments)]
+/// Result for a delins or MNV that starts in the 3' partial codon: the
+/// terms VEP 116 gives an SNV there, and `p.?` since the residue is unknown.
+///
+/// # Arguments
+///
+/// * `transcript` - The transcript
+/// * `exon_index` - 0-based exon of the variant
+/// * `cds_offset_start` - 0-based CDS offset of the first changed base
+/// * `hgvs_c` - The variant's HGVS c.
+fn starts_in_partial_codon(
+    transcript: &TranscriptModel,
+    exon_index: u16,
+    cds_offset_start: u32,
+    hgvs_c: Option<String>,
+) -> ConsequenceResult {
+    let consequences = vec![
+        Consequence::IncompleteTerminalCodonVariant,
+        Consequence::CodingSequenceVariant,
+    ];
+    let mut result = build_base_result(transcript, consequences);
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_offset_start + 1);
+    result.hgvs_c = hgvs_c;
+    result.hgvs_p = Some("p.?".to_string());
+    result
+}
+
 pub(super) fn annotate_complex_delins(
     chrom: &str,
     start: u64,
@@ -850,18 +848,12 @@ fn annotate_complex_delins_core(
             let exon_index = location.exon_index.unwrap_or(0);
 
             if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
-                // Same terms VEP 116 gives an SNV in a 3' partial codon; the
-                // residue is unknown, so the protein effect is `p.?`.
-                let consequences = vec![
-                    Consequence::IncompleteTerminalCodonVariant,
-                    Consequence::CodingSequenceVariant,
-                ];
-                let mut result = build_base_result(transcript, consequences);
-                result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
-                result.cds_position = Some(cds_offset_start + 1);
-                result.hgvs_c = hgvs;
-                result.hgvs_p = Some("p.?".to_string());
-                return Ok(result);
+                return Ok(starts_in_partial_codon(
+                    transcript,
+                    exon_index,
+                    *cds_offset_start,
+                    hgvs,
+                ));
             }
 
             if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
@@ -962,7 +954,6 @@ fn annotate_complex_delins_core(
                     consequences.push(Consequence::SpliceRegionVariant);
                 }
 
-                let impact = finalize_consequences(&mut consequences);
                 let protein_start = first_codon + 1;
                 let protein_end = codon_end / 3;
                 let cdna_start = compute_cdna_position_for_cds(*cds_offset_start, locate_index);
@@ -993,39 +984,24 @@ fn annotate_complex_delins_core(
                     },
                     locate_index,
                 );
-                let mut result = ConsequenceResult {
-                    transcript: transcript.accession.clone(),
-                    gene_symbol: transcript.gene_symbol.clone(),
-                    protein_accession: transcript.protein_accession.clone(),
-                    consequences,
-                    impact,
-                    protein_start: Some(protein_start),
-                    protein_end: Some(protein_end),
-                    codons: Some(format_codons_indel(
-                        &ref_seq,
-                        &alt_seq,
-                        local_del_start,
-                        local_del_end,
-                    )),
-                    amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
-                    exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-                    intron: None,
-                    cds_position: Some(cds_offset_start + 1),
-                    cds_position_end: Some(*cds_offset_end),
-                    cdna_position: Some(cdna_start),
-                    cdna_position_end: Some(cdna_end),
-                    distance: None,
-                    strand: transcript.strand,
-                    biotype: transcript.biotype.clone(),
-                    is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-                    is_mane_plus_clinical: transcript.tier
-                        == Some(TranscriptTier::ManePlusClinical),
-                    is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-                    hgvs_c: None,
-                    hgvs_p,
-                    predicts_nmd: nmd,
-                    ptc,
-                };
+                let mut result = build_base_result(transcript, consequences);
+                result.protein_start = Some(protein_start);
+                result.protein_end = Some(protein_end);
+                result.codons = Some(format_codons_indel(
+                    &ref_seq,
+                    &alt_seq,
+                    local_del_start,
+                    local_del_end,
+                ));
+                result.amino_acids = Some(format_amino_acids_indel(&ref_aas, &alt_aas));
+                result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+                result.cds_position = Some(cds_offset_start + 1);
+                result.cds_position_end = Some(*cds_offset_end);
+                result.cdna_position = Some(cdna_start);
+                result.cdna_position_end = Some(cdna_end);
+                result.hgvs_p = hgvs_p;
+                result.predicts_nmd = nmd;
+                result.ptc = ptc;
                 result.hgvs_c = hgvs;
                 Ok(result)
             }
@@ -1138,18 +1114,12 @@ fn annotate_mnv_core(
             let exon_index = location.exon_index.unwrap_or(0);
 
             if is_incomplete_terminal_codon(*cds_offset_start, locate_index) {
-                // Same terms VEP 116 gives an SNV in a 3' partial codon; the
-                // residue is unknown, so the protein effect is `p.?`.
-                let consequences = vec![
-                    Consequence::IncompleteTerminalCodonVariant,
-                    Consequence::CodingSequenceVariant,
-                ];
-                let mut result = build_base_result(transcript, consequences);
-                result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
-                result.cds_position = Some(cds_offset_start + 1);
-                result.hgvs_c = hgvs;
-                result.hgvs_p = Some("p.?".to_string());
-                return Ok(result);
+                return Ok(starts_in_partial_codon(
+                    transcript,
+                    exon_index,
+                    *cds_offset_start,
+                    hgvs,
+                ));
             }
 
             if is_incomplete_terminal_codon(cds_offset_end - 1, locate_index) {
@@ -1220,10 +1190,7 @@ fn annotate_mnv_core(
             // (VEP 116, ENST00000455979.1 c.1_2inv vs c.2_3delinsAA). An `N`
             // in the alleles elsewhere keeps today's behavior.
             let has_unknown = first_codon == 0 && locate_index.cds_start_pad() > 0;
-            let known_change = ref_aas
-                .iter()
-                .zip(alt_aas.iter())
-                .any(|(r, a)| r != a && *r != b'X' && *a != b'X');
+            let known_change = super::indel::residue_changed(&ref_aas, &alt_aas);
             let is_start_codon =
                 first_codon == 0 && has_complete_start_codon(transcript, locate_index);
             if has_unknown && !known_change {
@@ -1256,7 +1223,6 @@ fn annotate_mnv_core(
                 consequences.push(Consequence::SpliceRegionVariant);
             }
 
-            let impact = finalize_consequences(&mut consequences);
             let protein_start = first_codon + 1;
             let protein_end = codon_end / 3;
             let cdna_start = compute_cdna_position_for_cds(*cds_offset_start, locate_index);
@@ -1291,38 +1257,26 @@ fn annotate_mnv_core(
                 },
                 locate_index,
             );
-            Ok(ConsequenceResult {
-                transcript: transcript.accession.clone(),
-                gene_symbol: transcript.gene_symbol.clone(),
-                protein_accession: transcript.protein_accession.clone(),
-                consequences,
-                impact,
-                protein_start: Some(protein_start),
-                protein_end: Some(protein_end),
-                codons: Some(format_codons_indel(
-                    &ref_seq,
-                    &alt_seq,
-                    (cds_offset_start - codon_start) as usize,
-                    (cds_offset_end - codon_start) as usize,
-                )),
-                amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
-                exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-                intron: None,
-                cds_position: Some(cds_offset_start + 1),
-                cds_position_end: Some(*cds_offset_end),
-                cdna_position: Some(cdna_start),
-                cdna_position_end: Some(cdna_end),
-                distance: None,
-                strand: transcript.strand,
-                biotype: transcript.biotype.clone(),
-                is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-                is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-                is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-                hgvs_c: hgvs,
-                hgvs_p,
-                predicts_nmd,
-                ptc,
-            })
+            let mut result = build_base_result(transcript, consequences);
+            result.protein_start = Some(protein_start);
+            result.protein_end = Some(protein_end);
+            result.codons = Some(format_codons_indel(
+                &ref_seq,
+                &alt_seq,
+                (cds_offset_start - codon_start) as usize,
+                (cds_offset_end - codon_start) as usize,
+            ));
+            result.amino_acids = Some(format_amino_acids_indel(&ref_aas, &alt_aas));
+            result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+            result.cds_position = Some(cds_offset_start + 1);
+            result.cds_position_end = Some(*cds_offset_end);
+            result.cdna_position = Some(cdna_start);
+            result.cdna_position_end = Some(cdna_end);
+            result.hgvs_c = hgvs;
+            result.hgvs_p = hgvs_p;
+            result.predicts_nmd = predicts_nmd;
+            result.ptc = ptc;
+            Ok(result)
         }
         _ => {
             let mnv_end = start + ref_bases.len() as u64;

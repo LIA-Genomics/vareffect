@@ -42,7 +42,8 @@ vareffect init
 vareffect setup
 ```
 
-Then annotate a variant against every overlapping transcript:
+Then annotate a variant against every transcript overlapping it or within 5 kb
+(`upstream_gene_variant` / `downstream_gene_variant`):
 
 ```rust,no_run
 use std::path::Path;
@@ -76,7 +77,7 @@ for result in &results {
 # }
 ```
 
-Expected output (one line per overlapping transcript):
+Expected output (one line per transcript):
 
 ```text
 NM_000546.6 p.Arg248Trp: missense_variant (MODERATE)
@@ -170,8 +171,8 @@ binary and reads bytes directly.
   silently producing wrong calls.
 
 ### Transcript models
-- MANE Select, MANE Plus Clinical, and RefSeq Select tiers — your build
-  pipeline decides which to ingest.
+- MANE (default), full RefSeq or GENCODE stores, with MANE Select, MANE Plus
+  Clinical and RefSeq Select tiers where the source has them.
 - Full exon and CDS segment layout with GFF3 phase preserved, so codon
   walks across exon boundaries and frameshift detection are O(1) lookups.
 - Interval-tree indexed per chromosome for O(log n + k) overlap queries.
@@ -192,7 +193,7 @@ binary and reads bytes directly.
 - No regulatory / TFBS / motif annotation layer.
 - No co-located variant lookup (no gnomAD, ClinVar, dbSNP).
 - No allele frequency or population annotation.
-- No canonical transcript *selection* — every overlapping transcript is
+- No canonical transcript *selection* — every overlapping or nearby transcript is
   returned with its tier metadata; callers decide which to keep.
 - No multi-allele VCF splitting — the caller must split comma-separated
   `ALT`s before invoking `annotate`.
@@ -210,7 +211,7 @@ intentional divergences from VEP and features that are not yet implemented.
 1. **`transcript_models.bin`** — a versioned store file: a 12-byte header
    (magic plus format version) followed by a MessagePack payload naming the
    transcript source and release and holding the `Vec<TranscriptModel>`,
-   built from a MANE GFF3. A store
+   built from the configured source's GFF3 (MANE by default). A store
    from another format version, including one written before versioning
    (vareffect 0.5 and earlier), is refused at load time; rebuild it with
    `vareffect setup`.
