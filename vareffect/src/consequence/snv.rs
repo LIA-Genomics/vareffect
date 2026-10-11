@@ -431,6 +431,7 @@ fn annotate_cds_snv(
         cds_position_end: Some(cds_offset + 1),
         cdna_position: Some(compute_cdna_position_for_cds(cds_offset, index)),
         cdna_position_end: Some(compute_cdna_position_for_cds(cds_offset, index)),
+        distance: None,
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
         is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),

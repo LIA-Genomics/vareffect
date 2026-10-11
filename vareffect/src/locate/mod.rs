@@ -32,7 +32,7 @@ use helpers::{
 };
 
 /// VEP default `--distance` for upstream/downstream gene variants.
-const UPSTREAM_DOWNSTREAM_LIMIT: u64 = 5_000;
+pub(crate) const UPSTREAM_DOWNSTREAM_LIMIT: u64 = 5_000;
 
 /// Canonical splice donor/acceptor: intronic positions +1/+2 or -1/-2.
 const SPLICE_CANONICAL_MAX: u64 = 2;
@@ -67,6 +67,67 @@ pub const FRAMESHIFT_INTRON_MAX_GAP: u64 = 13;
 
 /// Exonic splice region: 1-3 bases from the exon/intron boundary.
 const SPLICE_REGION_EXON_MAX: u64 = 3;
+
+/// Where a variant footprint lies relative to one transcript's span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flank {
+    /// The footprint overlaps `[tx_start, tx_end)`.
+    Overlaps,
+    /// 5' of the transcript in transcript terms, at this VEP `distance`.
+    Upstream(u64),
+    /// 3' of the transcript in transcript terms, at this VEP `distance`.
+    Downstream(u64),
+    /// Outside the transcript and past [`UPSTREAM_DOWNSTREAM_LIMIT`] (see
+    /// [`classify_flank`]).
+    Far,
+}
+
+/// Place a variant footprint beside a transcript, as VEP's `distance` does.
+///
+/// The distance counts from the nearer footprint edge to the nearer
+/// transcript end in 1-based terms: a substitution or deletion next to the
+/// transcript is at distance 1, an insertion between the transcript's end
+/// base and the next base at distance 0 (VEP 116 ci8438 chr14:92071010
+/// C>CCTG..., `downstream_gene_variant` with `distance` 0 on the minus-strand
+/// ENST00000554672). This distance matched all 50,533 up/downstream rows of
+/// VEP 116 on the issue-13 GENCODE corpus.
+///
+/// A substitution or deletion is near up to [`UPSTREAM_DOWNSTREAM_LIMIT`]
+/// inclusive, an insertion only up to one less: VEP tests the limit against
+/// the insertion's far flanking base (`_after_end` / `_before_start`). VEP
+/// 116 on ENST00000628537 (chr2, plus strand): `2 55344525 T C` downstream at
+/// 5000, `2 55344524 T TC` at 4999, `2 55344525 T TC` and `T TT` not
+/// reported.
+///
+/// # Arguments
+///
+/// * `start` - 0-based footprint start
+/// * `end` - 0-based exclusive footprint end; `start == end` is an insertion
+///   between `start - 1` and `start`
+/// * `transcript` - the transcript, on the variant's chromosome
+///
+/// # Returns
+///
+/// [`Flank::Overlaps`] when the footprint overlaps the transcript (an
+/// insertion strictly inside it), otherwise the strand-aware side and
+/// distance, or [`Flank::Far`] past the limit.
+pub(crate) fn classify_flank(start: u64, end: u64, transcript: &TranscriptModel) -> Flank {
+    let edge_base = u64::from(end > start);
+    let (genomic_left, distance) = if end <= transcript.tx_start {
+        (true, transcript.tx_start - end + edge_base)
+    } else if start >= transcript.tx_end {
+        (false, start - transcript.tx_end + edge_base)
+    } else {
+        return Flank::Overlaps;
+    };
+    if distance + u64::from(start == end) > UPSTREAM_DOWNSTREAM_LIMIT {
+        return Flank::Far;
+    }
+    match (genomic_left, transcript.strand) {
+        (true, Strand::Plus) | (false, Strand::Minus) => Flank::Upstream(distance),
+        (true, Strand::Minus) | (false, Strand::Plus) => Flank::Downstream(distance),
+    }
+}
 
 /// Which side of a splice junction a position falls on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

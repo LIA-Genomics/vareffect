@@ -106,6 +106,7 @@ pub(super) fn build_base_result(
         cds_position_end: None,
         cdna_position: None,
         cdna_position_end: None,
+        distance: None,
         strand: transcript.strand,
         biotype: transcript.biotype.clone(),
         is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),

@@ -108,11 +108,15 @@ impl VarEffect {
     // Variant annotation
     // -----------------------------------------------------------------
 
-    /// Annotate a variant against every overlapping transcript.
+    /// Annotate a variant against every transcript overlapping it or within
+    /// 5,000 bases of it.
     ///
-    /// Returns one [`ConsequenceResult`] per overlapping transcript. An
-    /// empty `Vec` means no transcript overlapped the variant locus
-    /// (intergenic). The full VCF REF allele is verified against the FASTA
+    /// Returns one [`ConsequenceResult`] per such transcript. A transcript the
+    /// variant does not overlap gets `upstream_gene_variant` or
+    /// `downstream_gene_variant` and its [`ConsequenceResult::distance`], as
+    /// VEP's default `--distance 5000` does. With no transcript in range the
+    /// result is a single transcript-less `intergenic_variant` entry (empty
+    /// `transcript`). The full VCF REF allele is verified against the FASTA
     /// before trimming, so a stated REF that doesn't match the genome
     /// produces [`VarEffectError::RefMismatch`].
     ///
@@ -181,9 +185,11 @@ impl VarEffect {
     /// # Returns
     ///
     /// `serde_json::Value` shaped as `[{ ... }]`. The array always has
-    /// exactly one element. Intergenic variants (no overlapping transcripts)
-    /// still produce a well-formed element whose `transcript_consequences`
-    /// is `[]` and whose `most_severe_consequence` is `"intergenic_variant"`.
+    /// exactly one element. Intergenic variants (no transcript within 5,000 bases)
+    /// still produce a well-formed element whose `most_severe_consequence` is
+    /// `"intergenic_variant"`; its `transcript_consequences` holds the single
+    /// transcript-less entry from [`Self::annotate`] (`transcript_id` `""`,
+    /// `consequence_terms` `["intergenic_variant"]`).
     ///
     /// # Errors
     ///

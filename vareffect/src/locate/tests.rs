@@ -34,6 +34,39 @@ fn locate_minus(pos: u64) -> VariantLocation {
 // -- Upstream / Downstream / Distal -----------------------------------------
 
 #[test]
+fn classify_flank_counts_from_the_nearer_edges() {
+    let plus = plus_strand_coding(); // [1000, 5000)
+    assert_eq!(classify_flank(999, 1_000, &plus), Flank::Upstream(1));
+    assert_eq!(classify_flank(5_000, 5_001, &plus), Flank::Downstream(1));
+    // A 10-base deletion ending 1 base before the transcript.
+    assert_eq!(classify_flank(989, 999, &plus), Flank::Upstream(2));
+    assert_eq!(classify_flank(1_000, 1_000, &plus), Flank::Upstream(0));
+    assert_eq!(classify_flank(5_000, 5_000, &plus), Flank::Downstream(0));
+    assert_eq!(classify_flank(1_001, 1_001, &plus), Flank::Overlaps);
+    assert_eq!(classify_flank(990, 1_001, &plus), Flank::Overlaps);
+    let minus = minus_strand_coding(); // [10000, 20000)
+    assert_eq!(classify_flank(9_999, 10_000, &minus), Flank::Downstream(1));
+    assert_eq!(classify_flank(20_000, 20_001, &minus), Flank::Upstream(1));
+}
+
+#[test]
+fn classify_flank_limit_is_inclusive_except_for_insertions() {
+    let plus = plus_strand_coding();
+    assert_eq!(classify_flank(0, 1, &plus), Flank::Upstream(1_000));
+    assert_eq!(
+        classify_flank(8_999, 9_000, &plus),
+        Flank::Downstream(4_000)
+    );
+    assert_eq!(
+        classify_flank(9_999, 10_000, &plus),
+        Flank::Downstream(5_000)
+    );
+    assert_eq!(classify_flank(10_000, 10_001, &plus), Flank::Far);
+    assert_eq!(classify_flank(10_000, 10_000, &plus), Flank::Far);
+    assert_eq!(classify_flank(10_001, 10_001, &plus), Flank::Far);
+}
+
+#[test]
 fn plus_upstream() {
     assert_eq!(
         locate_plus(500),

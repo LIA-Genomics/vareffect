@@ -6,8 +6,8 @@ it does not cover.
 - **Target:** VEP releases 115 and 116, GRCh38. GRCh37 and CHM13 are not
   validated (the transcript and genome binaries would need rebuilding).
 - **Transcripts:** MANE Select, MANE Plus Clinical and RefSeq Select. A
-  variant overlapping only transcripts outside the loaded store is
-  `intergenic_variant`.
+  variant overlapping only transcripts outside the loaded store, and none of
+  the store's within 5,000 bases, is `intergenic_variant`.
 
 Contents:
 
@@ -31,7 +31,7 @@ Contents:
 | Deletion removing a CDS end with no stop | `stop_lost` / `stop_retained_variant` | no stop term | [3.1](#31-partial-first-and-last-codons) |
 | Splice-region windows near a frameshift intron | spill up to 7 exon bases (SNVs), stop at 8 (indels) | 3 exon bases (SNVs), up to 16 (indel acceptor side) | [3.2](#32-frameshift-introns) |
 | CDS alignment gap with transcript-only bases | HGVS c./p. (not measured) | no HGVS c./p. | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
-| UTR alignment gap | cDNA and UTR HGVS c. in the transcript's numbering; intronic anchors one off after a 5'UTR gap (decision open) | numbers past the gap not reported | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
+| UTR alignment gap | cDNA and UTR HGVS c. in the transcript's numbering; intronic anchors one off after a 5'UTR gap (accepted) | numbers past the gap not reported | [3.3](#33-transcripts-with-a-gapped-cds-alignment) |
 | NMD | `NMD.pm` rules, biotype term `NMD_transcript_variant` | last-junction rule only; `ptc` field for PVS1 | [4](#4-nmd) |
 | Structural variants | codon and splice terms at breakpoints | region-level terms only | [5](#5-structural-variants) |
 | HGVS 3' shift | `--shift_hgvs` toggle | always on | [6.2](#62-not-yet-implemented) |
@@ -206,12 +206,13 @@ the 3'UTR) is read from genome-built 3'UTR sequence, so a 3'UTR gap between
 the CDS end and that stop can move it. Unaligned bases at the 3' end (typically poly(A)) move no
 number. RefSeq RS_2025_08: 106 transcripts (PTEN NM_001304718.2, `D` gap in
 exon 1: cDNA one off, VEP 116 cDNA 1065 where the genome gives 1064 on
-VPS26C NM_001331018.1). Open for a maintainer decision: on transcripts with
-a 5'UTR gap, VEP 116 anchors intronic HGVS (CDS introns included) one base off
+VPS26C NM_001331018.1). Accepted divergence (maintainer, 2026-10-11): on
+transcripts with a 5'UTR gap, VEP 116 anchors intronic HGVS (CDS introns included) one base off
 from its own exonic numbering. It numbers the first base of VPS26C
 NM_001331018.1 exon 2 `c.58` and of KLHL5 NM_001007075.2 exon 8 `c.1301`,
 yet writes `c.57-963C>T` and `c.1302-268G>C` for the intron before them;
-`vareffect` writes `c.58-963C>T` and `c.1301-268G>C`.
+`vareffect` writes `c.58-963C>T` and `c.1301-268G>C`, anchoring each intron
+on the same numbering as the exon beside it.
 
 ## 4. NMD
 
@@ -277,6 +278,9 @@ no translation):
   `start_lost`, `frameshift_variant` or a splice term).
 - A symbolic insertion is annotated at its insertion point, not an
   `SVLEN`-projected footprint.
+- Only overlapping transcripts are reported: no `upstream_gene_variant` or
+  `downstream_gene_variant` (not yet compared with VEP; accepted by the
+  maintainer, 2026-10-11).
 
 ## 6. Coverage and scope
 
@@ -308,9 +312,9 @@ no translation):
 | `intron_variant` | yes | |
 | `non_coding_transcript_exon_variant` | yes | |
 | `non_coding_transcript_variant` | partial | Frameshift introns of non-coding transcripts only (2.2). |
-| `upstream_gene_variant` | yes | |
-| `downstream_gene_variant` | yes | |
-| `intergenic_variant` | yes | No overlapping transcript in the store. |
+| `upstream_gene_variant` | yes | Within 5,000 bases (VEP's default `--distance`), with `distance`; small variants only (5). Before 0.6.0 almost never emitted. |
+| `downstream_gene_variant` | yes | As `upstream_gene_variant`. |
+| `intergenic_variant` | yes | No transcript in the store within 5,000 bases. |
 | `transcript_ablation` | yes | DEL spanning a whole transcript. |
 | `transcript_amplification` | yes | DUP spanning a whole transcript. |
 | `feature_elongation` | yes | Intragenic exonic DUP or `<INS>`. |

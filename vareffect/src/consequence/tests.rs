@@ -1482,11 +1482,10 @@ fn trim_mnv_dispatches() {
 
 #[test]
 fn intergenic_no_overlap() {
-    let (_tmp, fasta) = write_test_fasta();
-    let tx = plus_strand_coding();
-    let store = crate::TranscriptStore::from_transcripts(vec![tx]);
-    // Position 50 is outside the transcript [1000, 5000).
-    let results = annotate("chr1", 50, b"A", b"T", &store, &fasta).unwrap();
+    let (_tmp, fasta) = write_chr4_fasta(&[b'A'; 20_000]);
+    let store = flank_store(Strand::Plus);
+    // 5,001 bases 5' of the transcript [10000, 11000): beyond VEP's distance.
+    let results = annotate("chr4", 4_999, b"A", b"T", &store, &fasta).unwrap();
     assert_eq!(results.len(), 1);
     let r = &results[0];
     assert_eq!(r.consequences, vec![Consequence::IntergenicVariant]);
@@ -1496,6 +1495,169 @@ fn intergenic_no_overlap() {
     assert!(r.protein_start.is_none());
     assert!(r.cds_position.is_none());
     assert!(!r.predicts_nmd);
+}
+
+// -- Upstream / downstream through `annotate` --------------------------------
+
+/// A one-exon non-coding transcript on chr4 `[10000, 11000)`, for the
+/// up/downstream tests on a 20 kb poly-A chr4.
+fn flank_store(strand: Strand) -> crate::TranscriptStore {
+    let tx = model(
+        "NR_TEST_FLANK.1",
+        "TESTFLANK",
+        "chr4",
+        strand,
+        &[(10_000, 11_000)],
+        &[],
+    );
+    crate::TranscriptStore::from_transcripts(vec![tx])
+}
+
+/// The single result's terms and distance for a variant on the flank fixture.
+fn flank_call(
+    strand: Strand,
+    pos: u64,
+    ref_allele: &[u8],
+    alt: &[u8],
+) -> (Vec<Consequence>, Option<u64>) {
+    let (_tmp, fasta) = write_chr4_fasta(&[b'A'; 20_000]);
+    let results = annotate("chr4", pos, ref_allele, alt, &flank_store(strand), &fasta).unwrap();
+    assert_eq!(results.len(), 1, "{results:?}");
+    (results[0].consequences.clone(), results[0].distance)
+}
+
+#[test]
+fn snv_up_to_5000_bases_away_is_upstream_or_downstream() {
+    use Consequence::{DownstreamGeneVariant, IntergenicVariant, UpstreamGeneVariant};
+    assert_eq!(
+        flank_call(Strand::Plus, 5_000, b"A", b"T"),
+        (vec![UpstreamGeneVariant], Some(5_000))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 9_999, b"A", b"T"),
+        (vec![UpstreamGeneVariant], Some(1))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 11_000, b"A", b"T"),
+        (vec![DownstreamGeneVariant], Some(1))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 15_999, b"A", b"T"),
+        (vec![DownstreamGeneVariant], Some(5_000))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 16_000, b"A", b"T"),
+        (vec![IntergenicVariant], None)
+    );
+    assert_eq!(
+        flank_call(Strand::Minus, 5_000, b"A", b"T"),
+        (vec![DownstreamGeneVariant], Some(5_000))
+    );
+    assert_eq!(
+        flank_call(Strand::Minus, 15_999, b"A", b"T"),
+        (vec![UpstreamGeneVariant], Some(5_000))
+    );
+}
+
+#[test]
+fn deletion_distance_counts_from_its_nearer_edge() {
+    // Deletes [4999, 5001): its 3' base is 5,000 bases from the transcript.
+    assert_eq!(
+        flank_call(Strand::Plus, 4_998, b"AAA", b"A"),
+        (vec![Consequence::UpstreamGeneVariant], Some(5_000))
+    );
+    // Deletes [4998, 5000): 5,001 bases away.
+    assert_eq!(
+        flank_call(Strand::Plus, 4_997, b"AAA", b"A"),
+        (vec![Consequence::IntergenicVariant], None)
+    );
+}
+
+#[test]
+fn insertion_at_a_transcript_end_is_outside_at_distance_0() {
+    // Before the first base of a minus-strand transcript: its 3' end
+    // (VEP 116 ci8438, ENST00000554672).
+    assert_eq!(
+        flank_call(Strand::Minus, 9_999, b"A", b"AT"),
+        (vec![Consequence::DownstreamGeneVariant], Some(0))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 9_999, b"A", b"AT"),
+        (vec![Consequence::UpstreamGeneVariant], Some(0))
+    );
+    // After the last base.
+    assert_eq!(
+        flank_call(Strand::Plus, 10_999, b"A", b"AT"),
+        (vec![Consequence::DownstreamGeneVariant], Some(0))
+    );
+    // Between the first two bases: inside.
+    let (terms, distance) = flank_call(Strand::Plus, 10_000, b"A", b"AT");
+    assert_eq!(terms, vec![Consequence::NonCodingTranscriptExonVariant]);
+    assert_eq!(distance, None);
+}
+
+#[test]
+fn insertion_is_reported_up_to_4999_bases_away() {
+    // VEP 116 ENST00000628537: `2 55344524 T TC` downstream at 4999,
+    // `2 55344525 T TC` not reported.
+    assert_eq!(
+        flank_call(Strand::Plus, 15_998, b"A", b"AT"),
+        (vec![Consequence::DownstreamGeneVariant], Some(4_999))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 15_999, b"A", b"AT"),
+        (vec![Consequence::IntergenicVariant], None)
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 5_000, b"A", b"AT"),
+        (vec![Consequence::UpstreamGeneVariant], Some(4_999))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 4_999, b"A", b"AT"),
+        (vec![Consequence::IntergenicVariant], None)
+    );
+}
+
+#[test]
+fn mnv_and_delins_beside_the_transcript_are_upstream() {
+    assert_eq!(
+        flank_call(Strand::Plus, 9_998, b"AA", b"TT"),
+        (vec![Consequence::UpstreamGeneVariant], Some(1))
+    );
+    assert_eq!(
+        flank_call(Strand::Plus, 9_997, b"AAA", b"TT"),
+        (vec![Consequence::UpstreamGeneVariant], Some(1))
+    );
+}
+
+#[test]
+fn overlapping_and_flanking_transcripts_are_both_reported() {
+    // A coding transcript at [1000, 5000) and the variant 2 bases 3' of a
+    // second one at [100, 998) on chr1.
+    let (_tmp, fasta) = write_test_fasta();
+    let near = model(
+        "NR_TEST_NEAR.1",
+        "TESTNEAR",
+        "chr1",
+        Strand::Plus,
+        &[(100, 998)],
+        &[],
+    );
+    let store = crate::TranscriptStore::from_transcripts(vec![plus_strand_coding(), near]);
+    let results = annotate("chr1", 1_000, b"A", b"T", &store, &fasta).unwrap();
+    assert_eq!(results.len(), 2, "{results:?}");
+    let near = results
+        .iter()
+        .find(|r| r.transcript == "NR_TEST_NEAR.1")
+        .unwrap();
+    assert_eq!(near.consequences, vec![Consequence::DownstreamGeneVariant]);
+    assert_eq!(near.distance, Some(3));
+    let coding = results
+        .iter()
+        .find(|r| r.transcript != "NR_TEST_NEAR.1")
+        .unwrap();
+    assert!(!has(coding, Consequence::UpstreamGeneVariant), "{coding:?}");
+    assert_eq!(coding.distance, None);
 }
 
 #[test]
