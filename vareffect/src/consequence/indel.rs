@@ -20,7 +20,7 @@ use crate::locate::helpers::{
 use crate::locate::{
     IndelLocation, IndelRegion, LocateIndex, format_exon_number, format_intron_number, locate_indel,
 };
-use crate::types::{Strand, TranscriptModel, TranscriptTier};
+use crate::types::{Strand, TranscriptModel};
 
 /// Annotate a deletion against one transcript.
 ///
@@ -402,11 +402,9 @@ pub(super) fn indel_into_partial_codon_result(
     if is_splice_region {
         consequences.push(Consequence::SpliceRegionVariant);
     }
-    let impact = finalize_consequences(&mut consequences);
     let protein_start = codon_start / 3 + 1;
 
     let mut result = build_base_result(transcript, consequences);
-    result.impact = impact;
     result.protein_start = Some(protein_start);
     result.protein_end = Some(total.div_ceil(3));
     result.codons = Some(format_codons_indel(
@@ -534,7 +532,7 @@ fn partial_terminal_codon_indel_result(
     let stop_index = translation
         .as_ref()
         .and_then(|aas| aas.iter().position(|&aa| aa == b'*'));
-    let (mut consequences, amino_acids) = match (alt_bases.is_empty(), &translation) {
+    let (consequences, amino_acids) = match (alt_bases.is_empty(), &translation) {
         (true, _) => (
             vec![
                 Consequence::ProteinAlteringVariant,
@@ -561,9 +559,7 @@ fn partial_terminal_codon_indel_result(
             "X".to_string(),
         ),
     };
-    let impact = finalize_consequences(&mut consequences);
     let mut result = build_base_result(transcript, consequences);
-    result.impact = impact;
     let protein = codon_start / 3 + 1;
     result.protein_start = Some(protein);
     result.protein_end = Some(protein);
@@ -676,9 +672,7 @@ fn partial_codon_edge_insertion_result(
     if translation.contains(&b'X') {
         consequences.push(Consequence::CodingSequenceVariant);
     }
-    let impact = finalize_consequences(&mut consequences);
     let mut result = build_base_result(transcript, consequences);
-    result.impact = impact;
     let inserted: String = coding_inserted.iter().map(|&b| char::from(b)).collect();
     let peptide: String = translation.iter().map(|&b| char::from(b)).collect();
     result.codons = Some(format!("-/{inserted}"));
@@ -1075,8 +1069,6 @@ pub(super) fn annotate_cds_frameshift(
         consequences.push(Consequence::StopGained);
     }
 
-    let impact = finalize_consequences(&mut consequences);
-
     // Deletions: 1-based inclusive [first_deleted, last_deleted]
     // Insertions: flanking positions [before, after] (VEP convention)
     let (cds_pos, cds_pos_end, cdna_position, cdna_end) = if is_insertion {
@@ -1122,33 +1114,20 @@ pub(super) fn annotate_cds_frameshift(
         (frameshift.notation, ptc)
     };
 
-    Ok(ConsequenceResult {
-        transcript: transcript.accession.clone(),
-        gene_symbol: transcript.gene_symbol.clone(),
-        protein_accession: transcript.protein_accession.clone(),
-        consequences,
-        impact,
-        protein_start: Some(codon_number),
-        protein_end: Some(protein_end),
-        codons,
-        amino_acids: Some(amino_acids),
-        exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-        intron: None,
-        cds_position: Some(cds_pos),
-        cds_position_end: Some(cds_pos_end),
-        cdna_position: Some(cdna_position),
-        cdna_position_end: Some(cdna_end),
-        distance: None,
-        strand: transcript.strand,
-        biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-        hgvs_c: None,
-        hgvs_p,
-        predicts_nmd,
-        ptc,
-    })
+    let mut result = build_base_result(transcript, consequences);
+    result.protein_start = Some(codon_number);
+    result.protein_end = Some(protein_end);
+    result.codons = codons;
+    result.amino_acids = Some(amino_acids);
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_pos);
+    result.cds_position_end = Some(cds_pos_end);
+    result.cdna_position = Some(cdna_position);
+    result.cdna_position_end = Some(cdna_end);
+    result.hgvs_p = hgvs_p;
+    result.predicts_nmd = predicts_nmd;
+    result.ptc = ptc;
+    Ok(result)
 }
 
 /// What an indel does to the start codon (`VariationEffect.pm`,
@@ -1374,7 +1353,6 @@ fn annotate_cds_inframe_deletion(
         consequences.push(Consequence::SpliceRegionVariant);
     }
 
-    let impact = finalize_consequences(&mut consequences);
     let protein_start = first_codon + 1;
     let protein_end = codon_end / 3;
     let cdna_start = compute_cdna_position_for_cds(cds_offset_start, index);
@@ -1445,38 +1423,25 @@ fn annotate_cds_inframe_deletion(
         index,
     );
 
-    Ok(ConsequenceResult {
-        transcript: transcript.accession.clone(),
-        gene_symbol: transcript.gene_symbol.clone(),
-        protein_accession: transcript.protein_accession.clone(),
-        consequences,
-        impact,
-        protein_start: Some(protein_start),
-        protein_end: Some(protein_end),
-        codons: Some(format_codons_indel(
-            &ref_seq,
-            &alt_seq,
-            local_del_start,
-            local_del_end,
-        )),
-        amino_acids: Some(format_amino_acids_indel(&ref_aas, &alt_aas)),
-        exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-        intron: None,
-        cds_position: Some(cds_offset_start + 1),
-        cds_position_end: Some(cds_offset_end),
-        cdna_position: Some(cdna_start),
-        cdna_position_end: Some(cdna_end),
-        distance: None,
-        strand: transcript.strand,
-        biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-        hgvs_c: None,
-        hgvs_p,
-        predicts_nmd,
-        ptc,
-    })
+    let mut result = build_base_result(transcript, consequences);
+    result.protein_start = Some(protein_start);
+    result.protein_end = Some(protein_end);
+    result.codons = Some(format_codons_indel(
+        &ref_seq,
+        &alt_seq,
+        local_del_start,
+        local_del_end,
+    ));
+    result.amino_acids = Some(format_amino_acids_indel(&ref_aas, &alt_aas));
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_offset_start + 1);
+    result.cds_position_end = Some(cds_offset_end);
+    result.cdna_position = Some(cdna_start);
+    result.cdna_position_end = Some(cdna_end);
+    result.hgvs_p = hgvs_p;
+    result.predicts_nmd = predicts_nmd;
+    result.ptc = ptc;
+    Ok(result)
 }
 
 /// An insertion's CDS point and plus-strand bases after HGVS 3'
@@ -1833,7 +1798,6 @@ fn annotate_cds_inframe_insertion(
     if is_splice_region {
         consequences.push(Consequence::SpliceRegionVariant);
     }
-    let impact = finalize_consequences(&mut consequences);
 
     // VEP reports flanking positions for insertions
     let cdna_after = compute_cdna_position_for_cds(cds_offset, index);
@@ -1896,40 +1860,27 @@ fn annotate_cds_inframe_insertion(
         index,
     );
 
-    Ok(ConsequenceResult {
-        transcript: transcript.accession.clone(),
-        gene_symbol: transcript.gene_symbol.clone(),
-        protein_accession: transcript.protein_accession.clone(),
-        consequences,
-        impact,
-        // Between two codons VEP reports both flanking residues.
-        protein_start: Some(peptides.tl_end.min(peptides.tl_start)),
-        protein_end: Some(peptides.tl_start),
-        codons: Some(format_codons_indel(
-            &codons.ref_codon,
-            &codons.alt_codon,
-            codons.local,
-            codons.local,
-        )),
-        amino_acids: unambiguous
-            .then(|| format_amino_acids_indel(&peptides.ref_aas, &peptides.alt_aas)),
-        exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-        intron: None,
-        cds_position: Some(cds_offset),
-        cds_position_end: Some(cds_offset + 1),
-        cdna_position: Some(cdna_before.min(cdna_after)),
-        cdna_position_end: Some(cdna_before.max(cdna_after)),
-        distance: None,
-        strand: transcript.strand,
-        biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-        hgvs_c: None,
-        hgvs_p,
-        predicts_nmd,
-        ptc,
-    })
+    let mut result = build_base_result(transcript, consequences);
+    // Between two codons VEP reports both flanking residues.
+    result.protein_start = Some(peptides.tl_end.min(peptides.tl_start));
+    result.protein_end = Some(peptides.tl_start);
+    result.codons = Some(format_codons_indel(
+        &codons.ref_codon,
+        &codons.alt_codon,
+        codons.local,
+        codons.local,
+    ));
+    result.amino_acids =
+        unambiguous.then(|| format_amino_acids_indel(&peptides.ref_aas, &peptides.alt_aas));
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_offset);
+    result.cds_position_end = Some(cds_offset + 1);
+    result.cdna_position = Some(cdna_before.min(cdna_after));
+    result.cdna_position_end = Some(cdna_before.max(cdna_after));
+    result.hgvs_p = hgvs_p;
+    result.predicts_nmd = predicts_nmd;
+    result.ptc = ptc;
+    Ok(result)
 }
 
 /// Build a splice consequence result for an indel that overlaps a canonical
@@ -2004,9 +1955,7 @@ pub(super) fn build_splice_indel_result(
         consequences.push(Consequence::SpliceRegionVariant);
     }
 
-    let impact = finalize_consequences(&mut consequences);
     let mut result = build_base_result(transcript, consequences);
-    result.impact = impact;
 
     if let Some(&idx) = detail
         .donor_intron_indices

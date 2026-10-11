@@ -626,6 +626,37 @@ fn push_flanking(
     true
 }
 
+/// Annotate every transcript in the store near a variant: those within
+/// [`UPSTREAM_DOWNSTREAM_LIMIT`] of the footprint get their up/downstream
+/// result, the overlapping ones `engine`'s, in store order.
+///
+/// # Arguments
+///
+/// * `query` - The variant type's own overlap window, 0-based half-open
+/// * `footprint` - The variant's `[start, end)`; `start == end` is an
+///   insertion
+/// * `engine` - Annotates one overlapping transcript
+///
+/// # Errors
+///
+/// Propagates the first error from `engine`.
+fn annotate_each(
+    store: &TranscriptStore,
+    chrom: &str,
+    query: (u64, u64),
+    footprint: (u64, u64),
+    mut engine: impl FnMut(&TranscriptModel, &LocateIndex) -> Result<ConsequenceResult, VarEffectError>,
+) -> Result<Vec<ConsequenceResult>, VarEffectError> {
+    let hits = query_with_flanks(store, chrom, query.0, query.1);
+    let mut results = Vec::with_capacity(hits.len());
+    for (tx, idx) in hits {
+        if !push_flanking(&mut results, tx, footprint.0, footprint.1) {
+            results.push(engine(tx, idx)?);
+        }
+    }
+    Ok(results)
+}
+
 /// Annotate a variant against all transcripts overlapping it or within
 /// [`UPSTREAM_DOWNSTREAM_LIMIT`] of it.
 ///
@@ -674,155 +705,82 @@ pub(crate) fn annotate(
     let (trimmed_ref, trimmed_alt, pos_adj) = helpers::trim_alleles(ref_allele, alt_allele);
     let trimmed_pos = pos + pos_adj;
 
-    let results = match (trimmed_ref.len(), trimmed_alt.len()) {
-        // SNV
-        (1, 1) => {
-            let overlaps = query_with_flanks(store, chrom, trimmed_pos, trimmed_pos + 1);
-            let mut results = Vec::with_capacity(overlaps.len());
-            for (tx, idx) in overlaps {
-                if push_flanking(&mut results, tx, trimmed_pos, trimmed_pos + 1) {
-                    continue;
-                }
-                // REF already verified above; use the unchecked path to
-                // avoid a redundant FASTA seek per transcript.
-                results.push(helpers::without_unknown_alt_effects(
-                    &helpers::AltSite {
-                        alt: trimmed_alt,
-                        is_indel: false,
-                        chrom,
-                        transcript: tx,
-                        index: idx,
-                        fasta,
-                    },
-                    helpers::without_gapped_numbering(
-                        tx,
-                        snv::annotate_snv_verified(
-                            chrom,
-                            trimmed_pos,
-                            trimmed_ref[0],
-                            trimmed_alt[0],
-                            tx,
-                            idx,
-                            fasta,
-                        )?,
-                    ),
-                )?);
-            }
-            results
-        }
-
-        // Pure insertion
-        (0, _) => {
-            let query_start = trimmed_pos.saturating_sub(1);
-            let query_end = trimmed_pos + 1;
-            let overlaps = query_with_flanks(store, chrom, query_start, query_end);
-            let mut results = Vec::with_capacity(overlaps.len());
-            for (tx, idx) in overlaps {
-                if push_flanking(&mut results, tx, trimmed_pos, trimmed_pos) {
-                    continue;
-                }
-                results.push(annotate_insertion(
+    let pos = trimmed_pos;
+    // VEP 116's unknown-base rules and the gapped-numbering withholding
+    // apply to every substitution engine; the indel engines apply them
+    // themselves.
+    let substitution =
+        |is_indel: bool, tx: &TranscriptModel, idx: &LocateIndex, result: ConsequenceResult| {
+            helpers::without_unknown_alt_effects(
+                &helpers::AltSite {
+                    alt: trimmed_alt,
+                    is_indel,
                     chrom,
-                    trimmed_pos,
-                    trimmed_alt,
-                    tx,
-                    idx,
+                    transcript: tx,
+                    index: idx,
                     fasta,
-                )?);
-            }
-            results
-        }
+                },
+                helpers::without_gapped_numbering(tx, result),
+            )
+        };
+    let results = match (trimmed_ref.len(), trimmed_alt.len()) {
+        // SNV. REF is already verified, so the unchecked path avoids a
+        // redundant FASTA seek per transcript.
+        (1, 1) => annotate_each(store, chrom, (pos, pos + 1), (pos, pos + 1), |tx, idx| {
+            let result = snv::annotate_snv_verified(
+                chrom,
+                pos,
+                trimmed_ref[0],
+                trimmed_alt[0],
+                tx,
+                idx,
+                fasta,
+            )?;
+            substitution(false, tx, idx, result)
+        })?,
+
+        // Pure insertion between `pos - 1` and `pos`.
+        (0, _) => annotate_each(
+            store,
+            chrom,
+            (pos.saturating_sub(1), pos + 1),
+            (pos, pos),
+            |tx, idx| annotate_insertion(chrom, pos, trimmed_alt, tx, idx, fasta),
+        )?,
 
         // Pure deletion
         (n, 0) if n > 0 => {
-            let del_end = trimmed_pos + n as u64;
-            let overlaps = query_with_flanks(store, chrom, trimmed_pos, del_end);
-            let mut results = Vec::with_capacity(overlaps.len());
-            for (tx, idx) in overlaps {
-                if push_flanking(&mut results, tx, trimmed_pos, del_end) {
-                    continue;
-                }
-                results.push(annotate_deletion(
-                    chrom,
-                    trimmed_pos,
-                    del_end,
-                    trimmed_ref,
-                    tx,
-                    idx,
-                    fasta,
-                )?);
-            }
-            results
+            let end = pos + n as u64;
+            annotate_each(store, chrom, (pos, end), (pos, end), |tx, idx| {
+                annotate_deletion(chrom, pos, end, trimmed_ref, tx, idx, fasta)
+            })?
         }
 
         // MNV: same-length multi-base substitution
         (r, a) if r == a && r > 1 => {
-            let query_end = trimmed_pos + r as u64;
-            let overlaps = query_with_flanks(store, chrom, trimmed_pos, query_end);
-            let mut results = Vec::with_capacity(overlaps.len());
-            for (tx, idx) in overlaps {
-                if push_flanking(&mut results, tx, trimmed_pos, query_end) {
-                    continue;
-                }
-                results.push(helpers::without_unknown_alt_effects(
-                    &helpers::AltSite {
-                        alt: trimmed_alt,
-                        is_indel: false,
-                        chrom,
-                        transcript: tx,
-                        index: idx,
-                        fasta,
-                    },
-                    helpers::without_gapped_numbering(
-                        tx,
-                        complex::annotate_mnv(
-                            chrom,
-                            trimmed_pos,
-                            trimmed_ref,
-                            trimmed_alt,
-                            tx,
-                            idx,
-                            fasta,
-                        )?,
-                    ),
-                )?);
-            }
-            results
+            let end = pos + r as u64;
+            annotate_each(store, chrom, (pos, end), (pos, end), |tx, idx| {
+                let result =
+                    complex::annotate_mnv(chrom, pos, trimmed_ref, trimmed_alt, tx, idx, fasta)?;
+                substitution(false, tx, idx, result)
+            })?
         }
 
         // Complex delins: different-length substitution
         (r, a) if r > 0 && a > 0 => {
-            let query_end = trimmed_pos + r as u64;
-            let overlaps = query_with_flanks(store, chrom, trimmed_pos, query_end);
-            let mut results = Vec::with_capacity(overlaps.len());
-            for (tx, idx) in overlaps {
-                if push_flanking(&mut results, tx, trimmed_pos, query_end) {
-                    continue;
-                }
-                results.push(helpers::without_unknown_alt_effects(
-                    &helpers::AltSite {
-                        alt: trimmed_alt,
-                        is_indel: true,
-                        chrom,
-                        transcript: tx,
-                        index: idx,
-                        fasta,
-                    },
-                    helpers::without_gapped_numbering(
-                        tx,
-                        complex::annotate_complex_delins(
-                            chrom,
-                            trimmed_pos,
-                            trimmed_ref,
-                            trimmed_alt,
-                            tx,
-                            idx,
-                            fasta,
-                        )?,
-                    ),
-                )?);
-            }
-            results
+            let end = pos + r as u64;
+            annotate_each(store, chrom, (pos, end), (pos, end), |tx, idx| {
+                let result = complex::annotate_complex_delins(
+                    chrom,
+                    pos,
+                    trimmed_ref,
+                    trimmed_alt,
+                    tx,
+                    idx,
+                    fasta,
+                )?;
+                substitution(true, tx, idx, result)
+            })?
         }
 
         // REF == ALT after trimming

@@ -501,42 +501,25 @@ pub(crate) fn format_hgvs_p_frameshift(
     alt_seq.extend_from_slice(inserted_coding_bases);
     alt_seq.extend_from_slice(&ref_seq[local_end..]);
 
-    // When the variant overlaps the stop codon, extend both ref and alt
-    // into the 3'UTR before translation. Without this, the alt protein
-    // is too short to identify the first changed amino acid and the new
-    // stop position, producing "p.TerN?fsTer?" instead of the correct
-    // "p.TerNXxxextTerM" notation that VEP emits.
-    let stop_codon_start = total_cds.saturating_sub(3);
-    let mut extended_into_utr = eff_start >= stop_codon_start
-        && append_3prime_utr(&mut ref_seq, &mut alt_seq, chrom, transcript, fasta)?;
     let first_codon = codon_start / 3 + 1;
     let (mut ref_protein, mut alt_protein) =
         translate_frameshift_pair(&ref_seq, &alt_seq, first_codon, index, is_mito)?;
     let mut change = first_changed_residue(&ref_protein, &alt_protein);
 
-    // A deletion just before the stop codon can leave the alternate frame
-    // ending before its first changed residue, also when that residue is the
-    // stop (VEP 116 ci1766 ENST00001110657.1 c.417_420del p.Ter142ValextTer16;
-    // ci7204 NM_000190.4 c.1084del, 3'-shifted from c.1083, p.Ter362AsnextTer?).
-    // Read on into the 3'UTR, as VEP does.
-    if !extended_into_utr
-        && change.is_none_or(|idx| idx >= alt_protein.len())
-        && append_3prime_utr(&mut ref_seq, &mut alt_seq, chrom, transcript, fasta)?
-    {
-        extended_into_utr = true;
+    // Read on into the 3'UTR, as VEP does, when the coding sequence alone
+    // shows no change or no stop after it. A deletion just before the stop
+    // can leave the alternate frame ending before its first changed residue,
+    // also when that residue is the stop (VEP 116 ci1766 ENST00001110657.1
+    // c.417_420del p.Ter142ValextTer16; ci7204 NM_000190.4 c.1084del,
+    // 3'-shifted from c.1083, p.Ter362AsnextTer?).
+    let needs_utr =
+        change.is_none_or(|idx| idx >= alt_protein.len() || !alt_protein[idx..].contains(&b'*'));
+    if needs_utr && append_3prime_utr(&mut ref_seq, &mut alt_seq, chrom, transcript, fasta)? {
         (ref_protein, alt_protein) =
             translate_frameshift_pair(&ref_seq, &alt_seq, first_codon, index, is_mito)?;
         change = first_changed_residue(&ref_protein, &alt_protein);
     }
 
-    // Keep trailing alt bases for the CDS/UTR junction carryover below,
-    // unless the UTR is already in the sequences.
-    let alt_complete_len = alt_seq.len() - (alt_seq.len() % 3);
-    let trailing_bases = if extended_into_utr {
-        Vec::new()
-    } else {
-        alt_seq[alt_complete_len..].to_vec()
-    };
     if alt_protein.is_empty() {
         // Entire alt is incomplete — no protein produced.
         return Ok(FrameshiftProtein {
@@ -569,102 +552,70 @@ pub(crate) fn format_hgvs_p_frameshift(
 
     let protein_pos = (codon_start / 3) + 1 + change_idx as u32;
     let ref_aa = ref_protein[change_idx];
+    let Some(&alt_aa) = alt_protein.get(change_idx) else {
+        // The alternate frame ends before the change, with no 3'UTR to read
+        // on into. Report unknown.
+        return Ok(FrameshiftProtein {
+            notation: Some(format!("p.{}{protein_pos}?fsTer?", aa_three_letter(ref_aa))),
+            ptc: PtcSite::Indeterminate,
+            edit,
+        });
+    };
 
     // Check if first changed AA in alt is a stop → nonsense, not fs.
-    if let Some(&alt_aa) = alt_protein.get(change_idx) {
-        if alt_aa == b'*' {
-            // The first changed residue is itself a stop, so it *is* the
-            // termination codon — there is no `stop_n` offset to add.
-            return Ok(FrameshiftProtein {
-                notation: Some(format!("p.{}{}Ter", aa_three_letter(ref_aa), protein_pos,)),
-                ptc: PtcSite::Residue(protein_pos),
-                edit,
-            });
-        }
-
-        // VEP 116 counts to the first stop of the whole alternate
-        // translation, which reads an upstream selenocysteine TGA as one, so
-        // it writes `fsTer?` (NM_000581.4 c.149del: p.Gly50AlafsTer?). The
-        // PTC keeps the real termination codon.
-        let ter = |stop_n: u32| {
-            if index.has_selenocysteine_before(protein_pos) {
-                "?".to_string()
-            } else {
-                stop_n.to_string()
-            }
-        };
-        // A frameshift whose first changed residue is the reference stop is
-        // an extension: HGVS counts the new stop from the first codon after
-        // the old one, one less than `fsTer` would (VEP 116 ci8341
-        // NM_001321821.2 c.1275_1276dup p.Ter426CysextTer4).
-        let describe = |stop_n: Option<u32>| {
-            let alt3 = aa_three_letter(alt_aa);
-            match (ref_aa == b'*', stop_n) {
-                (true, Some(n)) => format!("p.Ter{protein_pos}{alt3}extTer{}", ter(n - 1)),
-                (true, None) => format!("p.Ter{protein_pos}{alt3}extTer?"),
-                (false, Some(n)) => {
-                    format!(
-                        "p.{}{protein_pos}{alt3}fsTer{}",
-                        aa_three_letter(ref_aa),
-                        ter(n)
-                    )
-                }
-                (false, None) => format!("p.{}{protein_pos}{alt3}fsTer?", aa_three_letter(ref_aa)),
-            }
-        };
-
-        // Scan for stop in the alt protein from the change point onward.
-        // First check within the already-translated alt protein.
-        if let Some(star_pos) = alt_protein[change_idx..].iter().position(|&a| a == b'*') {
-            // star_pos is 0-based from change_idx. HGVS position is
-            // 1-based.
-            let stop_n = star_pos as u32 + 1;
-            return Ok(FrameshiftProtein {
-                notation: Some(describe(Some(stop_n))),
-                // HGVS counts `fsTer` from the first changed residue as
-                // codon 1, so the terminating residue is `pos + n - 1`.
-                ptc: PtcSite::Residue(protein_pos + stop_n - 1),
-                edit,
-            });
-        }
-
-        // No stop in CDS portion. Continue into 3'UTR with trailing
-        // byte carryover — unless UTR was already spliced into the
-        // sequences above (avoid double-counting).
-        if !extended_into_utr {
-            let codons_past_change = alt_protein.len() - change_idx;
-
-            let utr_seq = fetch_3prime_utr_coding_seq(chrom, transcript, fasta)?;
-            let mut continuation = trailing_bases;
-            continuation.extend_from_slice(&utr_seq);
-
-            if let Some(utr_stop) = scan_for_stop_codon(&continuation, is_mito) {
-                let stop_n = codons_past_change as u32 + utr_stop;
-                return Ok(FrameshiftProtein {
-                    notation: Some(describe(Some(stop_n))),
-                    ptc: PtcSite::Residue(protein_pos + stop_n - 1),
-                    edit,
-                });
-            }
-        }
-
-        // No stop found anywhere.
+    if alt_aa == b'*' {
+        // The first changed residue is itself a stop, so it *is* the
+        // termination codon — there is no `stop_n` offset to add.
         return Ok(FrameshiftProtein {
-            notation: Some(describe(None)),
-            ptc: PtcSite::NoStopCodon,
+            notation: Some(format!("p.{}{}Ter", aa_three_letter(ref_aa), protein_pos)),
+            ptc: PtcSite::Residue(protein_pos),
             edit,
         });
     }
 
-    // alt_protein shorter than change_idx — the change is beyond the alt
-    // protein. This can happen for very large deletions. Report unknown.
-    Ok(FrameshiftProtein {
-        notation: Some(format!(
-            "p.{}{}?fsTer?",
+    // VEP 116 counts to the first stop of the whole alternate translation,
+    // which reads an upstream selenocysteine TGA as one, so it writes
+    // `fsTer?` (NM_000581.4 c.149del: p.Gly50AlafsTer?). The PTC keeps the
+    // real termination codon.
+    let ter = |stop_n: u32| {
+        if index.has_selenocysteine_before(protein_pos) {
+            "?".to_string()
+        } else {
+            stop_n.to_string()
+        }
+    };
+    let alt3 = aa_three_letter(alt_aa);
+    let Some(star_pos) = alt_protein[change_idx..].iter().position(|&a| a == b'*') else {
+        // No stop before the end of the 3'UTR.
+        let notation = if ref_aa == b'*' {
+            format!("p.Ter{protein_pos}{alt3}extTer?")
+        } else {
+            format!("p.{}{protein_pos}{alt3}fsTer?", aa_three_letter(ref_aa))
+        };
+        return Ok(FrameshiftProtein {
+            notation: Some(notation),
+            ptc: PtcSite::NoStopCodon,
+            edit,
+        });
+    };
+    // `star_pos` is 0-based from the first changed residue; HGVS `fsTer`
+    // counts that residue as 1. A frameshift whose first changed residue is
+    // the reference stop is an extension, counted from the first codon after
+    // the old stop (VEP 116 ci8341 NM_001321821.2 c.1275_1276dup
+    // p.Ter426CysextTer4).
+    let stop_n = star_pos as u32 + 1;
+    let notation = if ref_aa == b'*' {
+        format!("p.Ter{protein_pos}{alt3}extTer{}", ter(stop_n - 1))
+    } else {
+        format!(
+            "p.{}{protein_pos}{alt3}fsTer{}",
             aa_three_letter(ref_aa),
-            protein_pos,
-        )),
-        ptc: PtcSite::Indeterminate,
+            ter(stop_n)
+        )
+    };
+    Ok(FrameshiftProtein {
+        notation: Some(notation),
+        ptc: PtcSite::Residue(protein_pos + stop_n - 1),
         edit,
     })
 }

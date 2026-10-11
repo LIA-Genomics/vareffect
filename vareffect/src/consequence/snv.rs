@@ -2,8 +2,8 @@
 
 use super::helpers::{
     add_splice_spill, build_alt_codon, build_base_result, compute_cdna_position_exonic,
-    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, finalize_consequences,
-    has_complete_start_codon, is_incomplete_terminal_codon,
+    compute_cdna_position_for_cds, fetch_cds_sequence, fetch_ref_codon, has_complete_start_codon,
+    is_incomplete_terminal_codon,
 };
 use super::{Consequence, ConsequenceResult};
 use crate::codon::{
@@ -17,7 +17,7 @@ use crate::locate::helpers::exonic_splice_spill;
 use crate::locate::{
     LocateIndex, VariantLocation, format_exon_number, format_intron_number, locate_variant,
 };
-use crate::types::{Strand, TranscriptModel, TranscriptTier};
+use crate::types::{Strand, TranscriptModel};
 
 /// Annotate a single-nucleotide variant against one transcript.
 ///
@@ -395,7 +395,6 @@ fn annotate_cds_snv(
     if is_splice_region {
         consequences.push(Consequence::SpliceRegionVariant);
     }
-    let impact = finalize_consequences(&mut consequences);
     let predicts_nmd = coding_consequence == Consequence::StopGained
         && super::nmd::predicts_nmd(cds_offset + 1, index);
 
@@ -415,31 +414,17 @@ fn annotate_cds_snv(
         super::PtcStatus::NotApplicable
     };
 
-    Ok(ConsequenceResult {
-        transcript: transcript.accession.clone(),
-        gene_symbol: transcript.gene_symbol.clone(),
-        protein_accession: transcript.protein_accession.clone(),
-        consequences,
-        impact,
-        protein_start: Some(codon_number),
-        protein_end: Some(codon_number),
-        codons: Some(format_codons(&ref_codon, &alt_codon, codon_position)),
-        amino_acids: Some(format_amino_acids(ref_aa, alt_aa)),
-        exon: Some(format_exon_number(exon_index, transcript.exon_count)),
-        intron: None,
-        cds_position: Some(cds_offset + 1),
-        cds_position_end: Some(cds_offset + 1),
-        cdna_position: Some(compute_cdna_position_for_cds(cds_offset, index)),
-        cdna_position_end: Some(compute_cdna_position_for_cds(cds_offset, index)),
-        distance: None,
-        strand: transcript.strand,
-        biotype: transcript.biotype.clone(),
-        is_mane_select: transcript.tier == Some(TranscriptTier::ManeSelect),
-        is_mane_plus_clinical: transcript.tier == Some(TranscriptTier::ManePlusClinical),
-        is_refseq_select: transcript.tier == Some(TranscriptTier::RefSeqSelect),
-        hgvs_c: None,
-        hgvs_p: None,
-        predicts_nmd,
-        ptc,
-    })
+    let mut result = build_base_result(transcript, consequences);
+    result.protein_start = Some(codon_number);
+    result.protein_end = Some(codon_number);
+    result.codons = Some(format_codons(&ref_codon, &alt_codon, codon_position));
+    result.amino_acids = Some(format_amino_acids(ref_aa, alt_aa));
+    result.exon = Some(format_exon_number(exon_index, transcript.exon_count));
+    result.cds_position = Some(cds_offset + 1);
+    result.cds_position_end = Some(cds_offset + 1);
+    result.cdna_position = Some(compute_cdna_position_for_cds(cds_offset, index));
+    result.cdna_position_end = Some(compute_cdna_position_for_cds(cds_offset, index));
+    result.predicts_nmd = predicts_nmd;
+    result.ptc = ptc;
+    Ok(result)
 }

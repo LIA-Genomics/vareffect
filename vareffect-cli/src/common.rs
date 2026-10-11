@@ -43,16 +43,16 @@ pub struct ManifestFields {
     pub source_version: String,
     /// Original input filename.
     pub source_file: String,
-    /// Hex SHA-256 of the raw input file, when known.
-    pub source_file_sha256: Option<String>,
-    /// Store file format version, for stores that carry a versioned header.
-    pub format_version: Option<u32>,
+    /// Hex SHA-256 of the raw input file.
+    pub source_file_sha256: String,
+    /// Store file format version.
+    pub format_version: u32,
     /// Hex SHA-256 of the payload after the header. It links builds whose
     /// files differ only by the header: across the move from unversioned
     /// stores to format version 1 the payload was untouched. Across later
     /// format versions the link key is (`format_version`, `payload_sha256`),
     /// since a version bump may change meaning without changing bytes.
-    pub payload_sha256: Option<String>,
+    pub payload_sha256: String,
     /// Further top-level manifest keys (e.g. a transcript build's counts and
     /// exclusion list), written after the fields above.
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -103,16 +103,10 @@ pub fn finalize_store(
         "sha256": sha256,
         "built_at": Utc::now().to_rfc3339(),
         "built_by": format!("vareffect-cli {}", env!("CARGO_PKG_VERSION")),
+        "source_file_sha256": fields.source_file_sha256,
+        "format_version": fields.format_version,
+        "payload_sha256": fields.payload_sha256,
     });
-    if let Some(src_sha) = &fields.source_file_sha256 {
-        manifest["source_file_sha256"] = serde_json::Value::String(src_sha.clone());
-    }
-    if let Some(format_version) = fields.format_version {
-        manifest["format_version"] = serde_json::Value::from(format_version);
-    }
-    if let Some(payload_sha) = &fields.payload_sha256 {
-        manifest["payload_sha256"] = serde_json::Value::String(payload_sha.clone());
-    }
     for (key, value) in &fields.extra {
         manifest[key.as_str()] = value.clone();
     }
@@ -125,7 +119,7 @@ pub fn finalize_store(
         sha256,
         record_count: fields.record_count,
         source_version: fields.source_version.clone(),
-        source_file_sha256: fields.source_file_sha256.clone(),
+        source_file_sha256: Some(fields.source_file_sha256.clone()),
     })
 }
 
@@ -242,11 +236,9 @@ pub(crate) fn write_transcript_store(store: &StoreWrite<'_>) -> Result<(BuildOut
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default(),
-        source_file_sha256: Some(source_sha256),
-        format_version: Some(TRANSCRIPT_STORE_FORMAT_VERSION),
-        payload_sha256: Some(hex::encode(Sha256::digest(
-            &data[TRANSCRIPT_STORE_HEADER_LEN..],
-        ))),
+        source_file_sha256: source_sha256,
+        format_version: TRANSCRIPT_STORE_FORMAT_VERSION,
+        payload_sha256: hex::encode(Sha256::digest(&data[TRANSCRIPT_STORE_HEADER_LEN..])),
         extra: {
             let mut extra = store.manifest_extra.clone();
             extra.insert(

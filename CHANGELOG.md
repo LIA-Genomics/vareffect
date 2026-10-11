@@ -238,7 +238,9 @@ For releases before `0.5.0`, see the git history.
   after the old stop, one less than the former `fsTer`), instead of
   `p.Ter426CysfsTer5`. A deletion just before the stop codon now reads on
   into the 3'UTR to find its first changed residue instead of writing the
-  malformed `p.Ter362?fsTer?` or `p.Lys141?fsTer?` (or no HGVS p.), and a
+  malformed `p.Ter362?fsTer?` or `p.Lys141?fsTer?` (or no HGVS p.) where the
+  transcript has a 3'UTR to read (without one, as on 38 GENCODE ClinVar
+  results, `p.Xxx{N}?fsTer?` stays), and a
   frameshift that rebuilds the stop codon is `p.Ter298=` instead of naming a
   residue past the stop. `ptc` moves with it: the read-on cases now carry the
   located stop or `NoStopCodon` instead of `Indeterminate` (ClinVar on MANE:

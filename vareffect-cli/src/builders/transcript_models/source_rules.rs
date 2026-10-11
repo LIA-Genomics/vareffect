@@ -44,13 +44,15 @@ pub(super) fn parse_gap_ops(gap: &str, start: u64, end: u64, strand: Strand) -> 
     let mut ops = Vec::new();
     let mut pos = if plus { start } else { end };
     for op in gap.split_whitespace() {
-        let (kind, length) = op.split_at(1);
-        let length: u64 = length
+        let mut chars = op.chars();
+        let kind = chars.next();
+        let length: u64 = chars
+            .as_str()
             .parse()
             .with_context(|| format!("Gap operation {op:?} has no numeric length"))?;
         match kind {
-            "I" => ops.push(GapOp::Insertion { at: pos }),
-            "M" | "D" => {
+            Some('I') => ops.push(GapOp::Insertion { at: pos }),
+            Some('M' | 'D') => {
                 let (low, high) = if plus {
                     (pos, pos.saturating_add(length))
                 } else {
@@ -59,7 +61,7 @@ pub(super) fn parse_gap_ops(gap: &str, start: u64, end: u64, strand: Strand) -> 
                 if low < start || high > end {
                     bail!("Gap {gap:?} runs past its row {start}..{end}");
                 }
-                if kind == "D" {
+                if kind == Some('D') {
                     ops.push(GapOp::Deletion {
                         start: low,
                         end: high,
@@ -67,7 +69,7 @@ pub(super) fn parse_gap_ops(gap: &str, start: u64, end: u64, strand: Strand) -> 
                 }
                 pos = if plus { high } else { low };
             }
-            other => bail!("Gap operation {other:?} in {gap:?} is not M, I or D"),
+            _ => bail!("Gap operation {op:?} in {gap:?} is not M, I or D"),
         }
     }
     Ok(ops)
@@ -429,6 +431,8 @@ mod tests {
         assert!(parse_gap_ops("M5 X1", 0, 10, Strand::Plus).is_err());
         assert!(parse_gap_ops("Mx", 0, 10, Strand::Plus).is_err());
         assert!(parse_gap_ops("M11", 0, 10, Strand::Plus).is_err());
+        // A multibyte first character is an error, not a panic.
+        assert!(parse_gap_ops("\u{e9}3", 0, 10, Strand::Plus).is_err());
     }
 
     #[test]

@@ -641,7 +641,7 @@ mod tests {
                 "{key}"
             );
         }
-        for key in ["tier", "cds_start_complete"] {
+        for key in ["tier", "cds_start_complete", "utr_numbering_breaks"] {
             let mut model = record.clone();
             model.as_object_mut().expect("map").remove(key);
             let payload = serde_json::json!({
