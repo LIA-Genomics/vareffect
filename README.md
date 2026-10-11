@@ -1,249 +1,112 @@
 # vareffect
 
-
 [![CI](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml)
 [![vareffect](https://img.shields.io/crates/v/vareffect.svg?label=vareffect)](https://crates.io/crates/vareffect)
 [![vareffect-cli](https://img.shields.io/crates/v/vareffect-cli.svg?label=vareffect-cli)](https://crates.io/crates/vareffect-cli)
 [![docs.rs](https://docs.rs/vareffect/badge.svg)](https://docs.rs/vareffect)
 [![Apache-2.0](https://img.shields.io/crates/l/vareffect)](#license)
 
+Variant consequence prediction and HGVS notation in Rust, matching
+[Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/) release 115/116.
 
-Variant consequence prediction and HGVS notation in Rust, concordant with [Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/).
+Give vareffect a variant (chromosome, position, ref, alt) and it returns, for
+every transcript that overlaps it or lies within 5 kb: Sequence Ontology
+consequence terms, IMPACT, HGVS c./n./p., protein and cDNA positions, and an
+NMD prediction. It runs in-process, memory-maps the genome and is safe to share
+across threads.
 
-vareffect takes a variant (chromosome, position, ref, alt) and returns Sequence Ontology consequence terms, HGVS c./p. notation, and NMD prediction for every overlapping transcript (and up/downstream terms within 5 kb) -- the same questions VEP answers, at 100--400x the speed, with zero runtime dependencies. The engine is thread-safe (`Send + Sync`), memory-mapped, and designed to embed directly into Rust pipelines.
-
-This repository contains two crates:
-
-| Crate | Description |
-|-------|-------------|
-| [`vareffect`](vareffect/) | Core library -- consequence prediction, HGVS, transcript/genome stores |
-| [`vareffect-cli`](vareffect-cli/) | CLI tool -- config scaffolding (`init`), validation (`check`), data provisioning (`setup`), and VCF annotation (`annotate`) |
+| Crate | What it is |
+|---|---|
+| [`vareffect`](vareffect/) | The library: consequence prediction, HGVS, transcript and genome stores |
+| [`vareffect-cli`](vareffect-cli/) | The `vareffect` binary: builds the runtime data and annotates VCFs |
 
 ## Quick start
 
-### 1. Install and set up runtime data
-
 ```bash
 cargo install vareffect-cli
+vareffect init     # write a config file (once)
+vareffect setup    # download GRCh38 + transcripts, build the stores (~10 min, ~3 GB)
+vareffect check    # confirm everything is in place
 
-# Scaffold a config file (one-time):
-vareffect init
-
-# Downloads GRCh38 and the configured transcript source (MANE by default),
-# builds genome binary and transcript store.
-# One-time, ~10 minutes, ~3 GB disk. Idempotent.
-vareffect setup
-
-# Validate everything is in place:
-vareffect check
-```
-
-### 2. Annotate a VCF with the CLI
-
-```bash
 vareffect annotate \
-  --input sample.vcf.gz \
-  --output annotated.vcf.gz \
+  --input sample.vcf.gz --output annotated.vcf.gz \
   --fasta data/vareffect/GRCh38.bin \
   --transcripts data/vareffect/transcript_models.bin
 ```
 
-Annotation runs on all logical cores by default (`--threads N` to limit). Output is a VCF with a `CSQ` INFO field whose pipe-delimited layout matches VEP `--vcf` output; downstream tools that parse VEP CSQ fields (SnpSift, bcftools, GEMINI) work unchanged. `.vcf.gz` output is parallel-compressed BGZF, directly indexable with `tabix -p vcf`.
+The output VCF carries a VEP-style `CSQ` INFO field, so tools that read VEP
+output (bcftools, SnpSift, GEMINI) work unchanged.
 
-### 3. Use as a library
+As a library:
 
 ```toml
-# Cargo.toml
 [dependencies]
 vareffect = "0.6"
 ```
 
 ```rust
 use std::path::Path;
-use vareffect::{Consequence, VarEffect};
+use vareffect::VarEffect;
 
 let ve = VarEffect::open(
     Path::new("data/vareffect/transcript_models.bin"),
     Path::new("data/vareffect/GRCh38.bin"),
 )?;
 
-// TP53 c.742C>T (p.Arg248Trp) — 0-based position
-let results = ve.annotate("chr17", 7_674_220, b"G", b"A")?;
-
-for r in &results {
-    println!(
-        "{} {}: {} ({})",
-        r.transcript,
-        r.hgvs_p.as_deref().unwrap_or("-"),
-        r.consequences.iter().map(Consequence::as_str).collect::<Vec<_>>().join(","),
-        r.impact,
-    );
+// TP53 c.742C>T, p.Arg248Trp. Positions are 0-based.
+for r in ve.annotate("chr17", 7_674_220, b"G", b"A")? {
+    println!("{} {:?} {:?}", r.transcript, r.consequences, r.hgvs_p);
 }
-// => NM_000546.6 p.Arg248Trp: missense_variant (MODERATE)
 ```
 
-For multi-threaded use, wrap in `Arc`:
+## Transcript sources
 
-```rust
-let ve = Arc::new(VarEffect::open(transcripts, genome)?);
-// Clone the Arc into each worker — zero contention, no interior mutability.
-```
+`vareffect setup` builds one of three transcript sets, chosen in the config
+(`[vareffect.transcripts] source`):
 
-## Features
+| Source | Transcripts | Store file |
+|---|---|---|
+| `mane` (default) | MANE Select and MANE Plus Clinical (v1.5, 19,437) | `transcript_models.bin` |
+| `refseq` | Curated RefSeq `NM_`/`NR_` on the primary assembly (RS_2025_08, 93,432) | `transcript_models_refseq.bin` |
+| `gencode` | GENCODE comprehensive (v50, 644,292) | `transcript_models_gencode.bin` |
 
-- **24 SO consequence terms** covering SNVs, insertions, deletions, MNVs, and complex indels
-- **HGVS c./n. and p. notation** -- substitutions, deletions, insertions, duplications, delins, intronic/UTR offsets, frameshift extension walks
-- **HGVS reverse resolution** -- parse `NM_000546.6:c.742C>T` back to genomic coordinates
-- **NMD prediction** via the 50-nucleotide rule on truncating variants -- at the
-  variant site (`predicts_nmd`, VEP parity) and at the termination codon (`ptc`,
-  what ACMG PVS1 asks for)
-- **IMPACT ranking** -- HIGH / MODERATE / LOW / MODIFIER, matching VEP's severity scale
-- **Multi-transcript annotation** -- one result per overlapping transcript, plus `upstream_gene_variant` / `downstream_gene_variant` for transcripts within 5 kb, with MANE Select / MANE Plus Clinical / RefSeq Select tier metadata
-- **Memory-mapped genome** -- ~5 ns base fetches via mmap'd flat binary
-- **Thread-safe** -- `VarEffect`, `TranscriptStore`, and `FastaReader` are `Send + Sync` with a compile-time assertion
-- **Standard + mitochondrial genetic codes** -- `chrM` uses NCBI table 2 automatically
-- **Reference allele verification** -- mismatched REF fails fast before annotation
+RefSeq and GENCODE downloads are pinned by SHA-256. Each store records its
+source and release, which `vareffect check` and the annotated VCF header
+report. See the [CLI README](vareffect-cli/README.md) for details.
 
-## VarEffect API
+## Accuracy
 
-All coordinates are 0-based half-open (BED convention). Chromosome names are UCSC-style (`chr17`, `chrM`).
+Measured against VEP 116 (REST) on 11,499 variants: ClinVar records, ClinVar
+indels and HG002 benchmark calls. Rates are per transcript pair, after the
+documented differences in [`VEP_DIVERGENCES.md`](vareffect/VEP_DIVERGENCES.md)
+are folded.
 
-### Construction
+| Store | Consequence terms | HGVS c. | HGVS p. | IMPACT |
+|---|---:|---:|---:|---:|
+| MANE | 99.54% | 99.98% | 99.99% | 100.00% |
+| RefSeq | 99.45% | 99.95% | 99.98% | 99.99% |
+| GENCODE | 99.33% | 99.97% | 100.00% | 100.00% |
 
-| Method | Description |
-|--------|-------------|
-| `VarEffect::open(transcripts, genome)` | Load both stores from disk |
-| `VarEffect::open_with_patch_aliases(transcripts, genome, aliases)` | Load with NCBI patch-contig alias support |
-| `VarEffect::new(transcript_store, fasta_reader)` | Construct from pre-loaded stores |
+Every known difference is listed in
+[`VEP_DIVERGENCES.md`](vareffect/VEP_DIVERGENCES.md), either as intentional or
+as a defect to fix.
 
-### Annotation
+## Speed
 
-| Method | Description |
-|--------|-------------|
-| `annotate(chrom, pos, ref, alt)` | Returns `Vec<ConsequenceResult>` -- one per transcript overlapping the variant or within 5 kb of it |
-| `annotate_to_vep_json(chrom, pos, ref, alt, assembly)` | Same, serialized as VEP REST-compatible JSON |
-| `resolve_hgvs_c(hgvs)` | Parse HGVS c. string to `GenomicVariant` (genomic coordinates + alleles) |
+Annotating all 4.43 million GRCh38 ClinVar records against MANE, including
+reading the VCF and writing compressed output, takes about 10 s on one thread
+(~430,000 records/s) and about 3 s on 8 threads (Apple M5 Max). The
+genome is memory-mapped, so a base lookup is a pointer read rather than a
+compressed-block decode.
 
-### Reference genome
+## Documentation
 
-| Method | Description |
-|--------|-------------|
-| `fetch_base(chrom, pos)` | Single base lookup (~5 ns) |
-| `fetch_sequence(chrom, start, end)` | Sequence slice as `Vec<u8>` |
-| `verify_ref(chrom, pos, ref_allele)` | Check REF matches genome (zero-copy) |
-| `chrom_length(chrom)` | Chromosome length or `None` |
-
-### Indel normalization
-
-| Method | Description |
-|--------|-------------|
-| `anchor_prepend_indel(chrom, pos, ref, alt)` | Convert HGVS `"-"` placeholders to VCF anchor-prepended form |
-| `left_align_indel(chrom, pos, ref, alt)` | Left-align to leftmost position (Tan et al. 2015) |
-
-### Transcript queries
-
-| Method | Description |
-|--------|-------------|
-| `get_by_accession(accession)` | O(1) lookup by versioned accession (e.g. `NM_000546.6`) |
-| `query_overlap(chrom, start, end)` | O(log n + k) interval-tree overlap query |
-| `transcripts()` | Borrow inner `TranscriptStore` |
-| `fasta()` | Borrow inner `FastaReader` |
-
-## Performance
-
-Single-threaded throughput on a modern x86_64 laptop (excludes startup cost):
-
-| Tool | Language | Variants/sec (1 thread) |
-|------|----------|------------------------|
-| VEP (`--cache`) | Perl | ~200 -- 500 |
-| SnpEff | Java | ~2,000 -- 10,000 |
-| Nirvana | C# | ~5,000 -- 15,000 |
-| bcftools csq | C | ~10,000 -- 50,000 |
-| **vareffect** | **Rust** | **~50,000 -- 200,000** |
-
-The gap is almost entirely I/O: VEP reads BGZF-compressed FASTA through block decompression per base; vareffect memory-maps a flat binary and reads bytes directly. The CLI annotator is multi-threaded by default (all logical cores) with a read/annotate/write pipeline and parallel BGZF output, reaching millions of variants/sec on a multi-core host.
-
-## VEP divergences
-
-vareffect targets concordance with VEP releases 115/116. Validated against 136 hand-curated variants across 6 test suites (6/6 pass as of 2026-04-11). Full details in [`VEP_DIVERGENCES.md`](vareffect/VEP_DIVERGENCES.md).
-
-### Large-scale concordance
-
-At-scale run over 50,000 variants (45,644 compared after skipping rows without a RefSeq transcript): 99.38% consequence concordance, 97.52% HGVS c., 97.72% HGVS p., 99.78% IMPACT, 98.10% protein start. Zero vareffect errors or panics.
-
-```
-============================================================
-LARGE-SCALE VEP CONCORDANCE REPORT
-============================================================
-Total TSV rows:                50000
-Skipped (no RefSeq tc):           97
-Skipped (vareffect error):         0
-Skipped (vareffect PANIC):         0  <- hard bugs, see mismatches.log
-Transcript not found:           4259
-Transcript version mismatch:       0
-Compared:                      45644
-
-Consequence concordance:   45361/45644 (99.38%)
-  Exact match:             40180       (88.03%)
-  Normalised (splice/NMD):  4504       (9.87%)
-  Real mismatch:             283       (0.62%)
-
-HGVS c. concordance:       44511/45641 (97.52%)
-HGVS p. concordance:       33008/33777 (97.72%)
-Impact concordance:        45543/45644 (99.78%)
-Protein start concordance: 33447/34096 (98.10%)
-
-TOP MISMATCH PATTERNS (up to 20):
-    728x  hgvsc
-    365x  protein_start
-    338x  hgvsp
-    316x  hgvsc+hgvsp
-    184x  hgvsp+protein_start
-    144x  csq
-     66x  hgvsc+protein_start
-     53x  csq+impact
-     24x  csq+hgvsp
-     18x  csq+hgvsp+protein_start
-     13x  csq+hgvsp+impact
-     13x  impact
-      7x  csq+protein_start
-      5x  csq+hgvsc+hgvsp+impact
-      5x  csq+hgvsc+protein_start
-      3x  csq+hgvsc+hgvsp
-      3x  csq+hgvsc+impact
-      3x  hgvsp+impact+protein_start
-      2x  csq+hgvsc
-      2x  csq+hgvsc+impact+protein_start
-
-Throughput: 249684 variants/second
-Elapsed:    0.2s
-============================================================
-```
-
-### Intentional divergences
-
-| Area | vareffect behaviour | VEP behaviour |
-|------|---------------------|---------------|
-| Splice sub-terms | All emitted as `splice_region_variant` | Optionally emits `splice_polypyrimidine_tract_variant`, `splice_donor_region_variant`, `splice_donor_5th_base_variant` |
-| Non-coding introns | Emits `intron_variant` | May emit `non_coding_transcript_variant` |
-| NMD | `predicts_nmd` (at the variant site, VEP `NMD.pm` parity) plus `ptc` (at the termination codon) via the 50-nt rule | Separate `NMD_transcript_variant` SO term |
-| HGVS 3' shift | Always on (no toggle) | Configurable via `--shift_hgvs` |
-
-### Not yet implemented
-
-| Feature | Reason |
-|---------|--------|
-| `mature_miRNA_variant` | Requires miRNA locus track |
-| Regulatory terms (`TFBS_ablation`, `TF_binding_site_variant`, `regulatory_region_variant`) | Requires regulatory feature store |
-| Precise codon consequences at SV breakpoints (`stop_lost`, `start_lost`, …) | The SV path is geometry-only; SVs get region-level terms (see VEP_DIVERGENCES.md) |
-| Alternate builds (GRCh37, CHM13) | Build pipeline work, not engine limitation |
-| Multi-allele VCF splitting | Caller's responsibility |
-| Canonical transcript selection | Caller filters on tier metadata |
-
-### Out of scope (by design)
-
-No plugin system. No co-located variant lookup (gnomAD, ClinVar, dbSNP). No allele frequency annotation. No built-in VCF I/O in the library.
+- [Library README](vareffect/README.md): API, result fields, data files, threading
+- [CLI README](vareffect-cli/README.md): commands, configuration, VCF output
+- [`VEP_DIVERGENCES.md`](vareffect/VEP_DIVERGENCES.md): every difference from VEP
+- [`CHANGELOG.md`](CHANGELOG.md): release notes
+- [docs.rs/vareffect](https://docs.rs/vareffect): full API reference
 
 ## License
 
-Licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+Licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0).

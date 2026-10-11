@@ -1,49 +1,38 @@
 # vareffect
 
-Rust variant consequence prediction and HGVS notation, concordant with
-[Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/).
- 
+Variant consequence prediction and HGVS notation in Rust, matching
+[Ensembl VEP](https://www.ensembl.org/info/docs/tools/vep/) release 115/116.
+
 [![crates.io](https://img.shields.io/crates/v/vareffect.svg)](https://crates.io/crates/vareffect)
 [![docs.rs](https://img.shields.io/docsrs/vareffect)](https://docs.rs/vareffect)
 [![CI status](https://github.com/LIA-Genomics/vareffect/actions/workflows/ci.yml/badge.svg)](https://github.com/LIA-genomics/vareffect/actions/workflows/ci.yml)
 
-`vareffect` takes a variant (chromosome, position, reference allele,
-alternate allele) and tells you what it does to every transcript that
-overlaps it: which protein residues change, whether it disrupts a splice
-site, whether it introduces a premature termination codon and is likely to
-trigger nonsense-mediated decay, and what the Sequence Ontology consequence
-terms are — the same questions VEP answers, returned as strongly typed Rust
-values instead of TSV.
+`vareffect` tells you what a variant does to each nearby transcript: the
+Sequence Ontology consequence terms and their IMPACT, the HGVS c./n./p.
+names, the affected cDNA, CDS and protein positions, and whether a truncating
+variant is likely to trigger nonsense-mediated decay. Results are typed Rust
+values.
 
-The crate is deliberately small. It does one thing — assign SO consequences
-and HGVS notation — and leaves regulatory layers, frequency lookups, and
-plugin ecosystems to downstream code. If you need a fast, embeddable
-consequence predictor inside a Rust pipeline, this is for you. If you need
-the full VEP experience including gnomAD enrichment and custom plugins, use
-VEP.
+It does one job. Regulatory annotation, allele frequencies and plugins are
+left to downstream code; if you need those, use VEP.
 
 ## Quick start
 
-Add the library to your project and install the companion CLI that
-provisions the reference data:
-
 ```toml
-# Cargo.toml
 [dependencies]
 vareffect = "0.6"
 ```
 
+The library ships no reference data. Build it once with the companion CLI
+(about 10 minutes and 3 GB of disk):
+
 ```bash
-# One-time data setup: downloads GRCh38, builds the transcript store,
-# and writes everything to `data/vareffect/`. Takes ~10 minutes and
-# ~3 GB of disk, then you never have to touch it again.
 cargo install vareffect-cli
 vareffect init
 vareffect setup
 ```
 
-Then annotate a variant against every transcript overlapping it or within 5 kb
-(`upstream_gene_variant` / `downstream_gene_variant`):
+Then annotate:
 
 ```rust,no_run
 use std::path::Path;
@@ -55,21 +44,16 @@ let ve = VarEffect::open(
     Path::new("data/vareffect/GRCh38.bin"),
 )?;
 
-// TP53 c.742C>T (p.Arg248Trp) — a well-known hotspot missense variant.
-// chr17:7674220 is 0-based (BED / UCSC style).
+// TP53 c.742C>T (p.Arg248Trp). Positions are 0-based.
 let results = ve.annotate("chr17", 7_674_220, b"G", b"A")?;
 
 for result in &results {
+    let terms: Vec<_> = result.consequences.iter().map(Consequence::as_str).collect();
     println!(
         "{} {}: {} ({})",
         result.transcript,
         result.hgvs_p.as_deref().unwrap_or("-"),
-        result
-            .consequences
-            .iter()
-            .map(Consequence::as_str)
-            .collect::<Vec<_>>()
-            .join(","),
+        terms.join(","),
         result.impact,
     );
 }
@@ -77,344 +61,156 @@ for result in &results {
 # }
 ```
 
-Expected output (one line per transcript):
-
 ```text
 NM_000546.6 p.Arg248Trp: missense_variant (MODERATE)
 ```
 
-For sharing across threads, wrap the loaded `VarEffect` in a
-`std::sync::Arc` and clone the `Arc` into each worker — the underlying
-stores are `Send + Sync` with zero interior mutability.
+## What a result contains
 
-## Performance
+`annotate` returns one `ConsequenceResult` per transcript that overlaps the
+variant or lies within 5,000 bases of it. A transcript the variant does not
+overlap gets `upstream_gene_variant` or `downstream_gene_variant` and a
+`distance`, as VEP's default `--distance 5000` does. With no transcript in
+range, the result is a single `intergenic_variant` entry with an empty
+`transcript`.
 
-Single-threaded throughput, measured on a modern x86_64 laptop. All numbers
-exclude startup cost (genome load, transcript store parse).
+| Field | Meaning |
+|---|---|
+| `consequences`, `impact` | SO terms, most severe first, and the highest IMPACT (`HIGH` to `MODIFIER`) |
+| `hgvs_c`, `hgvs_p` | HGVS names, 3'-shifted as VEP does (`NM_000546.6:c.742C>T`, `p.Arg248Trp`) |
+| `cdna_position`, `cds_position`, `protein_start` (and `_end`) | 1-based positions, VEP style |
+| `codons`, `amino_acids`, `exon`, `intron` | As in VEP's output (`Cgg/Tgg`, `R/W`, `7/11`) |
+| `distance` | Bases to the transcript, for up/downstream results |
+| `is_mane_select`, `is_mane_plus_clinical`, `is_refseq_select` | Transcript tier, for choosing a canonical result |
+| `predicts_nmd` | 50-nucleotide rule at the variant site (VEP `NMD.pm` parity) |
+| `ptc` | The new termination codon and its own NMD verdict: use this for ACMG PVS1 |
 
-| Tool                          | Language | Variants / sec (1 thread) |
-|-------------------------------|----------|---------------------------|
-| VEP (`--cache`)               | Perl     |                ~200 – 500 |
-| SnpEff                        | Java     |           ~2,000 – 10,000 |
-| Nirvana                       | C#       |           ~5,000 – 15,000 |
-| bcftools csq                  | C        |          ~10,000 – 50,000 |
-| **vareffect**                 | Rust     |         ~50,000 – 200,000 |
+`predicts_nmd` and `ptc` differ for frameshifts, whose new stop lies
+downstream of the variant. `ptc` is `Indeterminate` when the stop cannot be
+located, never a guessed negative.
 
-The gap is almost entirely I/O: VEP reads BGZF-compressed FASTA through
-block decompression per base; `vareffect` memory-maps a flat uppercase
-binary and reads bytes directly.
+## Transcript stores
 
-## Features
+A store holds one transcript set, built by `vareffect setup` or
+`vareffect build-transcripts`:
 
-### Variant consequence prediction
-- **27 Sequence Ontology terms** — `missense_variant`, `synonymous_variant`,
-  `stop_gained`, `stop_lost`, `start_lost`, `start_retained_variant`,
-  `stop_retained_variant`, `frameshift_variant`, `inframe_insertion`,
-  `inframe_deletion`, `splice_donor_variant`, `splice_acceptor_variant`,
-  `splice_region_variant`, `incomplete_terminal_codon_variant`,
-  `5_prime_UTR_variant`, `3_prime_UTR_variant`, `intron_variant`,
-  `non_coding_transcript_exon_variant`, `upstream_gene_variant`,
-  `downstream_gene_variant`, `intergenic_variant`, `coding_sequence_variant`,
-  `protein_altering_variant`, and the four SV-shaped terms
-  `transcript_ablation`, `transcript_amplification`, `feature_truncation`,
-  `feature_elongation`.
-- **Structural-variant annotation** — `VarEffect::annotate_interval`
-  (deletions, duplications, inversions via `SvKind`), `annotate_breakend`
-  (translocation / `<BND>` breakpoints), and `annotate_sv_insertion` (`<INS>`)
-  emit one `SvConsequenceResult` per overlapping transcript: the per-transcript
-  SO term **set** VEP assigns to the event — the overlapped sub-regions plus a
-  copy-number headline where applicable (`transcript_ablation` /
-  `transcript_amplification` for whole-transcript DEL / DUP; `feature_truncation`
-  for partial deletions and breakpoints; `feature_elongation` for intragenic
-  exonic duplications / insertions; inversions are balanced and carry no
-  headline). `Breakend::parse` decodes the VCF breakend ALT grammar. Each result
-  also carries exon-overlap geometry (5'/3'/last-exon coverage, exon count, CDS
-  bases affected, overlap fraction) for region-centric CNV scoring.
-- **IMPACT ranking** — `HIGH` / `MODERATE` / `LOW` / `MODIFIER`, matching
-  VEP's severity scale. `Consequence` derives `Ord` for sorting.
-- **Multi-transcript annotation** — one `ConsequenceResult` per overlapping
-  transcript; the caller picks a canonical isoform if desired (every result
-  carries MANE Select / MANE Plus Clinical / RefSeq Select tier metadata).
-- **NMD prediction** — the 50-nucleotide rule applied to truncating variants
-  (`stop_gained`, `frameshift_variant`), both at the variant site
-  (`predicts_nmd`, for VEP `NMD.pm` parity) and at the termination codon
-  (`ptc`, which is what ACMG PVS1 asks for; the two differ for frameshifts).
-- **Standard and mitochondrial genetic codes** — `chrM` variants translate
-  with NCBI table 2 automatically.
+- **MANE** (default): MANE Select and MANE Plus Clinical.
+- **RefSeq**: curated `NM_`/`NR_` transcripts on the primary assembly.
+- **GENCODE**: GENCODE comprehensive.
 
-### HGVS nomenclature
-- **Forward c. / n.** — substitutions, deletions, insertions, duplications,
-  delins, intronic offsets (`c.672+1`), 5'/3' UTR offsets (`c.-15`, `c.*42`),
-  combined forms (`c.-15+1`).
-- **Forward p.** — missense, synonymous, stop gain / loss, start loss
-  (`p.Met1?`), frameshift with extension walk (`p.Glu23ValfsTer17`),
-  incomplete terminal codon, stop extension (`p.Ter394CysextTer9`). Matches
-  VEP's default capitalisation and three-letter code convention.
-- **3' normalization** — shift indels to the most 3' equivalent position on
-  the coding strand for HGVS notation (matches VEP's `--shift_hgvs`).
-- **Reverse c.** — parse an HGVS c. string back to plus-strand 0-based
-  genomic coordinates and alleles, round-tripped through the transcript
-  store and verified against the genome.
-- **Reverse g.** — parse a genomic HGVS string (`NC_000017.11:g.7674220C>G`;
-  `m.` mitochondrial notation accepted) back to plus-strand 0-based
-  coordinates for substitution, deletion, duplication, insertion, delins, and
-  inversion. Output is **left-aligned to the VCF-canonical form** (bcftools /
-  biocommons `hgvs_to_vcf` concordant); identity (`=`), imprecise/templated
-  notation, and non-chromosomal references (`NG_`/`LRG_`) fail closed.
+The store records its source and release
+(`ve.transcripts().source()`, `ve.transcripts().source_release()`). The file
+starts with a versioned header; a store from another format version, including
+any written by vareffect 0.5 or earlier, is refused at load time. Rebuild it
+with `vareffect setup`.
 
-### Variant localization
-- Classify variants as CDS exon, intron, 5' / 3' UTR, splice donor /
-  acceptor, splice region, upstream / downstream, intergenic.
-- Multi-exon indel handling with exon-boundary-spanning logic.
-- Reference-allele verification against the loaded genome before
-  annotation, so VCFs built against the wrong build fail fast instead of
-  silently producing wrong calls.
+RefSeq and GENCODE include transcripts MANE does not have, and vareffect
+handles them as VEP does:
 
-### Transcript models
-- MANE (default), full RefSeq or GENCODE stores, with MANE Select, MANE Plus
-  Clinical and RefSeq Select tiers where the source has them.
-- Full exon and CDS segment layout with GFF3 phase preserved, so codon
-  walks across exon boundaries and frameshift detection are O(1) lookups.
-- Interval-tree indexed per chromosome for O(log n + k) overlap queries.
-- Strand-aware: correct reverse-complement handling on minus-strand genes.
+- **Incomplete CDSs** (GENCODE `cds_start_NF`/`cds_end_NF`, partial RefSeq
+  CDSs): numbered in VEP's padded frame; a partial codon gets `p.?`.
+- **Short exon gaps** (13 bases or fewer) are frameshift introns: no splice or
+  intron terms inside them.
+- **RefSeq transcripts that differ from the genome**: numbers the genome
+  alignment would shift are withheld rather than reported wrong.
+- **Selenocysteine codons**: `TGA` there reads as `Sec`.
+- **Pseudoautosomal transcripts**: one copy on chrX and one on chrY.
 
-### Runtime characteristics
-- **Memory-mapped reference genome** — base fetches are a pointer
-  dereference (~5 ns), not a BGZF block decompression.
-- **Thread-safe** — `VarEffect`, `TranscriptStore`, and `FastaReader` are
-  all `Send + Sync` with zero interior mutability. A compile-time assertion
-  in `lib.rs` guarantees this for every release.
-- **Zero external runtime** — no network, no database, no background
-  workers. Load two files at startup, share an `Arc<VarEffect>` across your
-  worker pool, call `.annotate(...)`.
+The details, with VEP examples, are in
+[`VEP_DIVERGENCES.md`](./VEP_DIVERGENCES.md).
 
-## What vareffect does not do
+## Other entry points
 
-- No regulatory / TFBS / motif annotation layer.
-- No co-located variant lookup (no gnomAD, ClinVar, dbSNP).
-- No allele frequency or population annotation.
-- No canonical transcript *selection* — every overlapping or nearby transcript is
-  returned with its tier metadata; callers decide which to keep.
-- No multi-allele VCF splitting — the caller must split comma-separated
-  `ALT`s before invoking `annotate`.
-- No plugin system.
-- No alternate genome builds out of the box — GRCh37 or CHM13 require
-  regenerating the transcript and genome binaries with your own build.
-
-See [`VEP_DIVERGENCES.md`](./VEP_DIVERGENCES.md) for the complete list of
-intentional divergences from VEP and features that are not yet implemented.
-
-## Setting up the data files
-
-`vareffect` does not ship reference data. You provide two files at runtime:
-
-1. **`transcript_models.bin`** — a versioned store file: a 12-byte header
-   (magic plus format version) followed by a MessagePack payload naming the
-   transcript source and release and holding the `Vec<TranscriptModel>`,
-   built from the configured source's GFF3 (MANE by default). A store
-   from another format version, including one written before versioning
-   (vareffect 0.5 and earlier), is refused at load time; rebuild it with
-   `vareffect setup`.
-2. **`GRCh38.bin`** (or whatever build you use) — a flat uppercase-IUPAC
-   binary plus a `.bin.idx` MessagePack sidecar produced by the builder.
-
-### Recommended: use `vareffect-cli`
-
-The companion crate `vareffect-cli` ships a `vareffect` binary that handles
-the entire provisioning flow in one command. It downloads the GRCh38
-reference FASTA from NCBI, writes the flat-binary genome + index, fetches
-the latest MANE release GFF3 + summary, builds the transcript store, and
-writes NCBI patch-contig aliases — all under `data/vareffect/`.
-
-```bash
-cargo install vareffect-cli
-
-# Scaffold a config file (one-time):
-vareffect init
-
-# Full provisioning (GRCh38 genome + MANE transcript models).
-vareffect setup
-
-# Validate everything is in place:
-vareffect check
-
-# Write runtime files to a custom directory instead of the config default:
-vareffect setup --output /data/genomes/vareffect
-
-# Only the reference genome:
-vareffect setup --fasta-only
-
-# Only rebuild the transcript model store (reuses an existing genome):
-vareffect setup --models-only
-```
-
-`setup` is idempotent — source archives are cached in `data/raw/`, the
-genome binary is skipped if it already exists, and transcript models are
-rebuilt on every run so a new MANE release picks up automatically.
-
-After `vareffect setup` finishes, you have the layout the library expects:
-
-```text
-data/vareffect/
-  GRCh38.bin               # flat-binary reference genome
-  GRCh38.bin.idx           # MessagePack contig index
-  transcript_models.bin    # versioned transcript store
-  patch_chrom_aliases.csv  # UCSC <-> RefSeq patch-contig map
-```
-
-### Alternative: roll your own
-
-If you're building a custom store (a different transcript source, a
-non-human genome, a subset of the human transcriptome), the
-[`fasta::write_genome_binary`] function is public so you can generate the
-flat binary yourself:
-
-```rust,no_run
-use std::path::Path;
-use vareffect::fasta::write_genome_binary;
-
-# fn main() -> Result<(), vareffect::VarEffectError> {
-// Uppercase ASCII bytes, one contig per tuple.
-let chr_toy: &[u8] = b"ACGTACGTNNN";
-let contigs: &[(&str, &[u8])] = &[("chrToy", chr_toy)];
-
-write_genome_binary(
-    contigs,
-    "toy",                               // build label, stored in the index
-    Path::new("out/toy.bin"),            // flat binary
-    Path::new("out/toy.bin.idx"),        // MessagePack index sidecar
-)?;
-# Ok(())
-# }
-```
-
-Building the transcript store by hand means producing a
-`Vec<vareffect::TranscriptModel>` (with `TranscriptModel::new` and its
-`with_*` setters) and writing it with [`encode_transcript_store`], which adds
-the versioned header and the source and release the loader reports; see `vareffect-cli/src/builders/transcript_models/` in the source
-tree for a worked example.
-
-```rust,no_run
-use std::path::Path;
-use vareffect::{TranscriptModel, TranscriptSource, TranscriptStore, encode_transcript_store};
-
-# fn build_models() -> Vec<TranscriptModel> { unimplemented!() }
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-// At least one model: an empty store is refused (`VarEffectError::EmptyStore`).
-let models: Vec<TranscriptModel> = build_models();
-let bytes = encode_transcript_store(Some(TranscriptSource::Mane), Some("1.5"), &models)?;
-std::fs::write("out/transcript_models.bin", &bytes)?;
-let store = TranscriptStore::load_from_path(Path::new("out/transcript_models.bin"))?;
-# Ok(())
-# }
-```
-
-## HGVS reverse resolution
-
-Take an HGVS c. string, resolve it to plus-strand genomic coordinates, and
-feed the result straight back into `annotate` — useful when your input is
-transcript-relative rather than coordinate-based:
+- **VEP JSON**: `annotate_to_vep_json` returns the same results shaped like
+  VEP REST output.
+- **Structural variants**: `annotate_interval` (DEL, DUP, INV),
+  `annotate_breakend` (`<BND>`) and `annotate_sv_insertion` (`<INS>`) return
+  VEP's region-level terms (`transcript_ablation`, `feature_truncation`, ...)
+  with exon-overlap geometry for CNV scoring.
+- **HGVS back to coordinates**: `resolve_hgvs_c` maps a transcript-relative
+  name to genomic coordinates; `resolve_hgvs_g` takes a `g.` or `m.` name and
+  returns the left-aligned, VCF-canonical variant.
 
 ```rust,no_run
 # use vareffect::VarEffect;
 # fn example(ve: &VarEffect) -> Result<(), vareffect::VarEffectError> {
 let gv = ve.resolve_hgvs_c("NM_000546.6:c.742C>T")?;
-
 let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
 # let _ = results;
 # Ok(())
 # }
 ```
 
-`resolve_hgvs_c` supports substitutions, deletions, insertions,
-duplications, and delins across CDS, 5' UTR, 3' UTR, and intronic
-positions.
+## Conventions
 
-The genomic counterpart `resolve_hgvs_g` takes a `g.` (or `m.`) string
-directly — no transcript needed — and returns the **left-aligned,
-VCF-canonical** variant:
+- **Coordinates** are 0-based and half-open (BED style) everywhere in the API.
+- **Chromosomes** use UCSC names (`chr17`, `chrM`); `17` and `NC_000017.11`
+  are accepted too. Patch contigs need `VarEffect::open_with_patch_aliases`
+  and the alias CSV that `vareffect setup` writes.
+- **Alleles** are uppercase plus-strand bytes. The reference allele is checked
+  against the genome before annotation; a mismatch is an error.
+- **`chrM`** translates with the vertebrate mitochondrial code (NCBI table 2).
+- **Threads**: `VarEffect` is `Send + Sync` with no interior mutability. Load
+  it once, wrap it in `Arc` and share it.
+
+## Building the data yourself
+
+`vareffect setup` is the supported path: it downloads the GRCh38 FASTA and
+the configured transcript source and writes everything to `data/vareffect/`.
+To build your own genome or store (another source, another species, a subset),
+use the same public functions the CLI uses:
 
 ```rust,no_run
-# use vareffect::VarEffect;
-# fn example(ve: &VarEffect) -> Result<(), vareffect::VarEffectError> {
-let gv = ve.resolve_hgvs_g("NC_000017.11:g.43057065dup")?;
-// Left-aligned: chr17, 0-based 43057061, T > TG (bcftools-concordant).
-let results = ve.annotate(&gv.chrom, gv.pos, &gv.ref_allele, &gv.alt_allele)?;
-# let _ = results;
+use std::path::Path;
+use vareffect::fasta::write_genome_binary;
+use vareffect::{TranscriptModel, TranscriptSource, encode_transcript_store};
+
+# fn build_models() -> Vec<TranscriptModel> { unimplemented!() }
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+// Genome: uppercase ASCII, one contig per tuple.
+let contigs: &[(&str, &[u8])] = &[("chrToy", &b"ACGTACGTNNN"[..])];
+write_genome_binary(contigs, "toy", Path::new("toy.bin"), Path::new("toy.bin.idx"))?;
+
+// Transcripts: build `TranscriptModel`s with `TranscriptModel::new` and its
+// `with_*` setters (an empty store is refused), then encode them.
+let models = build_models();
+let bytes = encode_transcript_store(Some(TranscriptSource::Mane), Some("1.5"), &models)?;
+std::fs::write("transcript_models.bin", &bytes)?;
 # Ok(())
 # }
 ```
 
-It covers substitution, deletion, duplication, insertion, delins, and
-inversion. Unlike `resolve_hgvs_c` (which emits the raw form), `resolve_hgvs_g`
-left-aligns indels/dups to the 5'-most parsimonious locus, so the same
-repeat-region variant can differ between the two paths — normalize both before
-hashing an identity. Identity (`=`), imprecise/templated notation, and
-non-chromosomal references are rejected rather than mis-mapped.
+The GFF3 builder in `vareffect-cli/src/builders/transcript_models/` is a
+complete example.
 
-## Threading model
+## Limits
 
-`VarEffect`, `TranscriptStore`, and `FastaReader` are all `Send + Sync` —
-construct one `VarEffect` at startup, wrap it in `std::sync::Arc`, and
-share it across every worker thread or async task. There is no interior
-mutability, no contention, and no hidden cloning cost; every thread reads
-from the same memory-mapped bytes.
-
-## Coordinate conventions
-
-- **0-based, half-open** (BED / UCSC) for every coordinate in the public
-  API. GFF3's 1-based-fully-closed input is converted at build time.
-- **UCSC chromosome names** (`chr17`, `chrM`). The `FastaReader` has an
-  alias table so it can transparently accept `"17"`, `"NC_000017.11"`, etc.
-  Patch-contig lookups additionally need `open_with_patch_aliases` and a
-  `refseq,ucsc` alias CSV (written automatically by `vareffect setup`).
-- **Uppercase ASCII** allele bytes — no case coercion at call time, so
-  lowercase input is a bug in your code, not something we silently fix.
-
-## VEP feature parity
-
-`vareffect` targets near-100% concordance with VEP release 115 / 116 on the
-core coding and transcript consequence layer. Every intentional divergence,
-not-yet-implemented feature, and out-of-scope design decision is catalogued
-in [`VEP_DIVERGENCES.md`](./VEP_DIVERGENCES.md). The validation suite lives
-in `tests/vep_concordance_*.rs`.
+No regulatory annotation, no co-located variant or frequency lookup, no
+plugin system and no canonical-transcript selection (every result carries its
+tier; you choose). Split multi-allelic records before calling `annotate`.
+GRCh37 and CHM13 need their own genome and transcript builds. Everything that
+differs from VEP is in [`VEP_DIVERGENCES.md`](./VEP_DIVERGENCES.md).
 
 ## Testing
-
-The unit and fast integration tests run with no external data:
 
 ```bash
 cargo test -p vareffect
 ```
 
-The VEP concordance tests are `#[ignore]`-gated because they need the
-transcript store and reference genome on disk (run `vareffect setup` first
-if you haven't already):
+The VEP concordance suites need the built data and are `#[ignore]`-gated:
 
 ```bash
-FASTA_PATH="$(pwd)/data/vareffect/GRCh38.bin" CONCORDANCE_THREADS=1 \
-    cargo test -p vareffect --release -- --ignored vep_concordance
+FASTA_PATH="$PWD/data/vareffect/GRCh38.bin" \
+    cargo test -p vareffect --release --no-fail-fast --test '*' -- --ignored
 ```
 
 ## License
 
-Apache License, Version 2.0
-  ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-
+Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+<https://www.apache.org/licenses/LICENSE-2.0>).
 
 ## Contributing
 
-Contributions are welcome. The most valuable areas for outside help are:
-
-- Adding SO terms currently listed as not-yet-implemented in
-  `VEP_DIVERGENCES.md` (splice polypyrimidine-tract, donor region, donor
-  5th base).
-- Broadening the VEP concordance corpus in `tests/vep_concordance_*.rs`
-  with variants that stress a part of the pipeline that isn't already
-  covered.
-- Alternate genome build support (GRCh37, CHM13) in the `vareffect-cli`
-  provisioning flow.
-
-Open an issue before starting on anything larger than a bug fix so we can
-agree on scope.
+Contributions are welcome, especially VEP concordance cases that exercise an
+untested path and alternate genome builds in the CLI. Open an issue before
+starting anything larger than a bug fix.
