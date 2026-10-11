@@ -3543,6 +3543,110 @@ fn deletion_from_the_intron_shifted_into_the_cds_takes_its_hgvs_p() {
     assert_eq!(intronic.hgvs_p, None, "{intronic:?}");
 }
 
+// -- Frameshift through the stop codon -------------------------------------
+
+/// A frameshift whose first changed residue is the reference stop is an
+/// extension, counted from the first codon after the old stop (VEP 116
+/// NM_001321821.2 c.1275_1276dup `p.Ter426CysextTer4`, NM_152263.4 c.855del
+/// `p.Ter286AsnextTer73`), and `extTer?` without a stop in the 3'UTR
+/// (NM_000190.4 c.1084del `p.Ter362AsnextTer?`).
+#[test]
+fn frameshift_replacing_the_stop_is_an_extension() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+    // Stop `TAA` at 4497; 3'UTR poly-A with `TAA` at 4502.
+    // `T` deleted: AAA AAA TAA... reads AAA ATA AAA..., no stop.
+    let one = annotate_deletion("chr4", 4497, 4498, b"T", &tx, &idx, &fasta).unwrap();
+    assert!(has(&one, Consequence::FrameshiftVariant), "{one:?}");
+    assert_eq!(one.hgvs_p.as_deref(), Some("p.Ter500LysextTer?"));
+    assert_eq!(one.ptc, PtcStatus::NoStopCodon);
+    // `TA` deleted: AAA then the planted TAA.
+    let two = annotate_deletion("chr4", 4497, 4499, b"TA", &tx, &idx, &fasta).unwrap();
+    assert_eq!(two.hgvs_p.as_deref(), Some("p.Ter500LysextTer1"));
+    assert_eq!(two.ptc.protein_position(), Some(501));
+}
+
+/// A deletion just before the stop codon in a repeat leaves the last codon
+/// unchanged and the alternate frame ending before the stop; the 3'UTR is
+/// read on to find the change (VEP 116 NM_000190.4 c.1084del, VCF position
+/// c.1083: `p.Ter362AsnextTer?`, formerly `p.Ter362?fsTer?` here).
+#[test]
+fn deletion_before_the_stop_reads_on_into_the_utr() {
+    let mut chr4 = ptc_chr4();
+    // Last sense codon `TAT`, so its final `T` repeats the stop's first base.
+    chr4[4494..4497].copy_from_slice(b"TAT");
+    let (_tmp, fasta) = write_chr4_fasta(&chr4);
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+    let r = annotate_deletion("chr4", 4496, 4497, b"T", &tx, &idx, &fasta).unwrap();
+    assert!(has(&r, Consequence::FrameshiftVariant), "{r:?}");
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter500LysextTer?"));
+    assert_eq!(r.ptc, PtcStatus::NoStopCodon);
+}
+
+/// A frameshift that keeps the stop codon leaves the protein unchanged:
+/// `p.Ter{N}=` (VEP 116 NM_000969.5 c.890_893dup `p.Ter298=`, NM_000179.3
+/// c.4069_4082dup `p.Ter1361=`), never a residue past the stop.
+#[test]
+fn frameshift_keeping_the_stop_is_unchanged() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+    // ...TAC TAA AA: `AGCT` inserted after the stop's `T` (3'-shifted one
+    // base to `GCTA`) reads TAC TAG CTA AAA..., a stop at codon 500 still.
+    let r = annotate_insertion("chr4", 4498, b"AGCT", &tx, &idx, &fasta).unwrap();
+    // VEP 116 calls these `stop_retained_variant` (VEP_DIVERGENCES.md 8).
+    assert!(has(&r, Consequence::FrameshiftVariant), "{r:?}");
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter500="));
+}
+
+/// An insertion inside the last sense codon reaches the 3'UTR through the
+/// trailing-base continuation: TAC|T|TAA AA TAA reads TAT CTA AAA TAA, so
+/// Leu replaces the stop and the new stop is the second codon after it.
+#[test]
+fn extension_through_the_utr_continuation() {
+    let (_tmp, fasta) = write_ptc_fasta();
+    let tx = ptc_transcript();
+    let idx = build_index(&tx);
+    let r = annotate_insertion("chr4", 4496, b"T", &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter500LeuextTer2"));
+    assert_eq!(r.ptc.protein_position(), Some(502));
+}
+
+/// The selenocysteine rule carries over to extensions: VEP 116 counts to
+/// the first stop of the whole alternate translation, the upstream `TGA`.
+#[test]
+fn selenoprotein_stop_frameshift_extension_is_unknown() {
+    let mut chr4 = ptc_chr4();
+    chr4[1800..1803].copy_from_slice(b"TGA");
+    // After deleting the stop's `T`: AAA then this TAA.
+    chr4[4501..4504].copy_from_slice(b"TAA");
+    let (_tmp, fasta) = write_chr4_fasta(&chr4);
+    let mut tx = ptc_transcript();
+    let idx = build_index(&tx);
+    let plain = annotate_deletion("chr4", 4497, 4498, b"T", &tx, &idx, &fasta).unwrap();
+    assert_eq!(plain.hgvs_p.as_deref(), Some("p.Ter500LysextTer1"));
+    tx.selenocysteine_codons = vec![1800];
+    let idx = build_index(&tx);
+    let sec = annotate_deletion("chr4", 4497, 4498, b"T", &tx, &idx, &fasta).unwrap();
+    assert_eq!(sec.hgvs_p.as_deref(), Some("p.Ter500LysextTer?"));
+    assert_eq!(sec.ptc.protein_position(), Some(501));
+}
+
+/// Minus strand: deleting the stop's first coding base (genomic 11002) reads
+/// AA + the poly-T coding 3'UTR, `AAT TTT ...`, with no stop.
+#[test]
+fn minus_strand_stop_frameshift_is_an_extension() {
+    let (_tmp, fasta) = write_test_fasta();
+    let tx = minus_strand_coding();
+    let idx = build_index(&tx);
+    let r = annotate_deletion("chr17", 11002, 11003, b"A", &tx, &idx, &fasta).unwrap();
+    assert_eq!(r.hgvs_c.as_deref(), Some("NM_TEST_MINUS.1:c.4498del"));
+    assert_eq!(r.hgvs_p.as_deref(), Some("p.Ter1500AsnextTer?"));
+    assert_eq!(r.ptc, PtcStatus::NoStopCodon);
+}
+
 // -- Selenocysteine ---------------------------------------------------------
 
 /// [`ptc_transcript`] with a selenocysteine codon at codon 101 (CDS offsets

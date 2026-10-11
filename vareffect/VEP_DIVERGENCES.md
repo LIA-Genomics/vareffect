@@ -405,6 +405,12 @@ for exon numbers) next to it.
   and calls even a frameshifting one `inframe_insertion,stop_retained_variant`
   (NM_000546.6 c.1179_1180insTAAG, `-/*`, `p.Ter394delinsTer`). `vareffect`
   keeps `frameshift_variant` without `stop_gained`.
+- **A frameshift that keeps the stop codon.** A frameshifting indel at or
+  just before the stop codon whose alternate frame reads a stop at the same
+  residue is `stop_retained_variant` (LOW) in VEP 116 (NM_000179.3 c.4082del,
+  NM_000478.6 c.1574del, `p.Ter1361=`, `p.Ter525=`). `vareffect` writes the
+  same HGVS p. but keeps `frameshift_variant` (HIGH), with `ptc`
+  `Indeterminate`: an overcall for PVS1, to be fixed.
 - **Unknown bases in the alternate allele.** An `N` (or any base other than
   A, C, G, T) gives VEP 116 no peptide, so every term read from the peptide
   becomes `coding_sequence_variant` (`coding_unknown`), and VEP writes no

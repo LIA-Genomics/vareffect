@@ -232,6 +232,22 @@ For releases before `0.5.0`, see the git history.
 
 ### Fixed
 
+- HGVS p. of a frameshift through the stop codon follows VEP 116. A
+  frameshift whose first changed residue is the stop is an extension,
+  `p.Ter362AsnextTer?` or `p.Ter426CysextTer4` (counted from the first codon
+  after the old stop, one less than the former `fsTer`), instead of
+  `p.Ter426CysfsTer5`. A deletion just before the stop codon now reads on
+  into the 3'UTR to find its first changed residue instead of writing the
+  malformed `p.Ter362?fsTer?` or `p.Lys141?fsTer?` (or no HGVS p.), and a
+  frameshift that rebuilds the stop codon is `p.Ter298=` instead of naming a
+  residue past the stop. `ptc` moves with it: the read-on cases now carry the
+  located stop or `NoStopCodon` instead of `Indeterminate` (ClinVar on MANE:
+  80 transcript results), and a frameshift that keeps the stop is
+  `Indeterminate` instead of a residue past the stop (14); no result moves
+  into or out of a predicted NMD. Such a frameshift is still
+  `frameshift_variant` where VEP 116 has `stop_retained_variant`
+  (`VEP_DIVERGENCES.md` 8). The `vep_large_concordance` ground truth, from an
+  earlier VEP release, still has `fsTer` for these extensions.
 - Variants near a 3' partial codon no longer fail with `Malformed`
   ("sequence length N is not divisible by 3" or "CDS offsets outside the
   CDS"), which dropped every transcript's annotation for the variant. An
